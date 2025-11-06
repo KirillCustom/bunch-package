@@ -177,8 +177,8 @@ function applyPatches(): void {
     console.log(`  Applying ${patchFile}...`);
 
     try {
-      const result = execSync(
-        `patch -p0 --forward --batch --silent --input="${patchPath}"`,
+      execSync(
+        `patch -p1 --forward --batch --silent --input="${patchPath}"`,
         {
           cwd: process.cwd(),
           stdio: 'pipe',
