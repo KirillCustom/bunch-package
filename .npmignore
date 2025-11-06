@@ -1,0 +1,6 @@
+node_modules/
+.bunch-patch-tmp/
+*.log
+.DS_Store
+index.ts
+tsconfig.json

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+bun.lockb
+bun.lock
+.bunch-patch-tmp/
+*.log
+.DS_Store
+.idea/
