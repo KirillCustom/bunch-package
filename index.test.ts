@@ -1,7 +1,14 @@
 import {describe, test, expect, beforeEach, afterEach} from 'bun:test';
 import {execSync} from 'child_process';
-import {existsSync, mkdirSync, readFileSync, writeFileSync, rmSync} from 'fs';
+import {existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {join} from 'path';
+
+// writeFileSync пишет в тот же inode, что ломает тесты при hardlink-кеше bun.
+// Удаляем файл перед записью, чтобы разорвать hardlink.
+function overwriteFile(path: string, content: string) {
+  if (existsSync(path)) unlinkSync(path);
+  writeFileSync(path, content);
+}
 
 const TEST_DIR = join(import.meta.dir, '.test-sandbox');
 const CLI = join(import.meta.dir, 'index.ts');
@@ -60,7 +67,7 @@ describe('bunch-package create', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
     const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
     const original = readFileSync(indexPath, 'utf-8');
-    writeFileSync(indexPath, original + '\n// patched by test');
+    overwriteFile(indexPath, original + '\n// patched by test');
 
     const result = run('create is-number', TEST_DIR);
     expect(result.exitCode).toBe(0);
@@ -73,7 +80,7 @@ describe('bunch-package create', () => {
   test('patch contains relative paths, not absolute', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
     const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
-    writeFileSync(indexPath, 'module.exports = "changed";');
+    overwriteFile(indexPath, 'module.exports = "changed";');
 
     run('create is-number', TEST_DIR);
 
@@ -95,7 +102,7 @@ describe('bunch-package create', () => {
   test('outputs hash and stats', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
     const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
-    writeFileSync(indexPath, 'module.exports = "changed";');
+    overwriteFile(indexPath, 'module.exports = "changed";');
 
     const result = run('create is-number', TEST_DIR);
     expect(result.stdout).toContain('Hash:');
@@ -121,12 +128,12 @@ describe('bunch-package apply', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
     const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
     const original = readFileSync(indexPath, 'utf-8');
-    writeFileSync(indexPath, original + '\n// bunch-test-marker');
+    overwriteFile(indexPath, original + '\n// bunch-test-marker');
 
     run('create is-number', TEST_DIR);
 
     // Восстанавливаем оригинал
-    writeFileSync(indexPath, original);
+    overwriteFile(indexPath, original);
 
     // Применяем патч
     const result = run('apply', TEST_DIR);
@@ -162,7 +169,7 @@ describe('bunch-package apply', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
     const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
     const original = readFileSync(indexPath, 'utf-8');
-    writeFileSync(indexPath, original + '\n// already-applied-marker');
+    overwriteFile(indexPath, original + '\n// already-applied-marker');
 
     run('create is-number', TEST_DIR);
 
