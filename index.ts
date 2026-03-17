@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import {execSync} from 'child_process';
+import {execSync, execFileSync} from 'child_process';
 import {createHash} from 'crypto';
 import {existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync} from 'fs';
 import {join} from 'path';
@@ -44,7 +44,14 @@ const EXCLUDE_PATTERNS = [
   '*.woff2',
 ];
 
+function validatePackageName(name: string): void {
+  if (!/^(@[\w.-]+\/)?[\w.-]+$/.test(name)) {
+    throw new Error(`Invalid package name: ${name}`);
+  }
+}
+
 function createPatch(packageName: string): void {
+  validatePackageName(packageName);
   console.log(`📦 Creating patch for ${packageName}...`);
 
   const nodeModulesPath = join(process.cwd(), 'node_modules');
@@ -75,19 +82,18 @@ function createPatch(packageName: string): void {
     console.log(`📥 Installing clean version of ${name}@${version}...`);
 
     try {
-      execSync(`cd "${tempDir}" && bun add ${name}@${version}`, {
+      execFileSync('bun', ['add', `${name}@${version}`], {
+        cwd: tempDir,
         stdio: 'pipe',
         timeout: 60000,
       });
     } catch {
       console.log(`⚠️  Trying with npm...`);
-      execSync(
-        `cd "${tempDir}" && npm install --no-save --legacy-peer-deps ${name}@${version}`,
-        {
-          stdio: 'pipe',
-          timeout: 60000,
-        },
-      );
+      execFileSync('npm', ['install', '--no-save', '--legacy-peer-deps', `${name}@${version}`], {
+        cwd: tempDir,
+        stdio: 'pipe',
+        timeout: 60000,
+      });
     }
 
     const cleanPackagePath = join(tempDir, 'node_modules', packageName);
@@ -195,13 +201,10 @@ function applyPatches(): void {
     console.log(`  Applying ${patchFile}...`);
 
     try {
-      execSync(
-        `patch -p1 --forward --batch --silent --input="${patchPath}"`,
-        {
-          cwd: process.cwd(),
-          stdio: 'pipe',
-        },
-      );
+      execFileSync('patch', ['-p1', '--forward', '--batch', '--silent', `--input=${patchPath}`], {
+        cwd: process.cwd(),
+        stdio: 'pipe',
+      });
       applied++;
       console.log(`  ✅ ${patchFile}`);
     } catch (error: any) {
