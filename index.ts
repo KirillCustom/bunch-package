@@ -2,7 +2,7 @@
 
 import {execSync} from 'child_process';
 import {createHash} from 'crypto';
-import {existsSync, mkdirSync, readFileSync, writeFileSync, rmSync} from 'fs';
+import {existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync} from 'fs';
 import {join} from 'path';
 
 const PATCHES_DIR = 'patches';
@@ -97,7 +97,7 @@ function createPatch(packageName: string): void {
     // Строим команду diff с исключениями
     const excludeArgs = EXCLUDE_PATTERNS.map(p => `--exclude=${p}`).join(' ');
 
-    const patchContent = execSync(
+    const rawPatch = execSync(
       `diff -Naur ${excludeArgs} --no-dereference "${cleanPackagePath}" "${packagePath}" || true`,
       {
         encoding: 'utf-8',
@@ -105,11 +105,16 @@ function createPatch(packageName: string): void {
       },
     );
 
-    if (!patchContent.trim()) {
+    if (!rawPatch.trim()) {
       console.log('⚠️  No changes detected');
       console.log(`\n💡 Did you modify files in ${packagePath}?`);
       return;
     }
+
+    // Заменяем абсолютные пути на относительные для переносимости
+    const patchContent = rawPatch
+      .split(cleanPackagePath).join(`a/node_modules/${packageName}`)
+      .split(packagePath).join(`b/node_modules/${packageName}`);
 
     // Проверяем размер патча
     const patchLines = patchContent.split('\n').length;
@@ -159,9 +164,7 @@ function applyPatches(): void {
     return;
   }
 
-  const fs = require('fs');
-  const patchFiles = fs
-    .readdirSync(PATCHES_DIR)
+  const patchFiles = readdirSync(PATCHES_DIR)
     .filter((f: string) => f.endsWith('.patch'));
 
   if (patchFiles.length === 0) {
@@ -174,6 +177,21 @@ function applyPatches(): void {
 
   for (const patchFile of patchFiles) {
     const patchPath = join(PATCHES_DIR, patchFile);
+
+    // Проверяем совпадение версии пакета с версией в патче
+    const match = patchFile.match(/^(.+)\+(\d+\..+)\.patch$/);
+    if (match) {
+      const patchPkgName = match[1].replace(/\+/g, '/');
+      const patchVersion = match[2];
+      const pkgJsonPath = join('node_modules', patchPkgName, 'package.json');
+      if (existsSync(pkgJsonPath)) {
+        const installedVersion = JSON.parse(readFileSync(pkgJsonPath, 'utf-8')).version;
+        if (installedVersion !== patchVersion) {
+          console.log(`  ⚠️  ${patchFile} — version mismatch (patch: ${patchVersion}, installed: ${installedVersion})`);
+        }
+      }
+    }
+
     console.log(`  Applying ${patchFile}...`);
 
     try {

@@ -3,6 +3,7 @@ dist/
 bun.lockb
 bun.lock
 .bunch-patch-tmp/
+.test-sandbox/
 *.log
 .DS_Store
 .idea/

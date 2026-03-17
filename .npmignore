@@ -3,4 +3,7 @@ node_modules/
 *.log
 .DS_Store
 index.ts
+index.test.ts
+.test-sandbox/
+.github/
 tsconfig.json
