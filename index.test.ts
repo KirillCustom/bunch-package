@@ -176,6 +176,71 @@ describe('bunch-package apply', () => {
     // Применяем патч — он уже применён
     const result = run('apply', TEST_DIR);
     expect(result.stdout).toContain('already applied');
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('marks unappliable patch as failed', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': 'const a = 1;',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/missing.js
++++ b/node_modules/test-lib/missing.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).not.toContain('already applied');
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test('prints the diagnostic from patch when a hunk does not fit', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': 'const totally = "different";',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    // Apple patch пишет 'hunks failed', GNU — 'hunk FAILED'.
+    expect(result.stdout).toMatch(/hunk/i);
+  });
+
+  test('rejects patch with absolute paths left by old versions', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': 'const a = 1;',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- /Users/someone/proj/.bunch-patch-tmp/node_modules/test-lib/index.js
++++ /Users/someone/proj/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).not.toContain('already applied');
+    expect(result.stdout).toContain('absolute paths');
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.exitCode).not.toBe(0);
+
+    const untouched = readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8');
+    expect(untouched).toBe('const a = 1;');
   });
 });
 

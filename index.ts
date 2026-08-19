@@ -161,6 +161,43 @@ function createPatch(packageName: string): void {
   }
 }
 
+// patch(1) возвращает 1 и когда патч уже в дереве, и когда файл не найден, и
+// когда разошёлся контекст — по коду возврата эти случаи не различить. Поэтому
+// «уже применён» проверяем отдельно: если патч ложится в обратную сторону,
+// значит его изменения уже на месте. --dry-run при этом ничего не пишет на диск.
+//
+// --forward здесь обязателен: без него patch на ещё не применённом патче видит
+// «reversed patch detected», сам переворачивает его обратно в forward и выходит
+// с нулём — то есть отвечает «уже применён» вообще на что угодно.
+function isAlreadyApplied(patchPath: string): boolean {
+  try {
+    execFileSync('patch', ['-p1', '-R', '--forward', '--dry-run', '--batch', '--silent', `--input=${patchPath}`], {
+      cwd: process.cwd(),
+      stdio: 'pipe',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Патчи, созданные до 1.1.0, содержат в заголовках абсолютные пути. Под -p1 такой
+// путь не находится, а patch ещё и пытается разложить .rej по несуществующим
+// директориям — поэтому такие патчи отсеиваем до вызова patch.
+function hasAbsolutePaths(patchContent: string): boolean {
+  return patchContent
+    .split('\n')
+    .some(line => /^(---|\+\+\+) \//.test(line) && !/^(---|\+\+\+) \/dev\/null/.test(line));
+}
+
+// Apple patch пишет диагностику в stdout, GNU — в stderr. Читаем оба потока.
+function firstDiagnosticLine(error: any): string {
+  return `${error.stderr?.toString() ?? ''}\n${error.stdout?.toString() ?? ''}`
+    .split('\n')
+    .map((line: string) => line.trim())
+    .filter(Boolean)[0] ?? '';
+}
+
 // Apply patches function
 function applyPatches(): void {
   console.log(`🔧 Applying patches...`);
@@ -200,6 +237,19 @@ function applyPatches(): void {
 
     console.log(`  Applying ${patchFile}...`);
 
+    if (hasAbsolutePaths(readFileSync(patchPath, 'utf-8'))) {
+      failed++;
+      console.log(`  ❌ ${patchFile}`);
+      console.log(`     absolute paths in patch headers — created by bunch-package < 1.1.0, recreate it with \`create\``);
+      continue;
+    }
+
+    if (isAlreadyApplied(patchPath)) {
+      applied++;
+      console.log(`  ✅ ${patchFile} (already applied)`);
+      continue;
+    }
+
     try {
       execFileSync('patch', ['-p1', '--forward', '--batch', '--silent', `--input=${patchPath}`], {
         cwd: process.cwd(),
@@ -208,21 +258,20 @@ function applyPatches(): void {
       applied++;
       console.log(`  ✅ ${patchFile}`);
     } catch (error: any) {
-      // Exit code 1 означает что патч уже применен (--forward)
-      if (error.status === 1) {
-        applied++;
-        console.log(`  ✅ ${patchFile} (already applied)`);
-      } else {
-        failed++;
-        console.log(`  ❌ ${patchFile}`);
-        if (error.stderr) {
-          console.log(`     ${error.stderr.toString().split('\n')[0]}`);
-        }
+      failed++;
+      console.log(`  ❌ ${patchFile}`);
+      const diagnostic = firstDiagnosticLine(error);
+      if (diagnostic) {
+        console.log(`     ${diagnostic}`);
       }
     }
   }
 
   console.log(`\n📊 Summary: ${applied} applied, ${failed} failed`);
+
+  if (failed > 0) {
+    process.exit(1);
+  }
 }
 
 // Main

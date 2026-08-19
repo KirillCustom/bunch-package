@@ -74,6 +74,24 @@ bunx bunch-package apply
 
 Applies all patches from the `patches/` directory.
 
+A patch counts as applied only when its changes are actually in the tree: before
+applying, `bunch-package` checks whether the patch reverses cleanly, which is the
+only reliable way to tell "already applied" from "the file was not found" — `patch`
+returns the same exit code for both.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Every patch is in the tree (applied now or already applied) |
+| `1` | At least one patch failed — the reason from `patch` is printed under it |
+
+A non-zero exit makes `postinstall` fail, so a broken patch stops CI instead of
+silently shipping an unpatched build.
+
+Patches created by bunch-package before 1.1.0 contain absolute paths and cannot be
+applied; `apply` reports them as failed and asks you to recreate them with `create`.
+
 ## What gets excluded?
 
 `bunch-package` automatically excludes:
