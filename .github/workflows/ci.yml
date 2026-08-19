@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Инструмент вызывает patch(1), а это разные реализации: на ubuntu GNU,
+    # на macOS Apple. Коды возврата и текст диагностики у них расходятся,
+    # поэтому тесты гоняем на обеих.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      # В логе видно, какая реализация patch отработала — при расхождении
+      # поведения это первое, что нужно знать.
+      - run: patch --version | head -1
+
+      - run: bun test
+
+      - run: bun run build
