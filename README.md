@@ -74,17 +74,17 @@ bunx bunch-package apply
 
 Applies all patches from the `patches/` directory.
 
-A patch counts as applied only when its changes are actually in the tree: before
-applying, `bunch-package` checks whether the patch reverses cleanly, which is the
-only reliable way to tell "already applied" from "the file was not found" — `patch`
-returns the same exit code for both.
+A patch counts as applied only when its changes are actually in the tree. The whole
+patch is computed in memory first, and nothing is written unless every file in it
+fits — so a patch can never leave your tree half-changed, and a failed apply leaves
+no `.rej` or `.orig` files behind. Applying the same patch twice is a no-op.
 
 Exit codes:
 
 | Code | Meaning |
 |------|---------|
 | `0` | Every patch is in the tree (applied now or already applied) |
-| `1` | At least one patch failed — the reason from `patch` is printed under it |
+| `1` | At least one patch failed — the reason is printed under it, and nothing was written |
 
 A non-zero exit makes `postinstall` fail, so a broken patch stops CI instead of
 silently shipping an unpatched build.
@@ -145,7 +145,14 @@ git commit -m "fix: add missing include in react-native-date-picker"
 ## How it works
 
 1. **Create**: Fetches a pristine copy of the package into a temp directory, diffs it against your modified version, and writes the diff as a patch file
-2. **Apply**: Uses the `patch` command to apply all `.patch` files in the `patches/` directory
+2. **Apply**: Applies every `.patch` file in `patches/` itself, without shelling out to `patch(1)`
+
+Unified diffs are parsed and applied in process. That is a deliberate choice: `patch`
+is GNU on Linux and a much older Apple build on macOS, and they disagree on exit
+codes, on the wording of their diagnostics, and on whether a patch is allowed to
+write outside the project at all. Doing it in process also makes the whole patch
+atomic, keeps deletions idempotent, and means paths are checked against the project
+root by us rather than by whichever `patch` happens to be installed.
 
 The pristine copy is installed with an isolated download cache. This matters: bun
 links installed packages to its shared cache, so editing a file in `node_modules`
@@ -166,7 +173,6 @@ to appear *inside* a file is left alone.
 ## Requirements
 
 - Bun >= 1.0.0
-- `patch` command (pre-installed on macOS/Linux)
 
 ## License
 
