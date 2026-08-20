@@ -1,6 +1,6 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
 import {execSync} from 'child_process';
-import {existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync, unlinkSync} from 'fs';
+import {chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {join} from 'path';
 
 // writeFileSync пишет в тот же inode, что ломает тесты при hardlink-кеше bun.
@@ -29,6 +29,10 @@ function run(args: string, cwd: string, env?: Record<string, string>): {stdout: 
   } catch (error: any) {
     return {stdout: (error.stdout || '') + (error.stderr || ''), exitCode: error.status ?? 1};
   }
+}
+
+function isExecutable(path: string): boolean {
+  return (statSync(path).mode & 0o111) !== 0;
 }
 
 function setupFakePackage(dir: string, name: string, version: string, files: Record<string, string>) {
@@ -117,6 +121,30 @@ describe('bunch-package create', () => {
     const result = run('create ..', TEST_DIR);
     expect(result.exitCode).not.toBe(0);
     expect(result.stdout).toContain('Invalid package name');
+  });
+
+  test('captures a change of the executable bit alone', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    chmodSync(indexPath, 0o755);
+
+    const result = run('create is-number', TEST_DIR);
+    expect(result.stdout).not.toContain('No changes detected');
+    expect(result.stdout).toContain('executable bit');
+
+    // git-заголовки: ровно те строки, которые читает patch-package.
+    const patchContent = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patchContent).toContain('old mode 100644');
+    expect(patchContent).toContain('new mode 100755');
+
+    chmodSync(indexPath, 0o644);
+    const applied = run('apply', TEST_DIR);
+    expect(applied.stdout).toContain('1 applied, 0 failed');
+    expect(isExecutable(indexPath)).toBe(true);
+
+    const again = run('apply', TEST_DIR);
+    expect(again.stdout).toContain('already applied');
+    expect(again.exitCode).toBe(0);
   });
 
   test('reports no changes when package is not modified', () => {
@@ -484,6 +512,53 @@ describe('bunch-package apply', () => {
     const leftovers = readdirSync(join(TEST_DIR, 'node_modules', 'test-lib'))
       .filter(name => name.endsWith('.rej') || name.endsWith('.orig'));
     expect(leftovers).toEqual([]);
+  });
+
+  test('keeps the executable bit of a file it patches', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'run.sh': '#!/bin/sh\necho one\n',
+    });
+    const script = join(TEST_DIR, 'node_modules', 'test-lib', 'run.sh');
+    chmodSync(script, 0o755);
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/run.sh
++++ b/node_modules/test-lib/run.sh
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-echo one
++echo two
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(readFileSync(script, 'utf-8')).toContain('echo two');
+    // Запись идёт через пересоздание файла, поэтому режим надо проставлять заново.
+    expect(isExecutable(script)).toBe(true);
+  });
+
+  test('applies a patch that changes nothing but the mode', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'run.sh': '#!/bin/sh\n',
+    });
+    const script = join(TEST_DIR, 'node_modules', 'test-lib', 'run.sh');
+    chmodSync(script, 0o644);
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // Секция без хунков и без ---/+++: путь есть только в строке diff --git.
+    const patchContent = `diff --git a/node_modules/test-lib/run.sh b/node_modules/test-lib/run.sh
+old mode 100644
+new mode 100755
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(isExecutable(script)).toBe(true);
+
+    const again = run('apply', TEST_DIR);
+    expect(again.stdout).toContain('already applied');
   });
 
   test('refuses a patch whose path escapes the project', () => {

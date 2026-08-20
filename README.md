@@ -112,6 +112,24 @@ packages that is where their published JavaScript lives, and dropping it would
 silently discard the change you came to make. Anything skipped is listed in the
 output — `create` never drops a path without saying so.
 
+Binary files cannot be represented in a text diff. `create` lists the ones that
+differ rather than letting the change disappear, and it refuses outright if a
+changed file is not valid UTF-8, because writing that patch would corrupt it.
+
+## File permissions
+
+A change to a file's executable bit is captured and restored, including for files
+the patch creates. It is recorded with the same git headers `patch-package` uses:
+
+```diff
+diff --git a/node_modules/some-package/bin/run.sh b/node_modules/some-package/bin/run.sh
+old mode 100644
+new mode 100755
+```
+
+Only the executable bit is tracked, the way git does it — comparing full permission
+bits would report differences that are really just a different umask.
+
 This keeps your patches small and text-based.
 
 ## Example

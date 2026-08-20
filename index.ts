@@ -2,7 +2,7 @@
 
 import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
-import {existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync} from 'fs';
+import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, rmSync} from 'fs';
 import {join, resolve, sep} from 'path';
 
 const PATCHES_DIR = 'patches';
@@ -57,6 +57,34 @@ function isBuildArtifact(relativePath: string): boolean {
   return ARTIFACT_PREFIXES.some(
     prefix => relativePath === prefix || relativePath.startsWith(`${prefix}/`),
   );
+}
+
+// Смена одного лишь режима в дифф не попадает вовсе, поэтому оба дерева
+// приходится обойти самим. Как и git, из всех прав отслеживаем только бит
+// исполнения: полные режимы сравнивать нельзя — у распакованного эталона и у
+// node_modules разный umask.
+function collectExecutableBits(root: string, prefix = ''): Map<string, boolean> {
+  const found = new Map<string, boolean>();
+  if (!existsSync(root)) return found;
+
+  for (const entry of readdirSync(root, {withFileTypes: true})) {
+    const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isSymbolicLink()) continue;
+
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      if (isBuildArtifact(relative)) continue;
+      for (const [key, value] of collectExecutableBits(join(root, entry.name), relative)) {
+        found.set(key, value);
+      }
+      continue;
+    }
+
+    if (!entry.isFile()) continue;
+    found.set(relative, (statSync(join(root, entry.name)).mode & 0o111) !== 0);
+  }
+
+  return found;
 }
 
 interface DiffSection {
@@ -291,7 +319,21 @@ function createPatch(packageName: string): void {
       }
     }
 
-    if (kept.length === 0) {
+    // Файлы, у которых изменился только бит исполнения: в диффе их нет.
+    const cleanBits = collectExecutableBits(cleanPackagePath);
+    const modifiedBits = collectExecutableBits(packagePath);
+    const changedSections = new Set(kept.map(section => section.relativePath));
+
+    const modeOnly = [...modifiedBits.entries()]
+      .filter(([relativePath, executable]) => {
+        if (changedSections.has(relativePath)) return false;
+        const before = cleanBits.get(relativePath);
+        return before !== undefined && before !== executable;
+      })
+      .map(([relativePath]) => relativePath)
+      .sort();
+
+    if (kept.length === 0 && modeOnly.length === 0) {
       if (skipped.length > 0) {
         console.log('⚠️  No changes outside build artifacts');
         console.log(`\n💡 Everything you changed is under a build directory — those are not patchable.`);
@@ -303,12 +345,39 @@ function createPatch(packageName: string): void {
     }
 
     // Заголовки собираем заново из путей, а тело хунков переносим дословно.
-    const patchContent = kept
-      .map(section => {
-        const path = `node_modules/${packageName}/${section.relativePath}`;
-        return [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, ...section.body].join('\n');
-      })
-      .join('\n') + '\n';
+    const gitMode = (executable: boolean): string => (executable ? '100755' : '100644');
+
+    const renderSection = (relativePath: string, body: string[]): string => {
+      const path = `node_modules/${packageName}/${relativePath}`;
+      const before = cleanBits.get(relativePath);
+      const after = modifiedBits.get(relativePath);
+      const lines = [`diff --git a/${path} b/${path}`];
+
+      if (before === undefined && after !== undefined) {
+        lines.push(`new file mode ${gitMode(after)}`);
+      } else if (before !== undefined && after === undefined) {
+        lines.push(`deleted file mode ${gitMode(before)}`);
+      } else if (before !== undefined && after !== undefined && before !== after) {
+        lines.push(`old mode ${gitMode(before)}`, `new mode ${gitMode(after)}`);
+      }
+
+      if (body.length > 0) {
+        lines.push(before === undefined ? '--- /dev/null' : `--- a/${path}`);
+        lines.push(after === undefined ? '+++ /dev/null' : `+++ b/${path}`);
+        lines.push(...body);
+      }
+
+      return lines.join('\n');
+    };
+
+    const patchContent = [
+      ...kept.map(section => renderSection(section.relativePath, section.body)),
+      ...modeOnly.map(relativePath => renderSection(relativePath, [])),
+    ].join('\n') + '\n';
+
+    if (modeOnly.length > 0) {
+      console.log(`🔑 ${modeOnly.length} file(s) changed only their executable bit`);
+    }
 
     // Проверяем размер патча
     const patchLines = patchContent.split('\n').length;
@@ -375,6 +444,8 @@ interface PatchTarget {
   oldPath: string | null; // null — это /dev/null, то есть файл создаётся
   newPath: string | null; // null — файл удаляется
   hunks: Hunk[];
+  oldMode: string | null; // '100644' / '100755' из git-заголовков
+  newMode: string | null;
 }
 
 function parsePatch(patchContent: string): PatchTarget[] {
@@ -384,8 +455,21 @@ function parsePatch(patchContent: string): PatchTarget[] {
   let oldLeft = 0;
   let newLeft = 0;
   let lastPrefix = '';
+  // Секция закрывается первым же хунком: дальше `---` или `diff --git` начинают
+  // следующий файл, а не дополняют текущий.
+  let open = false;
 
   const asPath = (raw: string): string | null => (raw === '/dev/null' ? null : raw);
+
+  const openTarget = (): PatchTarget => {
+    if (!open || target === null) {
+      target = {oldPath: null, newPath: null, hunks: [], oldMode: null, newMode: null};
+      targets.push(target);
+      open = true;
+      hunk = null;
+    }
+    return target;
+  };
 
   for (const line of patchContent.split('\n')) {
     // `\ No newline at end of file` относится к предыдущей строке и может стоять
@@ -415,8 +499,29 @@ function parsePatch(patchContent: string): PatchTarget[] {
       continue;
     }
 
+    // Секция со сменой одного лишь режима не содержит ---/+++ вовсе, поэтому
+    // пути приходится брать отсюда. Заодно это то, что печатает git.
+    const gitHeader = line.match(/^diff --git (\S+) (\S+)$/);
+    if (gitHeader) {
+      open = false;
+      const fresh = openTarget();
+      fresh.oldPath = gitHeader[1];
+      fresh.newPath = gitHeader[2];
+      continue;
+    }
+
+    // Режимы приходят git-заголовками. patch-package читает ровно эти строки,
+    // поэтому формат патча остаётся с ним совместимым.
+    const modeLine = line.match(/^(old|new|new file|deleted file) mode (\d+)$/);
+    if (modeLine) {
+      const current = openTarget();
+      if (modeLine[1] === 'old' || modeLine[1] === 'deleted file') current.oldMode = modeLine[2];
+      else current.newMode = modeLine[2];
+      continue;
+    }
+
     const head = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
-    if (head && target) {
+    if (head && target !== null) {
       oldLeft = head[2] === undefined ? 1 : Number(head[2]);
       newLeft = head[4] === undefined ? 1 : Number(head[4]);
       hunk = {
@@ -427,25 +532,26 @@ function parsePatch(patchContent: string): PatchTarget[] {
         newNoNewline: false,
       };
       target.hunks.push(hunk);
+      open = false;
       continue;
     }
 
     const oldHeader = line.match(/^--- ([^\t]+)/);
     if (oldHeader) {
-      target = {oldPath: asPath(oldHeader[1]), newPath: null, hunks: []};
-      targets.push(target);
-      hunk = null;
+      const current = openTarget();
+      current.oldPath = asPath(oldHeader[1]);
       continue;
     }
 
     const newHeader = line.match(/^\+\+\+ ([^\t]+)/);
-    if (newHeader && target) {
+    if (newHeader && target !== null) {
       target.newPath = asPath(newHeader[1]);
       continue;
     }
   }
 
-  return targets.filter(t => t.hunks.length > 0);
+  // Секция без хунков осмысленна, если несёт смену режима.
+  return targets.filter(t => t.hunks.length > 0 || t.newMode !== null || t.oldMode !== null);
 }
 
 // Одна сторона хунка: для старой отбрасываем добавленные строки, для новой — удалённые.
@@ -518,10 +624,10 @@ function stripPathPrefix(path: string): string {
   return slash === -1 ? path : path.slice(slash + 1);
 }
 
-interface PlannedWrite {
-  file: string;
-  content: string | null; // null — файл нужно удалить
-}
+type PlannedOp =
+  | {kind: 'write'; file: string; content: string; mode: number | null}
+  | {kind: 'remove'; file: string}
+  | {kind: 'chmod'; file: string; mode: number};
 
 // Единственная защита от выхода за корень проекта. Полагаться здесь на patch(1)
 // было нельзя: GNU такие пути отвергает, Apple спокойно пишет файл наружу.
@@ -541,11 +647,19 @@ function packageDirectoryOf(relativePath: string): string | null {
   return parts.slice(0, depth).join('/');
 }
 
-interface TargetResult {
-  write: PlannedWrite | null; // null — файл уже в нужном состоянии
+// Как и git, из всех прав отслеживаем только бит исполнения: сравнивать полные
+// режимы нельзя — у распакованного эталона и у node_modules разный umask.
+const EXECUTABLE = 0o111;
+
+function isExecutable(mode: number): boolean {
+  return (mode & EXECUTABLE) !== 0;
 }
 
-function planTarget(target: PatchTarget): TargetResult {
+function withExecutable(mode: number, executable: boolean): number {
+  return executable ? mode | 0o111 : mode & ~0o111;
+}
+
+function planTarget(target: PatchTarget): PlannedOp[] {
   const rawPath = target.newPath ?? target.oldPath;
   if (rawPath === null) throw new Error('patch section has no file path');
 
@@ -558,62 +672,81 @@ function planTarget(target: PatchTarget): TargetResult {
   }
 
   const exists = existsSync(file);
-  const raw = exists ? readFileSync(file, 'utf-8') : '';
-  const lines = raw === '' ? [] : raw.split('\n');
-  const endsWithNewline = lines.length > 0 && lines[lines.length - 1] === '';
-  if (endsWithNewline) lines.pop();
+  const currentMode = exists ? statSync(file).mode : null;
+  const wantExecutable = target.newMode === null ? null : target.newMode === '100755';
 
-  // Патч создаёт файл, а файл уже есть и не пуст — применять такое вслепую
-  // значит подмешать содержимое к чужому файлу.
-  const isCreation = target.oldPath === null || target.hunks.every(h => sideLines(h, 'old').length === 0);
-  if (isCreation && exists && raw !== '') {
-    const reverse = applyHunks(lines, endsWithNewline, target.hunks, true);
-    if ('error' in reverse) throw new Error(`${relativePath} already exists`);
-    return {write: null};
+  // Файл удаляется — это сказано заголовком, а не выведено из пустого результата.
+  if (target.newPath === null) {
+    return exists ? [{kind: 'remove', file}] : [];
   }
 
-  // «Уже применён» проверяем обратным применением, а не прямым: патч, который
-  // только дописывает строки, ложится вперёд и во второй раз — так дублировалось
-  // содержимое файлов.
-  //
-  // Но у патча на удаление новая сторона пуста, а пустой образец совпадает с чем
-  // угодно, поэтому для него обратная проверка ничего не значит: там признак
-  // применённости — отсутствующий или пустой файл.
-  const hasNewContent = target.hunks.some(h => sideLines(h, 'new').length > 0);
+  const ops: PlannedOp[] = [];
 
-  if (!hasNewContent) {
-    if (!exists || raw === '') return {write: null};
-  } else {
-    const reverse = applyHunks(lines, endsWithNewline, target.hunks, true);
-    if (!('error' in reverse)) return {write: null};
+  if (target.hunks.length > 0) {
+    const raw = exists ? readFileSync(file, 'utf-8') : '';
+    const lines = raw === '' ? [] : raw.split('\n');
+    const endsWithNewline = lines.length > 0 && lines[lines.length - 1] === '';
+    if (endsWithNewline) lines.pop();
+
+    // Патч создаёт файл, а файл уже есть и не пуст — применять такое вслепую
+    // значит подмешать содержимое к чужому файлу.
+    const isCreation = target.oldPath === null || target.hunks.every(h => sideLines(h, 'old').length === 0);
+    let alreadyApplied = false;
+
+    if (isCreation && exists && raw !== '') {
+      const reverse = applyHunks(lines, endsWithNewline, target.hunks, true);
+      if ('error' in reverse) throw new Error(`${relativePath} already exists`);
+      alreadyApplied = true;
+    } else {
+      // «Уже применён» проверяем обратным применением, а не прямым: патч, который
+      // только дописывает строки, ложится вперёд и во второй раз — так дублировалось
+      // содержимое файлов.
+      //
+      // Но у патча на удаление новая сторона пуста, а пустой образец совпадает с чем
+      // угодно, поэтому для него обратная проверка ничего не значит: там признак
+      // применённости — отсутствующий или пустой файл.
+      const hasNewContent = target.hunks.some(h => sideLines(h, 'new').length > 0);
+
+      if (!hasNewContent) {
+        alreadyApplied = !exists || raw === '';
+      } else {
+        const reverse = applyHunks(lines, endsWithNewline, target.hunks, true);
+        alreadyApplied = !('error' in reverse);
+      }
+    }
+
+    if (!alreadyApplied) {
+      const forward = applyHunks(lines, endsWithNewline, target.hunks, false);
+      if ('error' in forward) throw new Error(`${relativePath}: ${forward.error}`);
+
+      const content = forward.lines.join('\n') + (forward.endsWithNewline ? '\n' : '');
+
+      // patch(1) удаляет файл, от которого ничего не осталось. Повторяем это, иначе
+      // патч на удаление оставлял пустышку и ломал каждый следующий прогон.
+      if (content === '' || content === '\n') {
+        return [{kind: 'remove', file}];
+      }
+
+      // Запись идёт через пересоздание файла, чтобы разорвать hardlink на общий
+      // кеш bun, — а значит режим надо проставить заново, иначе бит исполнения
+      // терялся бы у любого патченого файла.
+      const base = currentMode ?? 0o644;
+      const mode = wantExecutable === null ? base : withExecutable(base, wantExecutable);
+      ops.push({kind: 'write', file, content, mode});
+    }
   }
 
-  const forward = applyHunks(lines, endsWithNewline, target.hunks, false);
-  if ('error' in forward) throw new Error(`${relativePath}: ${forward.error}`);
-
-  const content = forward.lines.join('\n') + (forward.endsWithNewline ? '\n' : '');
-
-  // patch(1) удаляет файл, от которого ничего не осталось. Повторяем это, иначе
-  // патч на удаление оставлял пустышку и ломал каждый следующий прогон.
-  if (content === '' || content === '\n') {
-    return {write: {file, content: null}};
+  // Смена режима без изменения содержимого — отдельная секция патча.
+  if (wantExecutable !== null && !ops.some(op => op.kind === 'write')) {
+    if (currentMode === null) throw new Error(`${relativePath}: cannot change mode, file is missing`);
+    if (isExecutable(currentMode) !== wantExecutable) {
+      ops.push({kind: 'chmod', file, mode: withExecutable(currentMode, wantExecutable)});
+    }
   }
 
-  return {write: {file, content}};
+  return ops;
 }
 
-// Apple patch пишет диагностику в stdout, GNU — в stderr. Читаем оба потока, а
-// если молчат оба — берём сообщение самой ошибки: при отсутствующем patch(1)
-// потоков нет вовсе, и без этого пользователь видел голый ❌ без причины.
-function firstDiagnosticLine(error: any): string {
-  const streams = `${error.stderr?.toString() ?? ''}\n${error.stdout?.toString() ?? ''}`
-    .split('\n')
-    .map((line: string) => line.trim())
-    .filter(Boolean);
-  return streams[0] ?? (error.message ? String(error.message).split('\n')[0].trim() : '');
-}
-
-// Apply patches function
 function applyPatches(): void {
   console.log(`🔧 Applying patches...`);
 
@@ -698,13 +831,12 @@ function applyPatches(): void {
 
     // Считаем весь патч в памяти: пока не сойдётся целиком, на диск не идёт
     // ничего. Это и есть ответ на «применилось наполовину, а в отчёте ноль».
-    const writes: PlannedWrite[] = [];
+    const writes: PlannedOp[] = [];
     let failure: string | null = null;
 
     for (const target of targets) {
       try {
-        const {write} = planTarget(target);
-        if (write !== null) writes.push(write);
+        writes.push(...planTarget(target));
       } catch (error: any) {
         failure = error.message;
         break;
@@ -724,14 +856,19 @@ function applyPatches(): void {
 
     try {
       for (const write of writes) {
-        if (write.content === null) {
+        if (write.kind === 'remove') {
           rmSync(write.file, {force: true});
+          continue;
+        }
+        if (write.kind === 'chmod') {
+          chmodSync(write.file, write.mode);
           continue;
         }
         mkdirSync(join(write.file, '..'), {recursive: true});
         // Разрываем hardlink на общий кеш bun: запись на месте изменила бы и его.
         rmSync(write.file, {force: true});
         writeFileSync(write.file, write.content);
+        if (write.mode !== null) chmodSync(write.file, write.mode);
       }
     } catch (error: any) {
       fail(`could not write: ${error.message}`);
