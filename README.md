@@ -140,6 +140,9 @@ Tested on Linux, macOS and Windows. `apply` is plain JavaScript and needs nothin
 from the system; `create` shells out to `diff`, which is present on all three
 (on Windows it comes with Git).
 
+If `diff` is not on PATH, `create` says so before it does anything else, rather
+than downloading a pristine copy of the package first and failing afterwards.
+
 This keeps your patches small and text-based.
 
 ## Example
