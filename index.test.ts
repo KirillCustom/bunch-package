@@ -235,12 +235,100 @@ describe('bunch-package apply', () => {
 
     const result = run('apply', TEST_DIR);
     expect(result.stdout).not.toContain('already applied');
-    expect(result.stdout).toContain('absolute paths');
+    expect(result.stdout).toContain('absolute path in patch header');
     expect(result.stdout).toContain('0 applied, 1 failed');
     expect(result.exitCode).not.toBe(0);
 
     const untouched = readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8');
     expect(untouched).toBe('const a = 1;');
+  });
+
+  test('applies a patch that edits a line starting with "-- /"', () => {
+    // Удаляемая строка кода `-- /etc/config` выглядит в диффе как `--- /etc/config`
+    // и не должна приниматься за заголовок с абсолютным путём.
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': '-- /etc/config is the default\nconst a = 1;\n',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1,2 +1,2 @@
+--- /etc/config is the default
++-- /etc/config is the new default
+ const a = 1;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).not.toContain('absolute path');
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(result.exitCode).toBe(0);
+
+    const patched = readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8');
+    expect(patched).toContain('is the new default');
+  });
+
+  test('treats a patch with no hunks as failed', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': 'const a = 1;',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), '');
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).not.toContain('already applied');
+    expect(result.stdout).toContain('no hunks found');
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test('keeps going when a patches/ entry cannot be read', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': 'const a = 1;\n',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+    // Каталог с расширением .patch проходит фильтр readdirSync, но не читается.
+    mkdirSync(join(TEST_DIR, 'patches', 'unreadable.patch'), {recursive: true});
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('cannot read patch file');
+    expect(result.stdout).toContain('1 applied, 1 failed');
+    expect(result.exitCode).not.toBe(0);
+
+    // Исправный патч всё равно должен примениться.
+    const patched = readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8');
+    expect(patched).toContain('const a = 2;');
+  });
+
+  test('survives a corrupt package.json in node_modules', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': 'const a = 1;\n',
+    });
+    writeFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'package.json'), '{ not json');
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('skipping version check');
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(result.exitCode).toBe(0);
   });
 });
 
