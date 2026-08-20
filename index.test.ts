@@ -126,6 +126,10 @@ describe('bunch-package create', () => {
   test('captures a change of the executable bit alone', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
     const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    // На Linux bun раскладывает пакеты hardlink'ами, и chmod правит тот же инод,
+    // что лежит в общем кеше. Разрываем связь тем же содержимым, иначе тест
+    // испортит режим в кеше и следующий тест увидит «изменённый» пакет.
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8'));
     chmodSync(indexPath, 0o755);
 
     const result = run('create is-number', TEST_DIR);
