@@ -181,13 +181,51 @@ function isAlreadyApplied(patchPath: string): boolean {
   }
 }
 
-// Патчи, созданные до 1.1.0, содержат в заголовках абсолютные пути. Под -p1 такой
-// путь не находится, а patch ещё и пытается разложить .rej по несуществующим
-// директориям — поэтому такие патчи отсеиваем до вызова patch.
-function hasAbsolutePaths(patchContent: string): boolean {
-  return patchContent
-    .split('\n')
-    .some(line => /^(---|\+\+\+) \//.test(line) && !/^(---|\+\+\+) \/dev\/null/.test(line));
+// Заголовок от строки кода отличается только положением: удаляемая строка
+// `-- /etc/config` выглядит в диффе как `--- /etc/config` и по одной регулярке
+// неотличима от заголовка. Поэтому идём по патчу с учётом границ хунков —
+// внутри тела хунка заголовков не бывает.
+//
+// Длину тела берём из счётчиков `@@ -a,b +c,d @@` и тратим их раздельно: строка
+// контекста расходует обе, удаление — только старую, добавление — только новую.
+//
+// Заодно считаем хунки: патч без единого хунка применять нечем.
+function inspectPatch(patchContent: string): {absoluteHeaders: string[]; hunks: number} {
+  const absoluteHeaders: string[] = [];
+  let hunks = 0;
+  let oldLeft = 0;
+  let newLeft = 0;
+
+  for (const line of patchContent.split('\n')) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith('\\')) continue; // \ No newline at end of file
+      if (line.startsWith('-')) oldLeft--;
+      else if (line.startsWith('+')) newLeft--;
+      else {
+        oldLeft--;
+        newLeft--;
+      }
+      continue;
+    }
+
+    const hunk = line.match(/^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/);
+    if (hunk) {
+      hunks++;
+      oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
+      newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      continue;
+    }
+
+    // Патчи, созданные до 1.1.0, содержат в заголовках абсолютные пути. Под -p1
+    // такой путь не находится, а patch ещё и раскладывает .rej по несуществующим
+    // директориям — поэтому отсеиваем их до вызова patch.
+    const header = line.match(/^(?:---|\+\+\+) ([^\t]+)/);
+    if (header && header[1].startsWith('/') && header[1] !== '/dev/null') {
+      absoluteHeaders.push(header[1]);
+    }
+  }
+
+  return {absoluteHeaders, hunks};
 }
 
 // Apple patch пишет диагностику в stdout, GNU — в stderr. Читаем оба потока.
@@ -228,8 +266,14 @@ function applyPatches(): void {
       const patchVersion = match[2];
       const pkgJsonPath = join('node_modules', patchPkgName, 'package.json');
       if (existsSync(pkgJsonPath)) {
-        const installedVersion = JSON.parse(readFileSync(pkgJsonPath, 'utf-8')).version;
-        if (installedVersion !== patchVersion) {
+        // Битый манифест не должен ронять весь прогон — проверку версии просто пропускаем.
+        let installedVersion: string | undefined;
+        try {
+          installedVersion = JSON.parse(readFileSync(pkgJsonPath, 'utf-8')).version;
+        } catch {
+          console.log(`  ⚠️  ${patchFile} — cannot read ${pkgJsonPath}, skipping version check`);
+        }
+        if (installedVersion !== undefined && installedVersion !== patchVersion) {
           console.log(`  ⚠️  ${patchFile} — version mismatch (patch: ${patchVersion}, installed: ${installedVersion})`);
         }
       }
@@ -237,10 +281,29 @@ function applyPatches(): void {
 
     console.log(`  Applying ${patchFile}...`);
 
-    if (hasAbsolutePaths(readFileSync(patchPath, 'utf-8'))) {
+    let patchContent: string;
+    try {
+      patchContent = readFileSync(patchPath, 'utf-8');
+    } catch (error: any) {
       failed++;
       console.log(`  ❌ ${patchFile}`);
-      console.log(`     absolute paths in patch headers — created by bunch-package < 1.1.0, recreate it with \`create\``);
+      console.log(`     cannot read patch file: ${error.message}`);
+      continue;
+    }
+
+    const {absoluteHeaders, hunks} = inspectPatch(patchContent);
+
+    if (absoluteHeaders.length > 0) {
+      failed++;
+      console.log(`  ❌ ${patchFile}`);
+      console.log(`     absolute path in patch header (${absoluteHeaders[0]}) — created by bunch-package < 1.1.0, recreate it with \`create\``);
+      continue;
+    }
+
+    if (hunks === 0) {
+      failed++;
+      console.log(`  ❌ ${patchFile}`);
+      console.log(`     no hunks found — the patch file is empty or truncated`);
       continue;
     }
 
