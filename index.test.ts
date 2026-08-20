@@ -31,6 +31,12 @@ function run(args: string, cwd: string, env?: Record<string, string>): {stdout: 
   }
 }
 
+// На Windows бита исполнения нет: NTFS его не хранит, chmod почти no-op, а
+// statSync возвращает одинаковый режим всем файлам. Проверять там нечего —
+// и сам инструмент это переживает: create не находит несуществующих различий,
+// а apply просто не может выставить режим, которого в системе не бывает.
+const isWindows = process.platform === 'win32';
+
 function isExecutable(path: string): boolean {
   return (statSync(path).mode & 0o111) !== 0;
 }
@@ -123,7 +129,7 @@ describe('bunch-package create', () => {
     expect(result.stdout).toContain('Invalid package name');
   });
 
-  test('captures a change of the executable bit alone', () => {
+  test.skipIf(isWindows)('captures a change of the executable bit alone', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
     const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
     // На Linux bun раскладывает пакеты hardlink'ами, и chmod правит тот же инод,
@@ -518,7 +524,7 @@ describe('bunch-package apply', () => {
     expect(leftovers).toEqual([]);
   });
 
-  test('keeps the executable bit of a file it patches', () => {
+  test.skipIf(isWindows)('keeps the executable bit of a file it patches', () => {
     setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
       'run.sh': '#!/bin/sh\necho one\n',
     });
@@ -557,12 +563,21 @@ new mode 100755
 `;
     writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
 
+    // Сценарий кросс-платформенный: патч сделан на POSIX-машине, а применяется
+    // где угодно. На Windows выставлять нечего, поэтому там это сразу «уже
+    // применён» — но упасть или сработать дважды не должно нигде.
     const result = run('apply', TEST_DIR);
-    expect(result.stdout).toContain('1 applied, 0 failed');
-    expect(isExecutable(script)).toBe(true);
+    expect(result.exitCode).toBe(0);
+    if (isWindows) {
+      expect(result.stdout).toContain('already applied');
+    } else {
+      expect(result.stdout).toContain('1 applied, 0 failed');
+      expect(isExecutable(script)).toBe(true);
+    }
 
     const again = run('apply', TEST_DIR);
     expect(again.stdout).toContain('already applied');
+    expect(again.exitCode).toBe(0);
   });
 
   test('refuses a patch whose path escapes the project', () => {

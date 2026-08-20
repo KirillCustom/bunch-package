@@ -130,6 +130,16 @@ new mode 100755
 Only the executable bit is tracked, the way git does it — comparing full permission
 bits would report differences that are really just a different umask.
 
+On Windows there is no executable bit to track. A patch carrying a mode change still
+applies there — the mode part is skipped rather than attempted, so the patch counts
+as applied once and stays that way instead of being reported as work on every run.
+
+## Platforms
+
+Tested on Linux, macOS and Windows. `apply` is plain JavaScript and needs nothing
+from the system; `create` shells out to `diff`, which is present on all three
+(on Windows it comes with Git).
+
 This keeps your patches small and text-based.
 
 ## Example

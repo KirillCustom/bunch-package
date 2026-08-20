@@ -651,6 +651,13 @@ function packageDirectoryOf(relativePath: string): string | null {
 // режимы нельзя — у распакованного эталона и у node_modules разный umask.
 const EXECUTABLE = 0o111;
 
+// На Windows бита исполнения не существует: NTFS его не хранит, chmod почти
+// no-op, а statSync возвращает одинаковый режим всем файлам. Без этой проверки
+// apply каждый раз видел бы «нужно выставить бит», звал chmod вхолостую и
+// бесконечно рапортовал о проделанной работе. Патч со сменой режима, приехавший
+// с macOS или Linux, должен применяться там молча и ровно один раз.
+const MODES_SUPPORTED = process.platform !== 'win32';
+
 function isExecutable(mode: number): boolean {
   return (mode & EXECUTABLE) !== 0;
 }
@@ -673,7 +680,8 @@ function planTarget(target: PatchTarget): PlannedOp[] {
 
   const exists = existsSync(file);
   const currentMode = exists ? statSync(file).mode : null;
-  const wantExecutable = target.newMode === null ? null : target.newMode === '100755';
+  const wantExecutable =
+    target.newMode === null || !MODES_SUPPORTED ? null : target.newMode === '100755';
 
   // Файл удаляется — это сказано заголовком, а не выведено из пустого результата.
   if (target.newPath === null) {

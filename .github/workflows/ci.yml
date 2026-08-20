@@ -11,14 +11,14 @@ concurrency:
 
 jobs:
   test:
-    # Патчи применяются своим кодом, но файловая система у платформ разная:
-    # переводы строк, регистр имён, разделители путей. Поэтому обе ОС.
+    # Патчи применяются своим кодом, но платформы расходятся в мелочах:
+    # переводы строк, разделители путей, права на файлы. Поэтому все три.
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v7
