@@ -548,7 +548,7 @@ describe('bunch-package apply', () => {
     expect(isExecutable(script)).toBe(true);
   });
 
-  test.skipIf(isWindows)('applies a patch that changes nothing but the mode', () => {
+  test('applies a patch that changes nothing but the mode', () => {
     setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
       'run.sh': '#!/bin/sh\n',
     });
@@ -563,12 +563,21 @@ new mode 100755
 `;
     writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
 
+    // Сценарий кросс-платформенный: патч сделан на POSIX-машине, а применяется
+    // где угодно. На Windows выставлять нечего, поэтому там это сразу «уже
+    // применён» — но упасть или сработать дважды не должно нигде.
     const result = run('apply', TEST_DIR);
-    expect(result.stdout).toContain('1 applied, 0 failed');
-    expect(isExecutable(script)).toBe(true);
+    expect(result.exitCode).toBe(0);
+    if (isWindows) {
+      expect(result.stdout).toContain('already applied');
+    } else {
+      expect(result.stdout).toContain('1 applied, 0 failed');
+      expect(isExecutable(script)).toBe(true);
+    }
 
     const again = run('apply', TEST_DIR);
     expect(again.stdout).toContain('already applied');
+    expect(again.exitCode).toBe(0);
   });
 
   test('refuses a patch whose path escapes the project', () => {
