@@ -1,0 +1,54 @@
+name: Publish to GitHub Packages
+
+# Дубль пакета во втором реестре. Основной канал распространения — npmjs.com,
+# оттуда пакет ставится без авторизации; GitHub Packages требует токен даже для
+# чтения публичных пакетов, поэтому здесь он нужен ради витрины: раздел Packages
+# на странице репозитория показывает только пакеты из реестра GitHub.
+#
+# workflow_dispatch оставлен намеренно: без него проверить публикацию можно было
+# бы только выпустив релиз.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run build
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@kirillcustom'
+          package-manager-cache: false
+
+      # GitHub Packages принимает пакет, только если скоуп совпадает с владельцем
+      # репозитория. Имя переписывается прямо в раннере — в коммит это не идёт,
+      # и на npmjs.com пакет остаётся нескоупленным.
+      - name: Publish
+        run: |
+          npm pkg set name=@kirillcustom/bunch-package
+          npm publish --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
