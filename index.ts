@@ -2,7 +2,7 @@
 
 import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
-import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, rmSync} from 'fs';
+import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync, rmSync} from 'fs';
 import {join, resolve, sep} from 'path';
 
 const PATCHES_DIR = 'patches';
@@ -189,7 +189,62 @@ function requireDiff(): void {
   }
 }
 
-function createPatch(packageName: string): void {
+interface SequencePlan {
+  replay: string[]; // патчи, которыми надо довести эталон
+  outputName: string;
+  renameFrom: string | null;
+  renameTo: string | null;
+}
+
+function planSequence(sanitizedName: string, version: string, appendLabel: string | null): SequencePlan {
+  const prefix = `${sanitizedName}+${version}`;
+  const siblings = existsSync(PATCHES_DIR)
+    ? orderPatchFiles(
+        readdirSync(PATCHES_DIR).filter(
+          (f: string) => f.endsWith('.patch') && (f === `${prefix}.patch` || f.startsWith(`${prefix}+`)),
+        ),
+      )
+    : [];
+
+  const sequenceOf = (file: string): number => parsePatchName(file)?.sequence ?? 0;
+
+  if (appendLabel !== null) {
+    // Одиночный патч задним числом становится первым в последовательности:
+    // без номера он потерялся бы среди следующих.
+    if (siblings.length === 1 && sequenceOf(siblings[0]) === 0) {
+      return {
+        replay: siblings,
+        outputName: `${prefix}+002+${appendLabel}.patch`,
+        renameFrom: siblings[0],
+        renameTo: `${prefix}+001+initial.patch`,
+      };
+    }
+
+    const next = siblings.length > 0 ? sequenceOf(siblings[siblings.length - 1]) + 1 : 1;
+    return {
+      replay: siblings,
+      outputName: `${prefix}+${String(next).padStart(3, '0')}+${appendLabel}.patch`,
+      renameFrom: null,
+      renameTo: null,
+    };
+  }
+
+  // Без --append обновляем последний патч последовательности: эталон доводим
+  // всеми предыдущими, а его самого пересоздаём.
+  const sequenced = siblings.filter(file => sequenceOf(file) > 0);
+  if (sequenced.length > 0) {
+    return {
+      replay: sequenced.slice(0, -1),
+      outputName: sequenced[sequenced.length - 1],
+      renameFrom: null,
+      renameTo: null,
+    };
+  }
+
+  return {replay: [], outputName: `${prefix}.patch`, renameFrom: null, renameTo: null};
+}
+
+function createPatch(packageName: string, appendLabel: string | null = null): void {
   validatePackageName(packageName);
   requireDiff();
   console.log(`📦 Creating patch for ${packageName}...`);
@@ -268,6 +323,17 @@ function createPatch(packageName: string): void {
     // недостающую сторону как пустую и выдаёт патч «добавить все файлы».
     if (!existsSync(cleanPackagePath)) {
       throw new Error(`Pristine copy of ${name}@${version} did not land at ${cleanPackagePath}`);
+    }
+
+    // Патчи одного пакета образуют последовательность, где каждый следующий
+    // отсчитывается от состояния после предыдущих, а не от чистого пакета.
+    // Поэтому эталон сначала доводится уже существующими патчами — иначе новый
+    // патч нёс бы в себе и чужие правки.
+    const plan = planSequence(name.replace(/\//g, '+'), version, appendLabel);
+
+    if (plan.replay.length > 0) {
+      console.log(`🔁 Replaying ${plan.replay.length} existing patch(es) onto the pristine copy...`);
+      replayPatches(plan.replay, packageName, cleanPackagePath);
     }
 
     console.log(`🔍 Generating diff...`);
@@ -417,8 +483,14 @@ function createPatch(packageName: string): void {
     }
 
     const sanitizedName = name.replace(/\//g, '+');
-    const patchFileName = `${sanitizedName}+${version}.patch`;
+    const patchFileName = plan.outputName;
     const patchFilePath = join(PATCHES_DIR, patchFileName);
+
+    if (plan.renameFrom !== null) {
+      // Одиночный патч становится первым в последовательности.
+      renameSync(join(PATCHES_DIR, plan.renameFrom), join(PATCHES_DIR, plan.renameTo!));
+      console.log(`🔢 ${plan.renameFrom} → ${plan.renameTo}`);
+    }
 
     // Последний рубеж: имя собрано из чужого манифеста, и уехать за пределы
     // patches/ оно не должно ни при каких значениях полей.
@@ -441,6 +513,51 @@ function createPatch(packageName: string): void {
       rmSync(tempDir, {force: true, recursive: true});
     }
   }
+}
+
+// Имя файла патча несёт пакет, версию и — для последовательности — номер и
+// метку: `react-native+0.72.0+002+fix-touchable.patch`. Такой формат у
+// patch-package, и повторять его стоит: патчи людей и инструментов ходят
+// между проектами.
+//
+// Версия сама может содержать `+` (метаданные сборки), поэтому разбираем справа:
+// номер — ровно три цифры, метка без `+`, остальное слева — пакет и версия.
+interface PatchName {
+  packageDir: string; // как каталог в node_modules, со слэшем для скоупа
+  version: string;
+  sequence: number; // 0 — одиночный патч вне последовательности
+  label: string;
+}
+
+function parsePatchName(file: string): PatchName | null {
+  if (!file.endsWith('.patch')) return null;
+  const base = file.slice(0, -'.patch'.length);
+
+  const sequenced = base.match(/^(.+)\+(\d{3})\+([^+]+)$/);
+  const head = sequenced ? sequenced[1] : base;
+  const separator = head.lastIndexOf('+');
+  if (separator === -1) return null;
+
+  return {
+    packageDir: head.slice(0, separator).replace(/\+/g, '/'),
+    version: head.slice(separator + 1),
+    sequence: sequenced ? Number(sequenced[2]) : 0,
+    label: sequenced ? sequenced[3] : '',
+  };
+}
+
+// Патчи одной последовательности строятся друг на друге, как коммиты, поэтому
+// порядок обязан быть детерминированным. readdirSync его не даёт: он вернул
+// файлы в порядке создания, а не по имени.
+function orderPatchFiles(files: string[]): string[] {
+  return [...files].sort((a, b) => {
+    const left = parsePatchName(a);
+    const right = parsePatchName(b);
+    if (left && right && left.packageDir === right.packageDir && left.version === right.version) {
+      return left.sequence - right.sequence;
+    }
+    return a.localeCompare(b);
+  });
 }
 
 // Ниже — собственное применение унифицированных диффов. Раньше эту работу делал
@@ -684,16 +801,34 @@ function withExecutable(mode: number, executable: boolean): number {
   return executable ? mode | 0o111 : mode & ~0o111;
 }
 
-function planTarget(target: PatchTarget): PlannedOp[] {
+// По умолчанию патч ложится на корень проекта. Но при создании следующего патча
+// в последовательности те же самые секции нужно наложить на распакованный эталон
+// — иначе новый патч содержал бы и правки предыдущих. Отсюда второй режим:
+// пути вида node_modules/<пакет>/<путь> отображаются внутрь заданного каталога.
+interface TreeContext {
+  root: string;
+  prefix: string; // `node_modules/<пакет>/`
+}
+
+function planTarget(target: PatchTarget, context?: TreeContext): PlannedOp[] {
   const rawPath = target.newPath ?? target.oldPath;
   if (rawPath === null) throw new Error('patch section has no file path');
 
   const relativePath = stripPathPrefix(rawPath);
-  const file = resolveInsideProject(relativePath);
 
-  const packageDir = packageDirectoryOf(relativePath);
-  if (packageDir !== null && !existsSync(packageDir)) {
-    throw new Error(`${packageDir} is not installed`);
+  let file: string;
+  if (context === undefined) {
+    file = resolveInsideProject(relativePath);
+
+    const packageDir = packageDirectoryOf(relativePath);
+    if (packageDir !== null && !existsSync(packageDir)) {
+      throw new Error(`${packageDir} is not installed`);
+    }
+  } else {
+    if (!relativePath.startsWith(context.prefix)) {
+      throw new Error(`${relativePath} does not belong to ${context.prefix}`);
+    }
+    file = join(context.root, relativePath.slice(context.prefix.length));
   }
 
   const exists = existsSync(file);
@@ -773,6 +908,75 @@ function planTarget(target: PatchTarget): PlannedOp[] {
   return ops;
 }
 
+function executeOps(ops: PlannedOp[]): void {
+  for (const op of ops) {
+    if (op.kind === 'remove') {
+      rmSync(op.file, {force: true});
+      continue;
+    }
+    if (op.kind === 'chmod') {
+      chmodSync(op.file, op.mode);
+      continue;
+    }
+    mkdirSync(join(op.file, '..'), {recursive: true});
+    // Разрываем hardlink на общий кеш bun: запись на месте изменила бы и его.
+    rmSync(op.file, {force: true});
+    writeFileSync(op.file, op.content);
+    if (op.mode !== null) chmodSync(op.file, op.mode);
+  }
+}
+
+// Доводим эталон до состояния «после уже существующих патчей».
+function replayPatches(files: string[], packageDir: string, root: string): void {
+  const context: TreeContext = {root, prefix: `node_modules/${packageDir}/`};
+  for (const file of files) {
+    const targets = parsePatch(readFileSync(join(PATCHES_DIR, file), 'utf-8'));
+    const ops: PlannedOp[] = [];
+    for (const target of targets) {
+      try {
+        ops.push(...planTarget(target, context));
+      } catch (error: any) {
+        throw new Error(`${file} does not fit the pristine copy: ${error.message}`);
+      }
+    }
+    executeOps(ops);
+  }
+}
+
+// Патч из середины последовательности нельзя проверить в одиночку: его «после»
+// перестаёт существовать, как только сверху лёг следующий, и обратное применение
+// перестаёт его узнавать. Поэтому применённость последовательности определяем по
+// последнему патчу — его состояние и есть итоговое.
+//
+// Частично применённая последовательность сюда не попадает и разбирается обычным
+// путём: там каждый патч по отдельности либо ложится, либо уже узнаётся.
+function appliedSequences(files: string[]): Set<string> {
+  const groups = new Map<string, string[]>();
+
+  for (const file of files) {
+    const parsed = parsePatchName(file);
+    if (parsed === null || parsed.sequence === 0) continue;
+    const key = `${parsed.packageDir}@${parsed.version}`;
+    groups.set(key, [...(groups.get(key) ?? []), file]);
+  }
+
+  const applied = new Set<string>();
+
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    try {
+      const targets = parsePatch(readFileSync(join(PATCHES_DIR, group[group.length - 1]), 'utf-8'));
+      const ops = targets.flatMap(target => planTarget(target));
+      if (ops.length === 0) for (const file of group) applied.add(file);
+    } catch {
+      // Последний не ложится и не узнаётся — значит последовательность не на
+      // месте целиком, и каждый патч надо разбирать по отдельности.
+    }
+  }
+
+  return applied;
+}
+
 function applyPatches(): void {
   console.log(`🔧 Applying patches...`);
 
@@ -781,8 +985,9 @@ function applyPatches(): void {
     return;
   }
 
-  const patchFiles = readdirSync(PATCHES_DIR)
-    .filter((f: string) => f.endsWith('.patch'));
+  const patchFiles = orderPatchFiles(
+    readdirSync(PATCHES_DIR).filter((f: string) => f.endsWith('.patch')),
+  );
 
   if (patchFiles.length === 0) {
     console.log('📭 No patches found');
@@ -792,6 +997,8 @@ function applyPatches(): void {
   let applied = 0;
   let failed = 0;
 
+  const wholeSequenceApplied = appliedSequences(patchFiles);
+
   for (const patchFile of patchFiles) {
     const patchPath = join(PATCHES_DIR, patchFile);
 
@@ -800,6 +1007,12 @@ function applyPatches(): void {
       console.log(`  ❌ ${patchFile}`);
       console.log(`     ${reason}`);
     };
+
+    if (wholeSequenceApplied.has(patchFile)) {
+      applied++;
+      console.log(`  ✅ ${patchFile} (already applied)`);
+      continue;
+    }
 
     console.log(`  Applying ${patchFile}...`);
 
@@ -821,7 +1034,7 @@ function applyPatches(): void {
     // Версию сверяем по пакету из заголовков, а не по имени файла патча: при
     // установке через алиас каталог называется иначе, чем пакет, и разбор имени
     // файла уводил проверку к несуществующему манифесту — она молча пропадала.
-    const patchVersion = patchFile.match(/^.+\+(\d+\..+)\.patch$/)?.[1];
+    const patchVersion = parsePatchName(patchFile)?.version;
     if (patchVersion !== undefined) {
       const packageDirs = new Set(
         targets
@@ -881,21 +1094,7 @@ function applyPatches(): void {
     }
 
     try {
-      for (const write of writes) {
-        if (write.kind === 'remove') {
-          rmSync(write.file, {force: true});
-          continue;
-        }
-        if (write.kind === 'chmod') {
-          chmodSync(write.file, write.mode);
-          continue;
-        }
-        mkdirSync(join(write.file, '..'), {recursive: true});
-        // Разрываем hardlink на общий кеш bun: запись на месте изменила бы и его.
-        rmSync(write.file, {force: true});
-        writeFileSync(write.file, write.content);
-        if (write.mode !== null) chmodSync(write.file, write.mode);
-      }
+      executeOps(writes);
     } catch (error: any) {
       fail(`could not write: ${error.message}`);
       continue;
@@ -916,14 +1115,28 @@ function applyPatches(): void {
 const command = process.argv[2];
 const arg = process.argv[3];
 
+// --append <метка> заводит следующий патч в последовательности вместо того,
+// чтобы переписать существующий.
+function parseAppendLabel(argv: string[]): string | null {
+  const at = argv.indexOf('--append');
+  if (at === -1) return null;
+
+  const label = argv[at + 1];
+  if (!label || !/^[\w.-]+$/.test(label)) {
+    console.error('❌ --append needs a name made of letters, digits, dots, dashes or underscores');
+    process.exit(1);
+  }
+  return label;
+}
+
 switch (command) {
   case 'create':
-    if (!arg) {
-      console.error('❌ Usage: bunch-package create <package-name>');
+    if (!arg || arg.startsWith('--')) {
+      console.error('❌ Usage: bunch-package create <package-name> [--append <name>]');
       process.exit(1);
     }
 
-    createPatch(arg);
+    createPatch(arg, parseAppendLabel(process.argv));
     break;
 
   case 'apply':
@@ -935,7 +1148,8 @@ switch (command) {
 🎯 bunch-package - Patch management for Bun
 
 Commands:
-  bunch-package create <package>  Create a patch
-  bunch-package apply             Apply all patches
+  bunch-package create <package>                  Create or update a patch
+  bunch-package create <package> --append <name>  Add another patch to the package
+  bunch-package apply                             Apply all patches
     `);
 }

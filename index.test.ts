@@ -177,6 +177,53 @@ describe('bunch-package create', () => {
     expect(again.exitCode).toBe(0);
   });
 
+  test('--append starts a sequence and records only the new change', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// first-change\n');
+    run('create is-number', TEST_DIR);
+    expect(existsSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'))).toBe(true);
+
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// second-change\n');
+    const appended = run('create is-number --append second', TEST_DIR);
+    expect(appended.exitCode).toBe(0);
+
+    // Одиночный патч задним числом становится первым в последовательности.
+    const patches = readdirSync(join(TEST_DIR, 'patches')).sort();
+    expect(patches).toEqual(['is-number+7.0.0+001+initial.patch', 'is-number+7.0.0+002+second.patch']);
+
+    // Второй патч отсчитывается от состояния после первого, а не от чистого
+    // пакета — иначе он нёс бы в себе и первую правку.
+    const second = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0+002+second.patch'), 'utf-8');
+    // first-change попадает во второй патч строкой контекста — это нормально.
+    // Важно, что он не добавляется заново.
+    expect(second).toContain('+// second-change');
+    expect(second).not.toContain('+// first-change');
+  });
+
+  test('create without --append updates the last patch of a sequence', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// first-change\n');
+    run('create is-number', TEST_DIR);
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// second-change\n');
+    run('create is-number --append second', TEST_DIR);
+
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// second-fixed\n');
+    run('create is-number', TEST_DIR);
+
+    const patches = readdirSync(join(TEST_DIR, 'patches')).sort();
+    expect(patches).toEqual(['is-number+7.0.0+001+initial.patch', 'is-number+7.0.0+002+second.patch']);
+
+    const first = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0+001+initial.patch'), 'utf-8');
+    const second = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0+002+second.patch'), 'utf-8');
+    expect(first).toContain('first-change');
+    expect(first).not.toContain('second');
+    expect(second).toContain('second-fixed');
+  });
+
   test('reports no changes when package is not modified', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
 
@@ -292,6 +339,37 @@ describe('bunch-package apply', () => {
     // Проверяем что изменения применились
     const modified = readFileSync(indexPath, 'utf-8');
     expect(modified).toContain('// bunch-test-marker');
+  });
+
+  test('applies a sequence in order, whatever order the directory lists it in', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': 'const a = 1;\n',
+    });
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+
+    // Второй патч ложится только поверх первого. Записываем их в обратном
+    // порядке: readdirSync отдаёт файлы в порядке создания, а не по имени,
+    // поэтому без явной сортировки последовательность применилась бы вразнобой.
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0+002+two.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 2;
++const a = 3;
+`);
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0+001+one.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('2 applied, 0 failed');
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 3;\n');
+
+    const again = run('apply', TEST_DIR);
+    expect(again.exitCode).toBe(0);
   });
 
   test('warns on version mismatch', () => {

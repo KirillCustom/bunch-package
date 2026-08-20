@@ -66,6 +66,29 @@ Example:
 bunx bunch-package create react-native-date-picker
 ```
 
+### Multiple patches for one package
+
+```bash
+bunx bunch-package create <package-name> --append <name>
+```
+
+Adds another patch instead of overwriting the existing one:
+
+```
+patches/react-native+0.81.4+001+initial.patch
+patches/react-native+0.81.4+002+fix-touchable.patch
+```
+
+The patches form a sequence and build on each other, like commits. Each one is
+diffed against the state left by the ones before it, so a later patch contains only
+its own change. `create` without `--append` updates the **last** patch in the
+sequence, leaving the earlier ones alone. The naming matches `patch-package`, so
+patches travel between the two.
+
+A sequence is recognised as applied by its last patch, since that is the state the
+tree ends up in — an intermediate patch cannot be checked on its own once a later
+one sits on top of it.
+
 ### Apply all patches
 
 ```bash
