@@ -1,6 +1,6 @@
-import {describe, test, expect, beforeEach, afterEach} from 'bun:test';
+import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
 import {execSync} from 'child_process';
-import {existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, unlinkSync} from 'fs';
+import {existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {join} from 'path';
 
 // writeFileSync пишет в тот же inode, что ломает тесты при hardlink-кеше bun.
@@ -9,6 +9,10 @@ function overwriteFile(path: string, content: string) {
   if (existsSync(path)) unlinkSync(path);
   writeFileSync(path, content);
 }
+
+// Часть тестов ставит реальный пакет из реестра, а дефолтные 5 секунд bun'а
+// упираются в сеть, а не в код. Тайм-аут поднят, чтобы падения означали дефект.
+setDefaultTimeout(120_000);
 
 const TEST_DIR = join(import.meta.dir, '.test-sandbox');
 const CLI = join(import.meta.dir, 'index.ts');
@@ -265,7 +269,7 @@ describe('bunch-package apply', () => {
     expect(result.exitCode).not.toBe(0);
   });
 
-  test('prints the diagnostic from patch when a hunk does not fit', () => {
+  test('prints a diagnostic when a hunk does not fit', () => {
     setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
       'index.js': 'const totally = "different";',
     });
@@ -374,6 +378,101 @@ describe('bunch-package apply', () => {
     // Исправный патч всё равно должен примениться.
     const patched = readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8');
     expect(patched).toContain('const a = 2;');
+  });
+
+  test('deletes a file the patch removes, and stays idempotent', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'keep.js': 'keep\n',
+      'gone.js': 'goes away\n',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/gone.js
++++ b/node_modules/test-lib/gone.js
+@@ -1 +0,0 @@
+-goes away
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const first = run('apply', TEST_DIR);
+    expect(first.stdout).toContain('1 applied, 0 failed');
+    expect(first.exitCode).toBe(0);
+    // patch(1) оставлял на этом месте пустышку — отсюда и росла неидемпотентность.
+    expect(existsSync(join(TEST_DIR, 'node_modules', 'test-lib', 'gone.js'))).toBe(false);
+    expect(existsSync(join(TEST_DIR, 'node_modules', 'test-lib', 'keep.js'))).toBe(true);
+
+    const second = run('apply', TEST_DIR);
+    expect(second.stdout).toContain('already applied');
+    expect(second.exitCode).toBe(0);
+  });
+
+  test('writes nothing when one file of a patch does not fit', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'one.js': 'const a = 1;\n',
+      'two.js': 'something else entirely\n',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/one.js
++++ b/node_modules/test-lib/one.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+--- a/node_modules/test-lib/two.js
++++ b/node_modules/test-lib/two.js
+@@ -1 +1 @@
+-const b = 1;
++const b = 2;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.exitCode).not.toBe(0);
+
+    // Первый файл лёг бы без труда — но патч не сошёлся целиком, значит на диск
+    // не идёт ничего. Раньше дерево оставалось наполовину пропатченным.
+    const one = readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'one.js'), 'utf-8');
+    expect(one).toBe('const a = 1;\n');
+
+    // И никакого мусора рядом с файлами.
+    const leftovers = readdirSync(join(TEST_DIR, 'node_modules', 'test-lib'))
+      .filter(name => name.endsWith('.rej') || name.endsWith('.orig'));
+    expect(leftovers).toEqual([]);
+  });
+
+  test('refuses a patch whose path escapes the project', () => {
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/../../ESCAPED.txt
++++ b/../../ESCAPED.txt
+@@ -0,0 +1 @@
++escaped the project root
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'evil+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('outside the project');
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.exitCode).not.toBe(0);
+    // Раньше это зависело от реализации: GNU patch отказывал, Apple писал файл.
+    expect(existsSync(join(TEST_DIR, '..', 'ESCAPED.txt'))).toBe(false);
+  });
+
+  test('refuses to fabricate a package that is not installed', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/ghost/new.js
++++ b/node_modules/ghost/new.js
+@@ -0,0 +1 @@
++fabricated
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'ghost+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('not installed');
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.exitCode).not.toBe(0);
+    expect(existsSync(join(TEST_DIR, 'node_modules', 'ghost'))).toBe(false);
   });
 
   test('survives a corrupt package.json in node_modules', () => {

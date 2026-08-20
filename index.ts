@@ -3,7 +3,7 @@
 import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
 import {existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync} from 'fs';
-import {join} from 'path';
+import {join, resolve, sep} from 'path';
 
 const PATCHES_DIR = 'patches';
 
@@ -308,71 +308,250 @@ function createPatch(packageName: string): void {
   }
 }
 
-// patch(1) возвращает 1 и когда патч уже в дереве, и когда файл не найден, и
-// когда разошёлся контекст — по коду возврата эти случаи не различить. Поэтому
-// «уже применён» проверяем отдельно: если патч ложится в обратную сторону,
-// значит его изменения уже на месте. --dry-run при этом ничего не пишет на диск.
-//
-// --forward здесь обязателен: без него patch на ещё не применённом патче видит
-// «reversed patch detected», сам переворачивает его обратно в forward и выходит
-// с нулём — то есть отвечает «уже применён» вообще на что угодно.
-function isAlreadyApplied(patchPath: string): boolean {
-  try {
-    execFileSync('patch', ['-p1', '-R', '--forward', '--dry-run', '--batch', '--silent', `--input=${patchPath}`], {
-      cwd: process.cwd(),
-      stdio: 'pipe',
-    });
-    return true;
-  } catch {
-    return false;
-  }
+// Ниже — собственное применение унифицированных диффов. Раньше эту работу делал
+// системный patch(1), и половина проблем росла именно оттуда: на Linux это GNU,
+// на macOS — Apple, у них расходятся коды возврата, тексты сообщений и даже
+// защита от выхода за корень проекта. Плюс patch применяет файлы по одному,
+// поэтому провал на середине оставлял дерево наполовину пропатченным и сыпал
+// .rej/.orig. Здесь ничего не пишется на диск, пока не сойдётся весь патч.
+
+interface Hunk {
+  oldStart: number;
+  newStart: number;
+  lines: string[]; // с префиксами ' ', '+', '-'
+  oldNoNewline: boolean;
+  newNoNewline: boolean;
 }
 
-// Заголовок от строки кода отличается только положением: удаляемая строка
-// `-- /etc/config` выглядит в диффе как `--- /etc/config` и по одной регулярке
-// неотличима от заголовка. Поэтому идём по патчу с учётом границ хунков —
-// внутри тела хунка заголовков не бывает.
-//
-// Длину тела берём из счётчиков `@@ -a,b +c,d @@` и тратим их раздельно: строка
-// контекста расходует обе, удаление — только старую, добавление — только новую.
-//
-// Заодно считаем хунки: патч без единого хунка применять нечем.
-function inspectPatch(patchContent: string): {absoluteHeaders: string[]; hunks: number} {
-  const absoluteHeaders: string[] = [];
-  let hunks = 0;
+interface PatchTarget {
+  oldPath: string | null; // null — это /dev/null, то есть файл создаётся
+  newPath: string | null; // null — файл удаляется
+  hunks: Hunk[];
+}
+
+function parsePatch(patchContent: string): PatchTarget[] {
+  const targets: PatchTarget[] = [];
+  let target: PatchTarget | null = null;
+  let hunk: Hunk | null = null;
   let oldLeft = 0;
   let newLeft = 0;
+  let lastPrefix = '';
+
+  const asPath = (raw: string): string | null => (raw === '/dev/null' ? null : raw);
 
   for (const line of patchContent.split('\n')) {
-    if (oldLeft > 0 || newLeft > 0) {
-      if (line.startsWith('\\')) continue; // \ No newline at end of file
-      if (line.startsWith('-')) oldLeft--;
-      else if (line.startsWith('+')) newLeft--;
-      else {
-        oldLeft--;
-        newLeft--;
+    // `\ No newline at end of file` относится к предыдущей строке и может стоять
+    // как внутри тела, так и сразу за ним — счётчики к этому моменту исчерпаны.
+    if (line.startsWith('\\')) {
+      if (hunk) {
+        if (lastPrefix === '-') hunk.oldNoNewline = true;
+        else if (lastPrefix === '+') hunk.newNoNewline = true;
+        else {
+          hunk.oldNoNewline = true;
+          hunk.newNoNewline = true;
+        }
       }
       continue;
     }
 
-    const hunk = line.match(/^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/);
-    if (hunk) {
-      hunks++;
-      oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
-      newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+    if (hunk && (oldLeft > 0 || newLeft > 0)) {
+      hunk.lines.push(line);
+      lastPrefix = line.charAt(0);
+      if (lastPrefix === '-') oldLeft--;
+      else if (lastPrefix === '+') newLeft--;
+      else {
+        oldLeft--;
+        newLeft--;
+        lastPrefix = ' ';
+      }
       continue;
     }
 
-    // Патчи, созданные до 1.1.0, содержат в заголовках абсолютные пути. Под -p1
-    // такой путь не находится, а patch ещё и раскладывает .rej по несуществующим
-    // директориям — поэтому отсеиваем их до вызова patch.
-    const header = line.match(/^(?:---|\+\+\+) ([^\t]+)/);
-    if (header && header[1].startsWith('/') && header[1] !== '/dev/null') {
-      absoluteHeaders.push(header[1]);
+    const head = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (head && target) {
+      oldLeft = head[2] === undefined ? 1 : Number(head[2]);
+      newLeft = head[4] === undefined ? 1 : Number(head[4]);
+      hunk = {
+        oldStart: Number(head[1]),
+        newStart: Number(head[3]),
+        lines: [],
+        oldNoNewline: false,
+        newNoNewline: false,
+      };
+      target.hunks.push(hunk);
+      continue;
+    }
+
+    const oldHeader = line.match(/^--- ([^\t]+)/);
+    if (oldHeader) {
+      target = {oldPath: asPath(oldHeader[1]), newPath: null, hunks: []};
+      targets.push(target);
+      hunk = null;
+      continue;
+    }
+
+    const newHeader = line.match(/^\+\+\+ ([^\t]+)/);
+    if (newHeader && target) {
+      target.newPath = asPath(newHeader[1]);
+      continue;
     }
   }
 
-  return {absoluteHeaders, hunks};
+  return targets.filter(t => t.hunks.length > 0);
+}
+
+// Одна сторона хунка: для старой отбрасываем добавленные строки, для новой — удалённые.
+// Пустая строка — это контекст, у которого срезали хвостовой пробел.
+function sideLines(hunk: Hunk, side: 'old' | 'new'): string[] {
+  const drop = side === 'old' ? '+' : '-';
+  return hunk.lines.filter(line => !line.startsWith(drop)).map(line => line.slice(1));
+}
+
+// Хунк ищем сначала там, где он объявлен, потом расходящимся поиском — ровно как
+// это делает patch со смещением. Нечёткого совпадения (fuzz) не допускаем: патч
+// делался под конкретную версию, и подгонять контекст молча — это как раз то,
+// из-за чего провалы выглядели успехами.
+function locateHunk(lines: string[], needle: string[], preferred: number): number {
+  const fits = (at: number): boolean =>
+    at >= 0 &&
+    at + needle.length <= lines.length &&
+    needle.every((line, index) => lines[at + index] === line);
+
+  if (needle.length === 0) return Math.max(0, Math.min(preferred, lines.length));
+  if (fits(preferred)) return preferred;
+
+  for (let distance = 1; distance <= lines.length; distance++) {
+    if (fits(preferred - distance)) return preferred - distance;
+    if (fits(preferred + distance)) return preferred + distance;
+  }
+  return -1;
+}
+
+interface AppliedFile {
+  lines: string[];
+  endsWithNewline: boolean;
+}
+
+function applyHunks(
+  original: string[],
+  endsWithNewline: boolean,
+  hunks: Hunk[],
+  reverse: boolean,
+): AppliedFile | {error: string} {
+  let lines = original;
+  let offset = 0;
+  let trailing = endsWithNewline;
+
+  for (const [index, hunk] of hunks.entries()) {
+    const from = sideLines(hunk, reverse ? 'new' : 'old');
+    const to = sideLines(hunk, reverse ? 'old' : 'new');
+    const declared = (reverse ? hunk.newStart : hunk.oldStart) - 1;
+
+    const at = locateHunk(lines, from, Math.max(0, declared + offset));
+    if (at === -1) {
+      return {error: `hunk #${index + 1} does not fit (expected at line ${declared + 1})`};
+    }
+
+    const reachedEnd = at + from.length === lines.length;
+    lines = [...lines.slice(0, at), ...to, ...lines.slice(at + from.length)];
+    offset += to.length - from.length;
+
+    if (reachedEnd) {
+      trailing = !(reverse ? hunk.oldNoNewline : hunk.newNoNewline);
+    }
+  }
+
+  return {lines, endsWithNewline: trailing};
+}
+
+// -p1: срезаем первый компонент пути, как это делает patch.
+function stripPathPrefix(path: string): string {
+  const slash = path.indexOf('/');
+  return slash === -1 ? path : path.slice(slash + 1);
+}
+
+interface PlannedWrite {
+  file: string;
+  content: string | null; // null — файл нужно удалить
+}
+
+// Единственная защита от выхода за корень проекта. Полагаться здесь на patch(1)
+// было нельзя: GNU такие пути отвергает, Apple спокойно пишет файл наружу.
+function resolveInsideProject(relativePath: string): string {
+  const root = process.cwd();
+  const resolved = resolve(root, relativePath);
+  if (resolved !== root && !resolved.startsWith(root + sep)) {
+    throw new Error(`refusing to touch ${relativePath} — it resolves outside the project`);
+  }
+  return resolved;
+}
+
+function packageDirectoryOf(relativePath: string): string | null {
+  const parts = relativePath.split('/');
+  if (parts[0] !== 'node_modules' || parts.length < 2) return null;
+  const depth = parts[1].startsWith('@') ? 3 : 2;
+  return parts.slice(0, depth).join('/');
+}
+
+interface TargetResult {
+  write: PlannedWrite | null; // null — файл уже в нужном состоянии
+}
+
+function planTarget(target: PatchTarget): TargetResult {
+  const rawPath = target.newPath ?? target.oldPath;
+  if (rawPath === null) throw new Error('patch section has no file path');
+
+  const relativePath = stripPathPrefix(rawPath);
+  const file = resolveInsideProject(relativePath);
+
+  const packageDir = packageDirectoryOf(relativePath);
+  if (packageDir !== null && !existsSync(packageDir)) {
+    throw new Error(`${packageDir} is not installed`);
+  }
+
+  const exists = existsSync(file);
+  const raw = exists ? readFileSync(file, 'utf-8') : '';
+  const lines = raw === '' ? [] : raw.split('\n');
+  const endsWithNewline = lines.length > 0 && lines[lines.length - 1] === '';
+  if (endsWithNewline) lines.pop();
+
+  // Патч создаёт файл, а файл уже есть и не пуст — применять такое вслепую
+  // значит подмешать содержимое к чужому файлу.
+  const isCreation = target.oldPath === null || target.hunks.every(h => sideLines(h, 'old').length === 0);
+  if (isCreation && exists && raw !== '') {
+    const reverse = applyHunks(lines, endsWithNewline, target.hunks, true);
+    if ('error' in reverse) throw new Error(`${relativePath} already exists`);
+    return {write: null};
+  }
+
+  // «Уже применён» проверяем обратным применением, а не прямым: патч, который
+  // только дописывает строки, ложится вперёд и во второй раз — так дублировалось
+  // содержимое файлов.
+  //
+  // Но у патча на удаление новая сторона пуста, а пустой образец совпадает с чем
+  // угодно, поэтому для него обратная проверка ничего не значит: там признак
+  // применённости — отсутствующий или пустой файл.
+  const hasNewContent = target.hunks.some(h => sideLines(h, 'new').length > 0);
+
+  if (!hasNewContent) {
+    if (!exists || raw === '') return {write: null};
+  } else {
+    const reverse = applyHunks(lines, endsWithNewline, target.hunks, true);
+    if (!('error' in reverse)) return {write: null};
+  }
+
+  const forward = applyHunks(lines, endsWithNewline, target.hunks, false);
+  if ('error' in forward) throw new Error(`${relativePath}: ${forward.error}`);
+
+  const content = forward.lines.join('\n') + (forward.endsWithNewline ? '\n' : '');
+
+  // patch(1) удаляет файл, от которого ничего не осталось. Повторяем это, иначе
+  // патч на удаление оставлял пустышку и ломал каждый следующий прогон.
+  if (content === '' || content === '\n') {
+    return {write: {file, content: null}};
+  }
+
+  return {write: {file, content}};
 }
 
 // Apple patch пишет диагностику в stdout, GNU — в stderr. Читаем оба потока, а
@@ -409,6 +588,12 @@ function applyPatches(): void {
   for (const patchFile of patchFiles) {
     const patchPath = join(PATCHES_DIR, patchFile);
 
+    const fail = (reason: string) => {
+      failed++;
+      console.log(`  ❌ ${patchFile}`);
+      console.log(`     ${reason}`);
+    };
+
     // Проверяем совпадение версии пакета с версией в патче
     const match = patchFile.match(/^(.+)\+(\d+\..+)\.patch$/);
     if (match) {
@@ -435,49 +620,72 @@ function applyPatches(): void {
     try {
       patchContent = readFileSync(patchPath, 'utf-8');
     } catch (error: any) {
-      failed++;
-      console.log(`  ❌ ${patchFile}`);
-      console.log(`     cannot read patch file: ${error.message}`);
+      fail(`cannot read patch file: ${error.message}`);
       continue;
     }
 
-    const {absoluteHeaders, hunks} = inspectPatch(patchContent);
+    const targets = parsePatch(patchContent);
 
-    if (absoluteHeaders.length > 0) {
-      failed++;
-      console.log(`  ❌ ${patchFile}`);
-      console.log(`     absolute path in patch header (${absoluteHeaders[0]}) — created by bunch-package < 1.1.0, recreate it with \`create\``);
+    if (targets.length === 0) {
+      fail('no hunks found — the patch file is empty or truncated');
       continue;
     }
 
-    if (hunks === 0) {
-      failed++;
-      console.log(`  ❌ ${patchFile}`);
-      console.log(`     no hunks found — the patch file is empty or truncated`);
+    // Патчи до 1.1.0 писали в заголовки абсолютные пути. Под -p1 первый компонент
+    // срезается, и `/Users/...` превращается в `Users/...` — путь, которого в
+    // проекте нет. Ловим это отдельно, чтобы сказать пользователю правду.
+    const absolute = targets
+      .flatMap(t => [t.oldPath, t.newPath])
+      .find(path => path !== null && path.startsWith('/'));
+    if (absolute !== undefined) {
+      fail(`absolute path in patch header (${absolute}) — created by bunch-package < 1.1.0, recreate it with \`create\``);
       continue;
     }
 
-    if (isAlreadyApplied(patchPath)) {
+    // Считаем весь патч в памяти: пока не сойдётся целиком, на диск не идёт
+    // ничего. Это и есть ответ на «применилось наполовину, а в отчёте ноль».
+    const writes: PlannedWrite[] = [];
+    let failure: string | null = null;
+
+    for (const target of targets) {
+      try {
+        const {write} = planTarget(target);
+        if (write !== null) writes.push(write);
+      } catch (error: any) {
+        failure = error.message;
+        break;
+      }
+    }
+
+    if (failure !== null) {
+      fail(failure);
+      continue;
+    }
+
+    if (writes.length === 0) {
       applied++;
       console.log(`  ✅ ${patchFile} (already applied)`);
       continue;
     }
 
     try {
-      execFileSync('patch', ['-p1', '--forward', '--batch', '--silent', `--input=${patchPath}`], {
-        cwd: process.cwd(),
-        stdio: 'pipe',
-      });
-      applied++;
-      console.log(`  ✅ ${patchFile}`);
-    } catch (error: any) {
-      failed++;
-      console.log(`  ❌ ${patchFile}`);
-      const diagnostic = firstDiagnosticLine(error);
-      if (diagnostic) {
-        console.log(`     ${diagnostic}`);
+      for (const write of writes) {
+        if (write.content === null) {
+          rmSync(write.file, {force: true});
+          continue;
+        }
+        mkdirSync(join(write.file, '..'), {recursive: true});
+        // Разрываем hardlink на общий кеш bun: запись на месте изменила бы и его.
+        rmSync(write.file, {force: true});
+        writeFileSync(write.file, write.content);
       }
+    } catch (error: any) {
+      fail(`could not write: ${error.message}`);
+      continue;
     }
+
+    applied++;
+    console.log(`  ✅ ${patchFile}`);
   }
 
   console.log(`\n📊 Summary: ${applied} applied, ${failed} failed`);
