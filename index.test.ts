@@ -97,6 +97,28 @@ describe('bunch-package create', () => {
     expect(patchContent).not.toContain(TEST_DIR);
   });
 
+  test('refuses a non-UTF-8 file instead of writing a corrupt patch', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    // latin-1 без нулевых байтов diff считает текстом и печатает как есть —
+    // раньше эти байты превращались в U+FFFD и патч уезжал испорченным.
+    writeFileSync(
+      join(TEST_DIR, 'node_modules', 'is-number', 'latin.js'),
+      Buffer.from([0x2f, 0x2f, 0x20, 0xe9, 0xe8, 0xfc, 0x0a]),
+    );
+
+    const result = run('create is-number', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not valid UTF-8');
+    expect(existsSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'))).toBe(false);
+  });
+
+  test('refuses a package name of ..', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    const result = run('create ..', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Invalid package name');
+  });
+
   test('reports no changes when package is not modified', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
 
@@ -227,6 +249,29 @@ describe('bunch-package apply', () => {
 +const a = 2;
 `;
     writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('version mismatch');
+    expect(result.stdout).toContain('patch: 1.0.0');
+    expect(result.stdout).toContain('installed: 2.0.0');
+  });
+
+  test('checks the version of the package the patch actually targets', () => {
+    // Имя файла патча и каталог в node_modules расходятся — так выглядит
+    // установка через алиас. Раньше проверка версии шла по имени файла,
+    // упиралась в несуществующий манифест и молча пропадала.
+    setupFakePackage(TEST_DIR, 'test-lib', '2.0.0', {
+      'index.js': 'const a = 1;\n',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'other-name+1.0.0.patch'), patchContent);
 
     const result = run('apply', TEST_DIR);
     expect(result.stdout).toContain('version mismatch');
