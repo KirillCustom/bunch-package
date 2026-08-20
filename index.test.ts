@@ -13,12 +13,13 @@ function overwriteFile(path: string, content: string) {
 const TEST_DIR = join(import.meta.dir, '.test-sandbox');
 const CLI = join(import.meta.dir, 'index.ts');
 
-function run(args: string, cwd: string): {stdout: string; exitCode: number} {
+function run(args: string, cwd: string, env?: Record<string, string>): {stdout: string; exitCode: number} {
   try {
     const stdout = execSync(`bun ${CLI} ${args}`, {
       cwd,
       encoding: 'utf-8',
       stdio: 'pipe',
+      env: env ? {...process.env, ...env} : process.env,
     });
     return {stdout, exitCode: 0};
   } catch (error: any) {
@@ -97,6 +98,71 @@ describe('bunch-package create', () => {
 
     const result = run('create is-number', TEST_DIR);
     expect(result.stdout).toContain('No changes detected');
+  });
+
+  test('picks up a change even when the shared bun cache is poisoned', () => {
+    // bun раскладывает пакеты hardlink'ами: файл в node_modules и запись в кеше —
+    // один инод, поэтому правка файла меняет кеш, и эталон приезжает изменённым.
+    // Кеш держим внутри песочницы, чтобы не трогать настоящий кеш разработчика,
+    // но отдаём его и CLI — иначе условие бага не воспроизводится.
+    const cacheDir = join(TEST_DIR, 'bun-cache');
+    const env = {BUN_INSTALL_CACHE_DIR: cacheDir};
+
+    execSync('bun add --backend=hardlink is-number@7.0.0', {
+      cwd: TEST_DIR,
+      stdio: 'pipe',
+      env: {...process.env, ...env},
+    });
+
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    // Дописываем в тот же инод — именно так это делает обычный редактор.
+    writeFileSync(indexPath, readFileSync(indexPath, 'utf-8') + '\n// poisoned-cache-marker\n');
+
+    const result = run('create is-number', TEST_DIR, env);
+    expect(result.stdout).not.toContain('No changes detected');
+    expect(result.stdout).toContain('Patch created');
+
+    const patchContent = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patchContent).toContain('poisoned-cache-marker');
+  });
+
+  test('keeps a root build/ directory but skips platform build artifacts', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const pkgDir = join(TEST_DIR, 'node_modules', 'is-number');
+
+    // У множества пакетов build/ в корне — это их распространяемый код.
+    mkdirSync(join(pkgDir, 'build'), {recursive: true});
+    writeFileSync(join(pkgDir, 'build', 'index.js'), 'exports.dist = 1;\n');
+
+    // А под платформенным каталогом — артефакт сборки.
+    mkdirSync(join(pkgDir, 'android', 'build'), {recursive: true});
+    writeFileSync(join(pkgDir, 'android', 'build', 'artifact.txt'), 'build junk\n');
+    mkdirSync(join(pkgDir, 'android', '.gradle'), {recursive: true});
+    writeFileSync(join(pkgDir, 'android', '.gradle', 'cache.bin'), 'gradle junk\n');
+
+    const result = run('create is-number', TEST_DIR);
+    expect(result.stdout).toContain('Skipped 2 build-artifact path(s)');
+    expect(result.stdout).toContain('android/build/artifact.txt');
+
+    const patchContent = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patchContent).toContain('a/node_modules/is-number/build/index.js');
+    expect(patchContent).not.toContain('android/build/artifact.txt');
+    expect(patchContent).not.toContain('android/.gradle');
+  });
+
+  test('does not rewrite an absolute path that appears inside file content', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+
+    // Путь проекта, встретившийся в самом файле, не должен быть переписан:
+    // раньше нормализация была заменой подстроки по всему тексту диффа.
+    const line = `// cached at ${TEST_DIR}/node_modules/is-number\n`;
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + line);
+
+    run('create is-number', TEST_DIR);
+
+    const patchContent = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patchContent).toContain(`// cached at ${TEST_DIR}/node_modules/is-number`);
   });
 
   test('outputs hash and stats', () => {
