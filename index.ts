@@ -172,8 +172,26 @@ function validateManifestField(field: string, value: unknown): string {
   return value;
 }
 
+// Проверяем наличие diff до всякой работы: иначе отказ случался уже после
+// скачивания эталона, впустую потратив сеть и время. Отличаем «бинарника нет»
+// от «ответил странно»: ENOENT означает первое, всё остальное — что diff на
+// месте, и мешать ему не нужно.
+function requireDiff(): void {
+  try {
+    execFileSync('diff', ['--version'], {stdio: 'pipe'});
+  } catch (error: any) {
+    if (error.code !== 'ENOENT') return;
+    throw new Error(
+      process.platform === 'win32'
+        ? '`create` needs the `diff` command, which is not on PATH. It ships with Git for Windows — install that, or add its usr\\bin directory to PATH. `apply` does not need it.'
+        : '`create` needs the `diff` command, which is not on PATH. Install diffutils. `apply` does not need it.',
+    );
+  }
+}
+
 function createPatch(packageName: string): void {
   validatePackageName(packageName);
+  requireDiff();
   console.log(`📦 Creating patch for ${packageName}...`);
 
   const nodeModulesPath = join(process.cwd(), 'node_modules');

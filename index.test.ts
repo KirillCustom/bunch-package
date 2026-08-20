@@ -122,6 +122,26 @@ describe('bunch-package create', () => {
     expect(existsSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'))).toBe(false);
   });
 
+  // На Windows урезать PATH до одного каталога рискованно: bun может не найти
+  // системные библиотеки. Проверка при этом платформонезависима.
+  test.skipIf(isWindows)('fails fast and clearly when diff is missing', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// changed\n');
+
+    // PATH оставляем ровно с каталогом, где лежит bun: сам он запустится, а diff
+    // из /usr/bin — уже нет. Каталог берём у оболочки: process.execPath ведёт на
+    // сам бинарник, а запускается bun через обёртку, лежащую в другом месте.
+    const bunDir = join(execSync('command -v bun', {encoding: 'utf-8'}).trim(), '..');
+    const result = run('create is-number', TEST_DIR, {PATH: bunDir});
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('needs the `diff` command');
+    // Отказ должен случиться до скачивания эталона.
+    expect(result.stdout).not.toContain('Fetching pristine');
+    expect(existsSync(join(TEST_DIR, 'patches'))).toBe(false);
+  });
+
   test('refuses a package name of ..', () => {
     mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
     const result = run('create ..', TEST_DIR);
