@@ -94,13 +94,23 @@ applied; `apply` reports them as failed and asks you to recreate them with `crea
 
 ## What gets excluded?
 
-`bunch-package` automatically excludes:
+`bunch-package` automatically excludes, at any depth:
 
-- Build artifacts (`build/`, `.gradle/`, `.transforms/`, `Pods/`, `DerivedData/`)
 - Binary files (`*.so`, `*.jar`, `*.aar`, `*.class`, `*.dex`, `*.apk`, `*.a`, `*.framework`, `*.xcframework`, `*.dylib`)
 - Media files (`*.png`, `*.jpg`, `*.jpeg`, `*.gif`, `*.webp`)
 - Fonts (`*.ttf`, `*.otf`, `*.woff`, `*.woff2`)
+- Leftovers from a failed apply (`*.rej`, `*.orig`)
 - Version control (`.git/`, `node_modules/`)
+
+Build artifacts are excluded by path, not by name:
+
+- `.gradle/`, `.cxx/`, `.transforms/`, `DerivedData/` and `Pods/` at any depth — these are never source
+- `build/` **only** under a platform directory (`android/build/`, `ios/build/`, …)
+
+A `build/` directory at the root of a package is *not* excluded: for a great many
+packages that is where their published JavaScript lives, and dropping it would
+silently discard the change you came to make. Anything skipped is listed in the
+output — `create` never drops a path without saying so.
 
 This keeps your patches small and text-based.
 
@@ -134,8 +144,15 @@ git commit -m "fix: add missing include in react-native-date-picker"
 
 ## How it works
 
-1. **Create**: Installs a clean version of the package in a temp directory, diffs it with your modified version, and saves the diff as a patch file
+1. **Create**: Fetches a pristine copy of the package into a temp directory, diffs it against your modified version, and writes the diff as a patch file
 2. **Apply**: Uses the `patch` command to apply all `.patch` files in the `patches/` directory
+
+The pristine copy is installed with an isolated download cache. This matters: bun
+links installed packages to its shared cache, so editing a file in `node_modules`
+edits the cache entry too — and a "clean" install pulled from that cache would come
+back carrying your change, making the diff come out empty. Patch headers are rebuilt
+from the file paths rather than rewritten in place, so an absolute path that happens
+to appear *inside* a file is left alone.
 
 ## Comparison with patch-package
 

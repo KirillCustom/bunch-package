@@ -1,17 +1,23 @@
 #!/usr/bin/env bun
 
-import {execSync, execFileSync} from 'child_process';
+import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
 import {existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync} from 'fs';
 import {join} from 'path';
 
 const PATCHES_DIR = 'patches';
 
-// Список паттернов для исключения
+// diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
+// что артефактно на любой глубине. Каталоги сборки сюда не входят: `build` у
+// множества пакетов — это каталог с распространяемым кодом. Ими занимается
+// isBuildArtifact() уже после диффа, по относительному пути.
 const EXCLUDE_PATTERNS = [
   'node_modules',
   '.git',
   '.DS_Store',
+  // Следы неудачного apply — иначе они уезжают в следующий патч
+  '*.rej',
+  '*.orig',
   // Бинарные файлы Android
   '*.so',
   '*.jar',
@@ -24,13 +30,6 @@ const EXCLUDE_PATTERNS = [
   '*.framework',
   '*.xcframework',
   '*.dylib',
-  // Build артефакты
-  'build',
-  '.gradle',
-  '.transforms',
-  'Pods',
-  'DerivedData',
-  '.cxx',
   // Медиа файлы
   '*.png',
   '*.jpg',
@@ -43,6 +42,87 @@ const EXCLUDE_PATTERNS = [
   '*.woff',
   '*.woff2',
 ];
+
+// Эти имена не бывают исходниками ни на какой глубине.
+const ARTIFACT_SEGMENTS = ['.gradle', '.cxx', '.transforms', 'DerivedData', 'Pods'];
+
+// А `build` бывает: под платформенным каталогом это артефакт, в корне пакета —
+// обычно его собранный JavaScript. Поэтому только с якорем.
+const ARTIFACT_PREFIXES = ['android/build', 'ios/build', 'macos/build', 'windows/build'];
+
+function isBuildArtifact(relativePath: string): boolean {
+  if (relativePath.split('/').some(segment => ARTIFACT_SEGMENTS.includes(segment))) {
+    return true;
+  }
+  return ARTIFACT_PREFIXES.some(
+    prefix => relativePath === prefix || relativePath.startsWith(`${prefix}/`),
+  );
+}
+
+interface DiffSection {
+  relativePath: string;
+  body: string[];
+}
+
+// Секции режем по заголовкам, а не по строке с командой diff, и идём с учётом
+// границ хунков — строка кода `--- /foo` внутри тела не должна сойти за заголовок.
+//
+// Тело хунка мы переносим дословно, а заголовки собираем заново из путей. Это
+// принципиально: прежняя нормализация была заменой подстроки по всему тексту,
+// поэтому путь проекта, встретившийся внутри файла, молча портился.
+function splitDiffSections(diffOutput: string, cleanRoot: string, modifiedRoot: string): DiffSection[] {
+  const sections: DiffSection[] = [];
+  let current: DiffSection | null = null;
+  let oldLeft = 0;
+  let newLeft = 0;
+
+  const relativize = (path: string): string | null => {
+    for (const root of [modifiedRoot, cleanRoot]) {
+      if (path.startsWith(`${root}/`)) return path.slice(root.length + 1);
+    }
+    return null;
+  };
+
+  for (const line of diffOutput.split('\n')) {
+    // `\ No newline at end of file` идёт после последней строки хунка, когда
+    // счётчики уже исчерпаны, поэтому ловим его раньше проверки на тело.
+    // Строка кода так начинаться не может: в теле у неё всегда есть префикс.
+    if (line.startsWith('\\') && current !== null && current.body.length > 0) {
+      current.body.push(line);
+      continue;
+    }
+
+    if (oldLeft > 0 || newLeft > 0) {
+      current?.body.push(line);
+      if (line.startsWith('-')) oldLeft--;
+      else if (line.startsWith('+')) newLeft--;
+      else {
+        oldLeft--;
+        newLeft--;
+      }
+      continue;
+    }
+
+    const hunk = line.match(/^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/);
+    if (hunk) {
+      oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
+      newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      current?.body.push(line);
+      continue;
+    }
+
+    const header = line.match(/^(?:---|\+\+\+) ([^\t]+)/);
+    if (header) {
+      const relativePath = relativize(header[1]);
+      if (relativePath !== null && (current === null || current.relativePath !== relativePath)) {
+        current = {relativePath, body: []};
+        sections.push(current);
+      }
+    }
+  }
+
+  return sections.filter(section => section.body.length > 0);
+}
 
 function validatePackageName(name: string): void {
   if (!/^(@[\w.-]+\/)?[\w.-]+$/.test(name)) {
@@ -74,53 +154,120 @@ function createPatch(packageName: string): void {
 
     mkdirSync(tempDir, {recursive: true});
 
+    // Эталон нельзя ставить обычным `bun add`: bun раскладывает пакеты
+    // hardlink'ами, поэтому файл в node_modules и запись в глобальном кеше —
+    // один инод. Правка файла меняет кеш, «чистая» установка приезжает уже
+    // изменённой, и diff сравнивает файл сам с собой, отдавая «No changes
+    // detected». На Linux это поведение по умолчанию.
+    //
+    // Лечится изоляцией кеша: BUN_INSTALL_CACHE_DIR внутри temp заставляет bun
+    // скачать пакет заново, и разделить иноды с node_modules проекта он уже не может.
+    console.log(`📥 Fetching pristine ${name}@${version}...`);
+
     writeFileSync(
       join(tempDir, 'package.json'),
       JSON.stringify({name: 'temp', version: '1.0.0'}, null, 2),
     );
 
-    console.log(`📥 Installing clean version of ${name}@${version}...`);
+    // Имя каталога в node_modules не обязано совпадать с именем пакета: при
+    // установке через алиас (`"mynum": "npm:is-number@7.0.0"`) они разные.
+    // Путь к эталону строим по имени из манифеста, а не по аргументу команды.
+    let cleanPackagePath = join(tempDir, 'node_modules', name);
+    const failures: string[] = [];
 
     try {
-      execFileSync('bun', ['add', `${name}@${version}`], {
+      execFileSync('bun', ['add', '--no-save', `${name}@${version}`], {
         cwd: tempDir,
         stdio: 'pipe',
         timeout: 60000,
+        env: {...process.env, BUN_INSTALL_CACHE_DIR: join(tempDir, 'cache')},
       });
-    } catch {
-      console.log(`⚠️  Trying with npm...`);
-      execFileSync('npm', ['install', '--no-save', '--legacy-peer-deps', `${name}@${version}`], {
-        cwd: tempDir,
-        stdio: 'pipe',
-        timeout: 60000,
-      });
+    } catch (error: any) {
+      failures.push(`bun: ${firstDiagnosticLine(error) || error.message}`);
+
+      // Запасной путь — тарбол из реестра. Он тоже мимо кеша bun, но требует
+      // npm, которого нет, например, в официальном образе oven/bun.
+      try {
+        const packed = execFileSync('npm', ['pack', '--silent', '--pack-destination', tempDir, `${name}@${version}`], {
+          cwd: tempDir,
+          encoding: 'utf-8',
+          timeout: 60000,
+        });
+        const printed = packed.split('\n').map(line => line.trim()).filter(Boolean).pop();
+        if (!printed) throw new Error('npm pack printed no tarball name');
+        execFileSync('tar', ['-xzf', join(tempDir, printed), '-C', tempDir], {stdio: 'pipe', timeout: 60000});
+        cleanPackagePath = join(tempDir, 'package'); // тарболы npm всегда распаковываются сюда
+      } catch (npmError: any) {
+        failures.push(`npm: ${firstDiagnosticLine(npmError) || npmError.message}`);
+        throw new Error(`Could not fetch a pristine ${name}@${version}:\n   ${failures.join('\n   ')}`);
+      }
     }
 
-    const cleanPackagePath = join(tempDir, 'node_modules', packageName);
+    // Без этой проверки отсутствующий эталон не заметен: diff -N трактует
+    // недостающую сторону как пустую и выдаёт патч «добавить все файлы».
+    if (!existsSync(cleanPackagePath)) {
+      throw new Error(`Pristine copy of ${name}@${version} did not land at ${cleanPackagePath}`);
+    }
 
     console.log(`🔍 Generating diff...`);
 
-    // Строим команду diff с исключениями
-    const excludeArgs = EXCLUDE_PATTERNS.map(p => `--exclude=${p}`).join(' ');
+    // Без шелла: раньше это была строка, в которую подставлялся process.cwd(),
+    // и `|| true` превращал любой сбой diff в успокаивающее «нет изменений».
+    const diffArgs = [
+      '-Naur',
+      ...EXCLUDE_PATTERNS.map(pattern => `--exclude=${pattern}`),
+      '--no-dereference',
+      cleanPackagePath,
+      packagePath,
+    ];
 
-    const rawPatch = execSync(
-      `diff -Naur ${excludeArgs} --no-dereference "${cleanPackagePath}" "${packagePath}" || true`,
-      {
+    let rawPatch: string;
+    try {
+      rawPatch = execFileSync('diff', diffArgs, {
         encoding: 'utf-8',
         maxBuffer: 50 * 1024 * 1024,
-      },
-    );
+      });
+    } catch (error: any) {
+      // diff: 0 — совпало, 1 — есть различия, 2 и выше — сбой.
+      if (error.status !== 1) {
+        const reason = (error.stderr?.toString() || error.message || '').split('\n').filter(Boolean)[0];
+        throw new Error(`diff failed: ${reason}`);
+      }
+      rawPatch = error.stdout?.toString() ?? '';
+    }
 
-    if (!rawPatch.trim()) {
-      console.log('⚠️  No changes detected');
-      console.log(`\n💡 Did you modify files in ${packagePath}?`);
+    const sections = splitDiffSections(rawPatch, cleanPackagePath, packagePath);
+    const kept = sections.filter(section => !isBuildArtifact(section.relativePath));
+    const skipped = sections.filter(section => isBuildArtifact(section.relativePath));
+
+    if (skipped.length > 0) {
+      console.log(`⏭  Skipped ${skipped.length} build-artifact path(s):`);
+      for (const section of skipped.slice(0, 5)) {
+        console.log(`   ${section.relativePath}`);
+      }
+      if (skipped.length > 5) {
+        console.log(`   ...and ${skipped.length - 5} more`);
+      }
+    }
+
+    if (kept.length === 0) {
+      if (skipped.length > 0) {
+        console.log('⚠️  No changes outside build artifacts');
+        console.log(`\n💡 Everything you changed is under a build directory — those are not patchable.`);
+      } else {
+        console.log('⚠️  No changes detected');
+        console.log(`\n💡 Did you modify files in ${packagePath}?`);
+      }
       return;
     }
 
-    // Заменяем абсолютные пути на относительные для переносимости
-    const patchContent = rawPatch
-      .split(cleanPackagePath).join(`a/node_modules/${packageName}`)
-      .split(packagePath).join(`b/node_modules/${packageName}`);
+    // Заголовки собираем заново из путей, а тело хунков переносим дословно.
+    const patchContent = kept
+      .map(section => {
+        const path = `node_modules/${packageName}/${section.relativePath}`;
+        return [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, ...section.body].join('\n');
+      })
+      .join('\n') + '\n';
 
     // Проверяем размер патча
     const patchLines = patchContent.split('\n').length;
@@ -228,12 +375,15 @@ function inspectPatch(patchContent: string): {absoluteHeaders: string[]; hunks: 
   return {absoluteHeaders, hunks};
 }
 
-// Apple patch пишет диагностику в stdout, GNU — в stderr. Читаем оба потока.
+// Apple patch пишет диагностику в stdout, GNU — в stderr. Читаем оба потока, а
+// если молчат оба — берём сообщение самой ошибки: при отсутствующем patch(1)
+// потоков нет вовсе, и без этого пользователь видел голый ❌ без причины.
 function firstDiagnosticLine(error: any): string {
-  return `${error.stderr?.toString() ?? ''}\n${error.stdout?.toString() ?? ''}`
+  const streams = `${error.stderr?.toString() ?? ''}\n${error.stdout?.toString() ?? ''}`
     .split('\n')
     .map((line: string) => line.trim())
-    .filter(Boolean)[0] ?? '';
+    .filter(Boolean);
+  return streams[0] ?? (error.message ? String(error.message).split('\n')[0].trim() : '');
 }
 
 // Apply patches function
