@@ -128,6 +128,20 @@ function validatePackageName(name: string): void {
   if (!/^(@[\w.-]+\/)?[\w.-]+$/.test(name)) {
     throw new Error(`Invalid package name: ${name}`);
   }
+  // Регулярка выше пропускает `.` и `..`: точка входит в \w.-. С таким именем
+  // create диффал весь проект и складывал его файлы, включая неотслеживаемые,
+  // в patches/.
+  if (name.split('/').some(segment => segment === '.' || segment === '..')) {
+    throw new Error(`Invalid package name: ${name}`);
+  }
+}
+
+// name и version приходят из чужого package.json и попадают прямо в путь записи.
+function validateManifestField(field: string, value: unknown): string {
+  if (typeof value !== 'string' || !/^[\w.@/+-]+$/.test(value) || value.split(/[/\\]/).some(s => s === '.' || s === '..')) {
+    throw new Error(`Package manifest has an unusable ${field}: ${String(value)}`);
+  }
+  return value;
 }
 
 function createPatch(packageName: string): void {
@@ -143,7 +157,8 @@ function createPatch(packageName: string): void {
 
   const packageJsonPath = join(packagePath, 'package.json');
   const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
-  const {name, version} = packageJson;
+  const name = validateManifestField('name', packageJson.name);
+  const version = validateManifestField('version', packageJson.version);
 
   const tempDir = join(process.cwd(), '.bunch-patch-tmp');
 
@@ -221,19 +236,45 @@ function createPatch(packageName: string): void {
       packagePath,
     ];
 
-    let rawPatch: string;
+    let rawBuffer: Buffer;
     try {
-      rawPatch = execFileSync('diff', diffArgs, {
-        encoding: 'utf-8',
-        maxBuffer: 50 * 1024 * 1024,
-      });
+      rawBuffer = execFileSync('diff', diffArgs, {maxBuffer: 50 * 1024 * 1024});
     } catch (error: any) {
       // diff: 0 — совпало, 1 — есть различия, 2 и выше — сбой.
       if (error.status !== 1) {
         const reason = (error.stderr?.toString() || error.message || '').split('\n').filter(Boolean)[0];
         throw new Error(`diff failed: ${reason}`);
       }
-      rawPatch = error.stdout?.toString() ?? '';
+      rawBuffer = error.stdout ?? Buffer.alloc(0);
+    }
+
+    // Читать вывод сразу как utf-8 нельзя: каждый неверный байт превращался в
+    // U+FFFD, патч уезжал испорченным, а apply молча записывал не те байты.
+    // Лучше отказаться вслух, чем тихо испортить файл.
+    const rawPatch = rawBuffer.toString('utf-8');
+    if (!Buffer.from(rawPatch, 'utf-8').equals(rawBuffer)) {
+      throw new Error(
+        `The diff for ${name}@${version} is not valid UTF-8 — some changed file is binary ` +
+          `or in another encoding. Writing this patch would corrupt it.`,
+      );
+    }
+
+    // Двоичные файлы diff в патч не включает, печатая одну строку. Без этого
+    // сообщения их изменение просто пропадало.
+    const binaryNotices = rawPatch
+      .split('\n')
+      .filter(line => line.startsWith('Binary files ') && line.endsWith(' differ'));
+
+    if (binaryNotices.length > 0) {
+      console.log(`⚠️  ${binaryNotices.length} binary file(s) differ and cannot be patched:`);
+      for (const notice of binaryNotices.slice(0, 5)) {
+        const paths = notice.slice('Binary files '.length, -' differ'.length);
+        const modified = paths.split(' and ').pop() ?? paths;
+        console.log(`   ${modified.startsWith(packagePath + sep) ? modified.slice(packagePath.length + 1) : modified}`);
+      }
+      if (binaryNotices.length > 5) {
+        console.log(`   ...and ${binaryNotices.length - 5} more`);
+      }
     }
 
     const sections = splitDiffSections(rawPatch, cleanPackagePath, packagePath);
@@ -291,6 +332,13 @@ function createPatch(packageName: string): void {
     const sanitizedName = name.replace(/\//g, '+');
     const patchFileName = `${sanitizedName}+${version}.patch`;
     const patchFilePath = join(PATCHES_DIR, patchFileName);
+
+    // Последний рубеж: имя собрано из чужого манифеста, и уехать за пределы
+    // patches/ оно не должно ни при каких значениях полей.
+    const patchesRoot = resolve(process.cwd(), PATCHES_DIR);
+    if (!resolve(patchFilePath).startsWith(patchesRoot + sep)) {
+      throw new Error(`Refusing to write ${patchFileName} outside ${PATCHES_DIR}/`);
+    }
 
     writeFileSync(patchFilePath, patchContent);
 
@@ -594,26 +642,6 @@ function applyPatches(): void {
       console.log(`     ${reason}`);
     };
 
-    // Проверяем совпадение версии пакета с версией в патче
-    const match = patchFile.match(/^(.+)\+(\d+\..+)\.patch$/);
-    if (match) {
-      const patchPkgName = match[1].replace(/\+/g, '/');
-      const patchVersion = match[2];
-      const pkgJsonPath = join('node_modules', patchPkgName, 'package.json');
-      if (existsSync(pkgJsonPath)) {
-        // Битый манифест не должен ронять весь прогон — проверку версии просто пропускаем.
-        let installedVersion: string | undefined;
-        try {
-          installedVersion = JSON.parse(readFileSync(pkgJsonPath, 'utf-8')).version;
-        } catch {
-          console.log(`  ⚠️  ${patchFile} — cannot read ${pkgJsonPath}, skipping version check`);
-        }
-        if (installedVersion !== undefined && installedVersion !== patchVersion) {
-          console.log(`  ⚠️  ${patchFile} — version mismatch (patch: ${patchVersion}, installed: ${installedVersion})`);
-        }
-      }
-    }
-
     console.log(`  Applying ${patchFile}...`);
 
     let patchContent: string;
@@ -629,6 +657,32 @@ function applyPatches(): void {
     if (targets.length === 0) {
       fail('no hunks found — the patch file is empty or truncated');
       continue;
+    }
+
+    // Версию сверяем по пакету из заголовков, а не по имени файла патча: при
+    // установке через алиас каталог называется иначе, чем пакет, и разбор имени
+    // файла уводил проверку к несуществующему манифесту — она молча пропадала.
+    const patchVersion = patchFile.match(/^.+\+(\d+\..+)\.patch$/)?.[1];
+    if (patchVersion !== undefined) {
+      const packageDirs = new Set(
+        targets
+          .map(t => packageDirectoryOf(stripPathPrefix(t.newPath ?? t.oldPath ?? '')))
+          .filter((dir): dir is string => dir !== null),
+      );
+      for (const dir of packageDirs) {
+        const pkgJsonPath = join(dir, 'package.json');
+        if (!existsSync(pkgJsonPath)) continue;
+        // Битый манифест не должен ронять весь прогон — проверку просто пропускаем.
+        let installedVersion: string | undefined;
+        try {
+          installedVersion = JSON.parse(readFileSync(pkgJsonPath, 'utf-8')).version;
+        } catch {
+          console.log(`  ⚠️  ${patchFile} — cannot read ${pkgJsonPath}, skipping version check`);
+        }
+        if (installedVersion !== undefined && installedVersion !== patchVersion) {
+          console.log(`  ⚠️  ${patchFile} — version mismatch (patch: ${patchVersion}, installed: ${installedVersion})`);
+        }
+      }
     }
 
     // Патчи до 1.1.0 писали в заголовки абсолютные пути. Под -p1 первый компонент
