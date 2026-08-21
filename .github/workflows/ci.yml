@@ -41,3 +41,43 @@ jobs:
       - run: bun test
 
       - run: bun run build
+
+  # `engines` обещает bun >= 1.0.0, и до этой проверки обещание было неправдой:
+  # на 1.1 `apply` падал с EEXIST на mkdir существующего node_modules. Сюиту на
+  # старых bun не прогнать (текстовый локфайл и test runner появились в 1.2),
+  # поэтому здесь — короткий прогон самого инструмента, без установки
+  # зависимостей: apply, повторный apply, status и откат.
+  old-bun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        bun: ['1.0.36', '1.1.45', '1.2.23']
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.bun }}
+
+      - name: apply, re-apply, status and rebase a patch
+        run: |
+          set -e
+          bun --version
+          mkdir -p demo/node_modules/fakepkg demo/patches
+          cd demo
+          echo '{"name":"demo","version":"1.0.0"}' > package.json
+          echo '{"name":"fakepkg","version":"1.0.0"}' > node_modules/fakepkg/package.json
+          printf 'line one\nline two\n' > node_modules/fakepkg/index.js
+          printf -- '--- a/node_modules/fakepkg/index.js\n+++ b/node_modules/fakepkg/index.js\n@@ -1,2 +1,2 @@\n-line one\n+PATCHED\n line two\n' > patches/fakepkg+1.0.0.patch
+
+          bun ../index.ts apply
+          grep -q '^PATCHED$' node_modules/fakepkg/index.js
+
+          bun ../index.ts apply | grep -q 'already applied'
+          bun ../index.ts status | grep -q '1 of 1 in the tree'
+
+          bun ../index.ts rebase fakepkg 0
+          grep -q '^line one$' node_modules/fakepkg/index.js

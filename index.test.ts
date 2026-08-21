@@ -3,6 +3,7 @@ import {execSync, spawn, spawnSync} from 'child_process';
 import {chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree} from './src/create';
 import {withApplyLock} from './src/lock';
+import {ensureDir} from './src/paths';
 import {invertTarget, parsePatch} from './src/patch-file';
 import {join} from 'path';
 
@@ -1069,10 +1070,10 @@ describe('limits and failure paths', () => {
   test.skipIf(isWindows)('says the pristine fetch timed out, and how to allow longer', () => {
     setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
 
-    // Оба способа добыть эталон подменяем на «висит и молчит». Подмену видит
-    // только запускаемый процесс: PATH меняется у него при старте, а не у
-    // текущего — bun не отдаёт потомку правки process.env, сделанные после
-    // старта, если env не передан явно.
+    // Оба способа добыть эталон подменяем на «висит и молчит». PATH задаётся
+    // запускаемому процессу при старте, а не правкой process.env у текущего:
+    // на bun 1.3.2 такая правка потомку вообще не доезжала без явного env, на
+    // 1.4.0 доезжает — а через env работает на обеих.
     const fakeBin = join(TEST_DIR, 'bin');
     mkdirSync(fakeBin, {recursive: true});
     for (const name of ['bun', 'npm']) {
@@ -2203,5 +2204,29 @@ describe('retarget', () => {
     expect(result.exitCode).not.toBe(0);
     expect(result.stdout).toContain('more than one version');
     expect(result.stdout).not.toContain('Fetching pristine');
+  });
+});
+
+// `engines` обещает bun >= 1.0.0. Обещание проверяется в CI отдельным заданием
+// на 1.0, 1.1 и 1.2 — сюиту там не запустить. Здесь закреплён сам договор,
+// из-за нарушения которого `apply` на bun 1.1 падал с EEXIST.
+describe('ensureDir', () => {
+  test('does not mind a directory that is already there', () => {
+    const nested = join(TEST_DIR, 'one', 'two', 'three');
+
+    ensureDir(nested);
+    expect(existsSync(nested)).toBe(true);
+
+    // Второй раз — то же самое и без единого звука.
+    expect(() => ensureDir(nested)).not.toThrow();
+    expect(() => ensureDir(join(TEST_DIR, 'one'))).not.toThrow();
+  });
+
+  test('still complains when the path is a file', () => {
+    const file = join(TEST_DIR, 'not-a-dir');
+    writeFileSync(file, 'x');
+
+    // EEXIST мы глотаем, ENOTDIR и прочее — нет: это уже не «уже есть».
+    expect(() => ensureDir(join(file, 'child'))).toThrow();
   });
 });

@@ -350,6 +350,11 @@ Tested on Linux, macOS and Windows. `apply` is plain JavaScript and needs nothin
 from the system; `create` shells out to `diff`, which is present on all three
 (on Windows it comes with Git).
 
+The `bun >= 1.0.0` in `engines` is checked rather than assumed: CI applies a patch,
+re-applies it, reads `status` and un-applies it on bun 1.0, 1.1 and 1.2, alongside
+the full suite on the current release. Developing the tool needs bun 1.2 or newer,
+though — the text lockfile and the test runner it uses arrived there.
+
 If `diff` is not on PATH, `create` says so before it does anything else, rather
 than downloading a pristine copy of the package first and failing afterwards.
 
