@@ -167,6 +167,47 @@ export function parsePatch(patchContent: string): PatchTarget[] {
   );
 }
 
+// Откат патча — это применение перевёрнутого патча, а не отдельный применятель.
+// Так весь разбор случаев (создание, удаление, переименование, режимы, файл без
+// перевода строки в конце) остаётся один на оба направления — тот самый, что
+// выверен корпусом. Второй экземпляр той же логики разошёлся бы с первым.
+export function invertTarget(target: PatchTarget): PatchTarget {
+  // Встречаются патчи, у которых стороны названы разными файлами без заголовков
+  // rename: так выглядит `diff bootstrap.js.bak bootstrap.js`. Правят они всё
+  // равно один файл — тот, что назван новой стороной, потому что именно его
+  // берёт planTarget. Перестановка путей увела бы откат в файл, которого нет:
+  // на корпусе это ровно тот случай, где дерево не возвращалось к эталону.
+  const oneFile = target.renameFrom === null && target.oldPath !== null && target.newPath !== null;
+
+  return {
+    oldPath: target.newPath,
+    newPath: oneFile ? target.newPath : target.oldPath,
+    hunks: target.hunks.map(invertHunk),
+    oldMode: target.newMode,
+    newMode: target.oldMode,
+    // `new file mode` наоборот означает, что файл исчезает, и обратно.
+    newFile: target.deletedFile,
+    deletedFile: target.newFile,
+    renameFrom: target.renameTo,
+    renameTo: target.renameFrom,
+  };
+}
+
+function invertHunk(hunk: Hunk): Hunk {
+  return {
+    oldStart: hunk.newStart,
+    newStart: hunk.oldStart,
+    lines: hunk.lines.map(line => {
+      const prefix = line.charAt(0);
+      if (prefix === '+') return `-${line.slice(1)}`;
+      if (prefix === '-') return `+${line.slice(1)}`;
+      return line; // контекст остаётся контекстом
+    }),
+    oldNoNewline: hunk.newNoNewline,
+    newNoNewline: hunk.oldNoNewline,
+  };
+}
+
 // Одна сторона хунка: для старой отбрасываем добавленные строки, для новой — удалённые.
 // Пустая строка — это контекст, у которого срезали хвостовой пробел.
 export function sideLines(hunk: Hunk, side: 'old' | 'new'): string[] {

@@ -590,6 +590,13 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
   }
 
   const {name, version} = readManifest(packagePath);
+
+  // Патчи одного пакета образуют последовательность, где каждый следующий
+  // отсчитывается от состояния после предыдущих, а не от чистого пакета.
+  // Решаем, какой из них пересоздаём, **до** скачивания эталона: отказ здесь
+  // возможен, и тратить на него сеть незачем — как и с проверкой diff.
+  const plan = planSequence(name.replace(/\//g, '+'), version, appendLabel);
+
   const tempDir = join(process.cwd(), '.bunch-patch-tmp');
 
   try {
@@ -605,11 +612,8 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
       throw new Error(`Pristine copy of ${name}@${version} did not land at ${cleanPackagePath}`);
     }
 
-    // Патчи одного пакета образуют последовательность, где каждый следующий
-    // отсчитывается от состояния после предыдущих, а не от чистого пакета.
-    // Поэтому эталон сначала доводится уже существующими патчами — иначе новый
-    // патч нёс бы в себе и чужие правки.
-    const plan = planSequence(name.replace(/\//g, '+'), version, appendLabel);
+    // Эталон доводится уже существующими патчами — иначе новый патч нёс бы в
+    // себе и чужие правки.
 
     if (plan.replay.length > 0) {
       console.log(`🔁 Replaying ${plan.replay.length} existing patch(es) onto the pristine copy...`);

@@ -3,6 +3,7 @@ import {execSync, spawn, spawnSync} from 'child_process';
 import {chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree} from './src/create';
 import {withApplyLock} from './src/lock';
+import {invertTarget, parsePatch} from './src/patch-file';
 import {join} from 'path';
 
 // writeFileSync пишет в тот же inode, что ломает тесты при hardlink-кеше bun.
@@ -1571,6 +1572,8 @@ describe('an apply killed mid-write', () => {
 
 // Запись о применённых патчах и команда, которая отвечает на вопрос «что
 // сейчас в дереве». Запись — только запись: доказательство берётся из дерева.
+// Запись о применённых патчах и команда, которая отвечает на вопрос «что
+// сейчас в дереве». Запись — только запись: доказательство берётся из дерева.
 describe('state file and status', () => {
   const PATCH = `--- a/node_modules/test-lib/index.js
 +++ b/node_modules/test-lib/index.js
@@ -1734,5 +1737,284 @@ describe('state file and status', () => {
     const patch = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
     expect(patch).toContain('+module.exports = "patched";');
     expect(patch).not.toContain('patch-package.json');
+  });
+});
+
+// Патчи одного пакета — как коммиты: чтобы переделать не последний, надо снять
+// те, что легли поверх. Откат — это применение перевёрнутого патча тем же
+// кодом, что и обычное применение.
+describe('rebase', () => {
+  const PKG = 'seq-lib';
+
+  // Первый патч заменяет строку, второй **дописывает** — на дописывающем патче
+  // и ломалась наивная проверка применённости у перевёрнутого патча.
+  const ONE = `--- a/node_modules/${PKG}/index.js
++++ b/node_modules/${PKG}/index.js
+@@ -1,3 +1,3 @@
+-line one
++PATCH ONE
+ line two
+ line three
+`;
+  const TWO = `--- a/node_modules/${PKG}/index.js
++++ b/node_modules/${PKG}/index.js
+@@ -1,3 +1,4 @@
+ PATCH ONE
+ line two
+ line three
++PATCH TWO
+`;
+
+  function setupSequence() {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'index.js': 'line one\nline two\nline three\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0+001+one.patch`), ONE);
+    writeFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0+002+two.patch`), TWO);
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+  }
+
+  const content = () => readFileSync(join(TEST_DIR, 'node_modules', PKG, 'index.js'), 'utf-8');
+
+  test('un-applies the patch that sits on top, keeping the one below', () => {
+    setupSequence();
+    expect(content()).toBe('PATCH ONE\nline two\nline three\nPATCH TWO\n');
+
+    const result = run(`rebase ${PKG} 1`, TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(`${PKG}+1.0.0+002+two.patch`);
+    // Дописывающий патч снят, а не «признан отсутствующим»: прямое применение
+    // такого патча сходится и во второй раз, поэтому спрашивать надо про
+    // исходный патч, а не про перевёрнутый.
+    expect(content()).toBe('PATCH ONE\nline two\nline three\n');
+  });
+
+  test('takes the target by number, label, number+label or file name', () => {
+    for (const target of ['1', 'one', '001+one', `${PKG}+1.0.0+001+one.patch`]) {
+      rmSync(join(TEST_DIR, 'node_modules'), {force: true, recursive: true});
+      rmSync(join(TEST_DIR, 'patches'), {force: true, recursive: true});
+      setupSequence();
+
+      const result = run(`rebase ${PKG} ${target}`, TEST_DIR);
+
+      expect(`${target}: ${result.exitCode}`).toBe(`${target}: 0`);
+      expect(`${target}: ${content()}`).toBe(`${target}: PATCH ONE\nline two\nline three\n`);
+    }
+  });
+
+  test('un-applies everything on 0', () => {
+    setupSequence();
+
+    const result = run(`rebase ${PKG} 0`, TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(content()).toBe('line one\nline two\nline three\n');
+    // Вставлять патч перед остальными можно только через --append.
+    expect(result.stdout).toContain('--append');
+  });
+
+  test('refuses an unknown target, listing what there is, and changes nothing', () => {
+    setupSequence();
+    const before = content();
+
+    const result = run(`rebase ${PKG} 42`, TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Could not find patch 42');
+    expect(result.stdout).toContain(`${PKG}+1.0.0+001+one.patch`);
+    expect(content()).toBe(before);
+  });
+
+  test('says so instead of failing when there is nothing to un-apply', () => {
+    setupSequence();
+    run(`rebase ${PKG} 1`, TEST_DIR);
+
+    const again = run(`rebase ${PKG} 1`, TEST_DIR);
+
+    expect(again.exitCode).toBe(0);
+    expect(again.stdout).toContain('was not in the tree');
+    expect(content()).toBe('PATCH ONE\nline two\nline three\n');
+  });
+
+  test('brings back a file the patch deleted, and removes one it created', () => {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'gone.js': 'delete me\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0+001+one.patch`), `diff --git a/node_modules/${PKG}/gone.js b/node_modules/${PKG}/gone.js
+deleted file mode 100644
+--- a/node_modules/${PKG}/gone.js
++++ /dev/null
+@@ -1 +0,0 @@
+-delete me
+diff --git a/node_modules/${PKG}/new.js b/node_modules/${PKG}/new.js
+new file mode 100644
+--- /dev/null
++++ b/node_modules/${PKG}/new.js
+@@ -0,0 +1 @@
++made by the patch
+`);
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    const pkgDir = join(TEST_DIR, 'node_modules', PKG);
+    expect(existsSync(join(pkgDir, 'gone.js'))).toBe(false);
+    expect(existsSync(join(pkgDir, 'new.js'))).toBe(true);
+
+    expect(run(`rebase ${PKG} 0`, TEST_DIR).exitCode).toBe(0);
+
+    expect(readFileSync(join(pkgDir, 'gone.js'), 'utf-8')).toBe('delete me\n');
+    expect(existsSync(join(pkgDir, 'new.js'))).toBe(false);
+  });
+
+  test('refuses to un-apply a patch the tree no longer matches, and writes nothing', () => {
+    setupSequence();
+    // Кто-то поправил файл руками: ни одна сторона патча теперь не совпадает.
+    overwriteFile(join(TEST_DIR, 'node_modules', PKG, 'index.js'), 'something else entirely\n');
+
+    const result = run(`rebase ${PKG} 1`, TEST_DIR);
+
+    expect(result.stdout).toContain('cannot be un-applied');
+    expect(content()).toBe('something else entirely\n');
+  });
+
+  test('updates the record of what is in the tree', () => {
+    setupSequence();
+    const recorded = () =>
+      JSON.parse(readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8'))
+        .patches.map((patch: any) => patch.file);
+    expect(recorded()).toHaveLength(2);
+
+    run(`rebase ${PKG} 1`, TEST_DIR);
+
+    expect(recorded()).toEqual([`${PKG}+1.0.0+001+one.patch`]);
+  });
+
+  test('create refuses when none of the sequence is in the tree', () => {
+    setupSequence();
+    run(`rebase ${PKG} 0`, TEST_DIR);
+
+    // Раньше здесь молча переписывался последний патч: эталон доводился всеми
+    // предыдущими, дерево их не содержало, и в патч уезжала отмена чужих правок.
+    const result = run(`create ${PKG}`, TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('None of the 2 patches');
+    // И отказ случается до сети, а не после скачивания эталона.
+    expect(result.stdout).not.toContain('Fetching pristine');
+  });
+
+  test('create updates the patch that was rebased onto, not the last one', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const file = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+
+    overwriteFile(file, readFileSync(file, 'utf-8').replace("'use strict';", "'use strict';\n// FIRST"));
+    run('create is-number', TEST_DIR);
+    overwriteFile(file, readFileSync(file, 'utf-8') + '\n// SECOND\n');
+    run('create is-number --append two', TEST_DIR);
+    run('apply', TEST_DIR);
+
+    expect(run('rebase is-number 1', TEST_DIR).exitCode).toBe(0);
+    expect(readFileSync(file, 'utf-8')).not.toContain('// SECOND');
+
+    // Правим то, что делал первый патч, — и create обязан переписать именно его.
+    overwriteFile(file, readFileSync(file, 'utf-8').replace('// FIRST', '// FIRST, EDITED'));
+    const created = run('create is-number', TEST_DIR);
+    expect(created.exitCode).toBe(0);
+
+    const first = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0+001+initial.patch'), 'utf-8');
+    const second = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0+002+two.patch'), 'utf-8');
+    expect(first).toContain('// FIRST, EDITED');
+    // Второй патч не тронут и по-прежнему делает только своё.
+    expect(second).toContain('// SECOND');
+    expect(second).not.toContain('EDITED');
+
+    // И всё это вместе снова ложится.
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(readFileSync(file, 'utf-8')).toContain('// FIRST, EDITED');
+    expect(readFileSync(file, 'utf-8')).toContain('// SECOND');
+  });
+
+  test('restores a file that had no trailing newline', () => {
+    // Патч не только меняет последнюю строку, но и дописывает файлу перевод
+    // строки, которого у него не было. При откате этот байт обязан уйти
+    // обратно — маркеры `\\ No newline` при инверсии меняются сторонами.
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'tail.js': 'line one\nlast line'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`), `--- a/node_modules/${PKG}/tail.js
++++ b/node_modules/${PKG}/tail.js
+@@ -1,2 +1,2 @@
+ line one
+-last line
+\\ No newline at end of file
++patched last
+`);
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    const file = join(TEST_DIR, 'node_modules', PKG, 'tail.js');
+    expect(readFileSync(file, 'utf-8')).toBe('line one\npatched last\n');
+
+    expect(run(`rebase ${PKG} 0`, TEST_DIR).exitCode).toBe(0);
+
+    expect(readFileSync(file, 'utf-8')).toBe('line one\nlast line');
+  });
+
+  test('un-applies a patch whose two sides name different files', () => {
+    // Так выглядит `diff index.js.bak index.js`: заголовков rename нет, правится
+    // один файл — тот, что назван новой стороной. На корпусе это был случай,
+    // где откат уходил в несуществующий файл и дерево не возвращалось назад.
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'index.js': 'line one\nline two\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`), `diff --git a/node_modules/${PKG}/index.js.bak b/node_modules/${PKG}/index.js
+--- a/node_modules/${PKG}/index.js.bak
++++ b/node_modules/${PKG}/index.js
+@@ -1,2 +1,2 @@
+-line one
++PATCHED
+ line two
+`);
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    const file = join(TEST_DIR, 'node_modules', PKG, 'index.js');
+    expect(readFileSync(file, 'utf-8')).toBe('PATCHED\nline two\n');
+
+    const result = run(`rebase ${PKG} 0`, TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(file, 'utf-8')).toBe('line one\nline two\n');
+    // И никакого .bak на диске не появилось.
+    expect(existsSync(join(TEST_DIR, 'node_modules', PKG, 'index.js.bak'))).toBe(false);
+  });
+
+  test('exits non-zero when a patch cannot be un-applied', () => {
+    setupSequence();
+    overwriteFile(join(TEST_DIR, 'node_modules', PKG, 'index.js'), 'something else entirely\n');
+
+    const result = run(`rebase ${PKG} 0`, TEST_DIR);
+
+    // Напечатать ❌ и выйти с нулём значит соврать вызывающему, включая CI.
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Stopped after 0 of 2');
+  });
+
+  test('inverting a patch twice gives the same patch back', () => {
+    const parsed = parsePatch(`diff --git a/node_modules/${PKG}/renamed.js b/node_modules/${PKG}/moved.js
+old mode 100644
+new mode 100755
+rename from node_modules/${PKG}/renamed.js
+rename to node_modules/${PKG}/moved.js
+--- a/node_modules/${PKG}/renamed.js
++++ b/node_modules/${PKG}/moved.js
+@@ -1,2 +1,2 @@
+-before
++after
+ kept
+\\ No newline at end of file
+`);
+
+    expect(parsed).toHaveLength(1);
+    expect(parsed.map(invertTarget).map(invertTarget)).toEqual(parsed);
+    // А один раз — переворачивает: стороны, режимы и направление переименования.
+    const once = invertTarget(parsed[0]);
+    expect(once.oldPath).toBe(parsed[0].newPath);
+    expect(once.newMode).toBe(parsed[0].oldMode);
+    expect(once.renameTo).toBe(parsed[0].renameFrom);
+    expect(once.hunks[0].lines).toEqual(['+before', '-after', ' kept']);
   });
 });
