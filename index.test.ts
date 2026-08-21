@@ -1,7 +1,8 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
-import {execSync} from 'child_process';
+import {execSync, spawn} from 'child_process';
 import {chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree} from './src/create';
+import {withApplyLock} from './src/lock';
 import {join} from 'path';
 
 // writeFileSync пишет в тот же inode, что ломает тесты при hardlink-кеше bun.
@@ -1110,5 +1111,180 @@ describe('limits and failure paths', () => {
     // Текст сообщений писался для человека, а стек — это вид, в котором его
     // не читают.
     expect(result.stdout).not.toContain('at createPatch');
+  });
+});
+
+// Два apply одновременно — postinstall на каждый `bun install`, воркспейсы
+// монорепозитория, второй терминал. Измерено до замка: на сдвиге в 60 мс
+// дерево осталось в состоянии, которого нет ни до, ни после — файлы,
+// удалённые третьим патчем, воскресил сосед, применявший второй.
+describe('two applies at once', () => {
+  const PACKAGE = 'racy-lib';
+
+  function lines(count: number, mark: string): string[] {
+    return Array.from({length: count}, (_, index) => (index === 20 ? `${mark} marker` : `line ${index}`));
+  }
+
+  function replaceSection(file: string, before: string[], after: string[]): string {
+    const path = `node_modules/${PACKAGE}/${file}`;
+    return [
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      `@@ -1,${before.length} +1,${after.length} @@`,
+      ...before.map(line => `-${line}`),
+      ...after.map(line => `+${line}`),
+    ].join('\n');
+  }
+
+  function createSection(file: string, body: string[]): string {
+    const path = `node_modules/${PACKAGE}/${file}`;
+    return [
+      `diff --git a/${path} b/${path}`,
+      'new file mode 100644',
+      '--- /dev/null',
+      `+++ b/${path}`,
+      `@@ -0,0 +1,${body.length} @@`,
+      ...body.map(line => `+${line}`),
+    ].join('\n');
+  }
+
+  function deleteSection(file: string, body: string[]): string {
+    const path = `node_modules/${PACKAGE}/${file}`;
+    return [
+      `diff --git a/${path} b/${path}`,
+      'deleted file mode 100644',
+      `--- a/${path}`,
+      '+++ /dev/null',
+      `@@ -1,${body.length} +0,0 @@`,
+      ...body.map(line => `-${line}`),
+    ].join('\n');
+  }
+
+  const FILES = 120;
+  const LENGTH = 60;
+  const EXTRA = 10;
+  const extraBody = ['made by the second patch'];
+
+  // Три патча, как коммиты друг на друге: правка, правка плюс новые файлы,
+  // правка плюс удаление половины новых. Удаление здесь и есть та операция,
+  // на которой соседние процессы расходились: один сносил файл, другой
+  // возвращал его, переприменяя предыдущий патч.
+  function writeFixture() {
+    const sources: Record<string, string> = {};
+    for (let file = 0; file < FILES; file++) {
+      sources[`f${file}.js`] = lines(LENGTH, 'original').join('\n');
+    }
+    setupFakePackage(TEST_DIR, PACKAGE, '1.0.0', sources);
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+
+    const first: string[] = [];
+    const second: string[] = [];
+    const third: string[] = [];
+
+    for (let file = 0; file < FILES; file++) {
+      first.push(replaceSection(`f${file}.js`, lines(LENGTH, 'original'), lines(LENGTH, 'first')));
+      second.push(replaceSection(`f${file}.js`, lines(LENGTH, 'first'), lines(LENGTH, 'second')));
+      third.push(replaceSection(`f${file}.js`, lines(LENGTH, 'second'), lines(LENGTH, 'third')));
+    }
+    for (let extra = 0; extra < EXTRA; extra++) {
+      second.push(createSection(`new${extra}.js`, extraBody));
+      if (extra % 2 === 0) third.push(deleteSection(`new${extra}.js`, extraBody));
+    }
+
+    const patches: Record<string, string> = {
+      [`${PACKAGE}+1.0.0+001+one.patch`]: first.join('\n') + '\n',
+      [`${PACKAGE}+1.0.0+002+two.patch`]: second.join('\n') + '\n',
+      [`${PACKAGE}+1.0.0+003+three.patch`]: third.join('\n') + '\n',
+    };
+    for (const [name, content] of Object.entries(patches)) {
+      writeFileSync(join(TEST_DIR, 'patches', name), content);
+    }
+  }
+
+  function treeState(): string {
+    const dir = join(TEST_DIR, 'node_modules', PACKAGE);
+    return readdirSync(dir)
+      .sort()
+      .map(name => `${name}:${readFileSync(join(dir, name), 'utf-8').length}`)
+      .join('|');
+  }
+
+  function applyInBackground(delayMs: number): Promise<number> {
+    return new Promise(resolve => {
+      setTimeout(() => {
+        const child = spawn(process.execPath, [CLI, 'apply'], {cwd: TEST_DIR, stdio: 'ignore'});
+        child.on('close', code => resolve(code ?? -1));
+      }, delayMs);
+    });
+  }
+
+  test('leave the same tree a single apply would, whatever the stagger', async () => {
+    writeFixture();
+    const startedAt = Date.now();
+    run('apply', TEST_DIR);
+    const single = Date.now() - startedAt;
+    const expected = treeState();
+    // Третий патч удаляет пять файлов, которые завёл второй: если их вернули,
+    // это видно прямо здесь.
+    expect(expected.split('|').filter(entry => entry.startsWith('new')).length).toBe(EXTRA / 2);
+
+    // Сдвиги отмеряем долями одного прогона, а не абсолютными миллисекундами:
+    // опасен тот сдвиг, что попадает внутрь чужой работы, а сколько она длится
+    // — зависит от машины. С фиксированными числами тест ловил гонку в трети
+    // случаев, то есть почти ничего не гарантировал.
+    const staggers = [0, 0.2, 0.4, 0.6, 0.8].map(share => Math.round(single * share));
+
+    for (const round of [1, 2]) {
+      for (const stagger of staggers) {
+        rmSync(join(TEST_DIR, 'node_modules'), {force: true, recursive: true});
+        rmSync(join(TEST_DIR, 'patches'), {force: true, recursive: true});
+        writeFixture();
+
+        const codes = await Promise.all([applyInBackground(0), applyInBackground(stagger)]);
+
+        expect(`round ${round} stagger ${stagger}: ${treeState()}`).toBe(`round ${round} stagger ${stagger}: ${expected}`);
+        // И оба процесса считают, что всё на месте: второй ждал первого, а не
+        // спотыкался о наполовину переписанные файлы.
+        expect(codes).toEqual([0, 0]);
+      }
+    }
+  });
+
+  test('the second run waits rather than tramples, and says so if it cannot', () => {
+    const lockFile = join(TEST_DIR, 'held.lock');
+
+    // Замок держим сами и смотрим, что делает второй желающий.
+    const outcome = withApplyLock(lockFile, () => {
+      expect(existsSync(lockFile)).toBe(true);
+      let refusal = '';
+      try {
+        withApplyLock(lockFile, () => 'должно было отказать', 200);
+      } catch (error: any) {
+        refusal = error.message;
+      }
+      return refusal;
+    });
+
+    expect(outcome).toContain('another `bunch-package apply` is running');
+    expect(outcome).toContain(`pid ${process.pid}`);
+    expect(outcome).toContain('delete it');
+    // Свой замок снимается за собой.
+    expect(existsSync(lockFile)).toBe(false);
+  });
+
+  test('releases the lock even when the run throws', () => {
+    const lockFile = join(TEST_DIR, 'thrown.lock');
+
+    expect(() =>
+      withApplyLock(lockFile, () => {
+        throw new Error('сорвалось');
+      }),
+    ).toThrow('сорвалось');
+
+    // Иначе один сбой запирал бы проект навсегда.
+    expect(existsSync(lockFile)).toBe(false);
+    expect(withApplyLock(lockFile, () => 'снова свободен')).toBe('снова свободен');
   });
 });

@@ -1,5 +1,6 @@
 import {existsSync, readFileSync, readdirSync} from 'fs';
 import {join} from 'path';
+import {LOCK_FILE, withApplyLock} from './lock';
 import {orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
 import {PATCHES_DIR, packageDirectoryOf, stripPathPrefix} from './paths';
 import {PlannedOp, executeOps, planTarget} from './plan';
@@ -22,6 +23,16 @@ export function applyPatches(): void {
     return;
   }
 
+  // Замок держится ровно на время работы, а выход по коду — уже снаружи:
+  // process.exit не исполняет finally, и замок пережил бы сам прогон.
+  const failed = withApplyLock(LOCK_FILE, () => applyAll(patchFiles));
+
+  if (failed > 0) {
+    process.exit(1);
+  }
+}
+
+function applyAll(patchFiles: string[]): number {
   let applied = 0;
   let failed = 0;
 
@@ -134,7 +145,5 @@ export function applyPatches(): void {
 
   console.log(`\n📊 Summary: ${applied} applied, ${failed} failed`);
 
-  if (failed > 0) {
-    process.exit(1);
-  }
+  return failed;
 }
