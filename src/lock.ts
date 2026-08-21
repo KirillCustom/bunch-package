@@ -1,5 +1,6 @@
-import {closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync} from 'fs';
+import {closeSync, openSync, readFileSync, renameSync, rmSync, writeSync} from 'fs';
 import {join} from 'path';
+import {ensureDir} from './paths';
 
 // Два apply одновременно — не выдумка: postinstall срабатывает на каждый
 // `bun install`, а в монорепозитории воркспейсы ставятся параллельно.
@@ -64,7 +65,7 @@ function dropStaleLock(lockFile: string, pid: number): boolean {
 }
 
 export function withApplyLock<T>(lockFile: string, run: () => T, waitMs: number = LOCK_WAIT_MS): T {
-  mkdirSync(join(lockFile, '..'), {recursive: true});
+  ensureDir(join(lockFile, '..'));
   const deadline = Date.now() + waitMs;
 
   let handle: number;

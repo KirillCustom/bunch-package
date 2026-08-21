@@ -1,3 +1,4 @@
+import {mkdirSync} from 'fs';
 import {resolve, sep} from 'path';
 
 export const PATCHES_DIR = 'patches';
@@ -8,6 +9,18 @@ export const PATCHES_DIR = 'patches';
 // принят за файл пакета. Суффикс знают оба: apply, который его создаёт, и
 // create, который его исключает из диффа.
 export const TEMP_WRITE_SUFFIX = '.bunch-tmp-';
+
+// mkdir с recursive по спецификации молчит, если каталог уже есть. bun 1.1
+// вместо этого бросал EEXIST — и `apply` падал на ровном месте: «EEXIST: file
+// already exists, mkdir 'node_modules'», ноль применённых патчей. Проверено на
+// bun 1.0, 1.1, 1.2 и 1.4; ловить EEXIST самим дешевле, чем требовать версию.
+export function ensureDir(path: string): void {
+  try {
+    mkdirSync(path, {recursive: true});
+  } catch (error: any) {
+    if (error.code !== 'EEXIST') throw error;
+  }
+}
 
 // -p1: срезаем первый компонент пути, как это делает patch.
 export function stripPathPrefix(path: string): string {

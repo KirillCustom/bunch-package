@@ -1,8 +1,8 @@
-import {chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, type Stats} from 'fs';
+import {chmodSync, existsSync, lstatSync, readFileSync, renameSync, rmSync, writeFileSync, type Stats} from 'fs';
 import {join} from 'path';
 import {applyHunks} from './hunks';
 import {Hunk, PatchTarget, sideLines} from './patch-file';
-import {MODES_SUPPORTED, TEMP_WRITE_SUFFIX, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
+import {MODES_SUPPORTED, TEMP_WRITE_SUFFIX, ensureDir, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
 
 // Режим симлинка в git-заголовках. У обычных файлов — 100644 и 100755.
 export const SYMLINK_MODE = '120000';
@@ -257,11 +257,11 @@ export function executeOps(ops: PlannedOp[]): void {
       continue;
     }
     if (op.kind === 'rename') {
-      mkdirSync(join(op.to, '..'), {recursive: true});
+      ensureDir(join(op.to, '..'));
       renameSync(op.from, op.to);
       continue;
     }
-    mkdirSync(join(op.file, '..'), {recursive: true});
+    ensureDir(join(op.file, '..'));
 
     // Пишем рядом и переставляем поверх. rename в пределах каталога атомарен:
     // снаружи файл виден либо старым целиком, либо новым целиком. Прежняя

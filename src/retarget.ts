@@ -1,8 +1,8 @@
-import {cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync} from 'fs';
+import {cpSync, existsSync, readdirSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 import {diffTrees, fetchPristine, readManifest, requireDiff, validatePackageName} from './create';
 import {orderPatchFiles, parsePatchName} from './patch-file';
-import {PATCHES_DIR} from './paths';
+import {PATCHES_DIR, ensureDir} from './paths';
 import {replayPatches} from './sequence';
 
 // Пакет обновили — патчи остались от старой версии. `apply` о таком только
@@ -59,7 +59,7 @@ export function retargetPatches(packageName: string): void {
 
   try {
     rmSync(tempDir, {force: true, recursive: true});
-    mkdirSync(tempDir, {recursive: true});
+    ensureDir(tempDir);
 
     console.log(`📥 Fetching pristine ${name}@${version}...`);
     const pristine = fetchPristine(name, version, tempDir);

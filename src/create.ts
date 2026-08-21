@@ -1,8 +1,8 @@
 import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
-import {existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
+import {existsSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
 import {join, resolve, sep} from 'path';
-import {PATCHES_DIR, TEMP_WRITE_SUFFIX} from './paths';
+import {PATCHES_DIR, TEMP_WRITE_SUFFIX, ensureDir} from './paths';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
@@ -544,7 +544,7 @@ function writePatch(plan: SequencePlan, patchContent: string): void {
   }
 
   if (!existsSync(PATCHES_DIR)) {
-    mkdirSync(PATCHES_DIR, {recursive: true});
+    ensureDir(PATCHES_DIR);
   }
 
   if (plan.renameFrom !== null) {
@@ -652,7 +652,7 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
 
   try {
     rmSync(tempDir, {force: true, recursive: true});
-    mkdirSync(tempDir, {recursive: true});
+    ensureDir(tempDir);
 
     console.log(`📥 Fetching pristine ${name}@${version}...`);
     const cleanPackagePath = fetchPristine(name, version, tempDir);
