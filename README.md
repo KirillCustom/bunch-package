@@ -139,6 +139,13 @@ Binary files cannot be represented in a text diff. `create` lists the ones that
 differ rather than letting the change disappear, and it refuses outright if a
 changed file is not valid UTF-8, because writing that patch would corrupt it.
 
+Symbolic links cannot travel in a patch either — the format carries file contents,
+not links. `create` lists every link that differs instead of reporting no changes.
+`apply` refuses a patch section that describes a symlink (git writes those with
+mode `120000`), and refuses to overwrite a symlink that is already in
+`node_modules`: putting a regular file where a link belongs would report success
+and leave you with the wrong tree.
+
 ## What it understands
 
 Unified diffs as `git diff` and `patch-package` write them: content hunks, file
