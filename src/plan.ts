@@ -1,0 +1,195 @@
+import {chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
+import {join} from 'path';
+import {applyHunks} from './hunks';
+import {PatchTarget, sideLines} from './patch-file';
+import {MODES_SUPPORTED, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
+
+export type PlannedOp =
+  | {kind: 'write'; file: string; content: string; mode: number | null}
+  | {kind: 'remove'; file: string}
+  | {kind: 'chmod'; file: string; mode: number}
+  | {kind: 'rename'; from: string; to: string};
+
+// По умолчанию патч ложится на корень проекта. Но при создании следующего патча
+// в последовательности те же самые секции нужно наложить на распакованный эталон
+// — иначе новый патч содержал бы и правки предыдущих. Отсюда второй режим:
+// пути вида node_modules/<пакет>/<путь> отображаются внутрь заданного каталога.
+export interface TreeContext {
+  root: string;
+  prefix: string; // `node_modules/<пакет>/`
+}
+
+// Самая заковыристая часть плана: решить, что стало с содержимым файла.
+// Вынесена отдельно — здесь нет ни путей, ни файловой системы сверх чтения, и
+// именно тут сидели почти все дефекты, которые нашёл корпусный прогон.
+type ContentPlan = {kind: 'ops'; ops: PlannedOp[]} | {kind: 'remove'; file: string};
+
+function planContentChange(
+  target: PatchTarget,
+  relativePath: string,
+  source: string,
+  file: string,
+  exists: boolean,
+  currentMode: number | null,
+  wantExecutable: boolean | null,
+): ContentPlan {
+  const raw = exists ? readFileSync(source, 'utf-8') : '';
+  const lines = raw === '' ? [] : raw.split('\n');
+  // Пустой файл — это чаще всего создаваемый. Текстовый файл принято завершать
+  // переводом строки, и отсутствие маркера `\ No newline` означает именно его;
+  // без этого умолчания создаваемые файлы рождались без перевода строки.
+  const endsWithNewline = lines.length === 0 || lines[lines.length - 1] === '';
+  if (lines.length > 0 && endsWithNewline) lines.pop();
+
+  // Патч создаёт файл, а файл уже есть и не пуст — применять такое вслепую
+  // значит подмешать содержимое к чужому файлу.
+  const isCreation = target.oldPath === null || target.hunks.every(h => sideLines(h, 'old').length === 0);
+  let alreadyApplied = false;
+
+  if (isCreation && exists && raw !== '') {
+    const reverse = applyHunks(lines, endsWithNewline, target.hunks, true, false);
+    if ('error' in reverse) throw new Error(`${relativePath} already exists`);
+    alreadyApplied = true;
+  } else {
+    // «Уже применён» проверяем обратным применением, а не прямым: патч, который
+    // только дописывает строки, ложится вперёд и во второй раз — так дублировалось
+    // содержимое файлов.
+    //
+    // Но у патча на удаление новая сторона пуста, а пустой образец совпадает с чем
+    // угодно, поэтому для него обратная проверка ничего не значит: там признак
+    // применённости — отсутствующий или пустой файл.
+    const hasNewContent = target.hunks.some(h => sideLines(h, 'new').length > 0);
+
+    if (!hasNewContent) {
+      alreadyApplied = !exists || raw === '';
+    } else {
+      const reverse = applyHunks(lines, endsWithNewline, target.hunks, true, false);
+      alreadyApplied = !('error' in reverse);
+    }
+  }
+
+  if (!alreadyApplied) {
+    const forward = applyHunks(lines, endsWithNewline, target.hunks, false);
+    if ('error' in forward) throw new Error(`${relativePath}: ${forward.error}`);
+
+    const content = forward.lines.join('\n') + (forward.endsWithNewline ? '\n' : '');
+
+    // patch(1) удаляет файл, от которого ничего не осталось. Повторяем это, иначе
+    // патч на удаление оставлял пустышку и ломал каждый следующий прогон.
+    if (content === '' || content === '\n') {
+      return {kind: 'remove', file};
+    }
+
+    // Запись идёт через пересоздание файла, чтобы разорвать hardlink на общий
+    // кеш bun, — а значит режим надо проставить заново, иначе бит исполнения
+    // терялся бы у любого патченого файла.
+    const base = currentMode ?? 0o644;
+    const mode = wantExecutable === null ? base : withExecutable(base, wantExecutable);
+    return {kind: 'ops', ops: [{kind: 'write', file, content, mode}]};
+  }
+
+  return {kind: 'ops', ops: []};
+}
+
+export function planTarget(target: PatchTarget, context?: TreeContext): PlannedOp[] {
+  const rawPath = target.newPath ?? target.oldPath ?? target.renameTo;
+  if (rawPath === null) throw new Error('patch section has no file path');
+
+  const relativePath = stripPathPrefix(rawPath);
+
+  let file: string;
+  if (context === undefined) {
+    file = resolveInsideProject(relativePath);
+
+    const packageDir = packageDirectoryOf(relativePath);
+    if (packageDir !== null && !existsSync(packageDir)) {
+      throw new Error(`${packageDir} is not installed`);
+    }
+  } else {
+    if (!relativePath.startsWith(context.prefix)) {
+      throw new Error(`${relativePath} does not belong to ${context.prefix}`);
+    }
+    file = join(context.root, relativePath.slice(context.prefix.length));
+  }
+
+  // Переименование выполняется до всего остального: содержимое, если оно тоже
+  // менялось, читается из старого файла, а пишется уже в новый.
+  const renameOps: PlannedOp[] = [];
+  let source = file;
+
+  if (target.renameFrom !== null && target.renameTo !== null && context === undefined) {
+    const from = resolveInsideProject(target.renameFrom);
+    const to = resolveInsideProject(target.renameTo);
+
+    if (existsSync(from)) {
+      renameOps.push({kind: 'rename', from, to});
+      source = from;
+      file = to;
+    } else if (existsSync(to)) {
+      source = to; // уже переименован
+      file = to;
+    } else {
+      throw new Error(`${target.renameFrom} is missing`);
+    }
+  }
+
+  const exists = existsSync(source);
+  const currentMode = exists ? statSync(source).mode : null;
+  const wantExecutable =
+    target.newMode === null || !MODES_SUPPORTED ? null : target.newMode === '100755';
+
+  // Файл удаляется — это сказано заголовком, а не выведено из пустого результата.
+  if (target.newPath === null || (target.hunks.length === 0 && target.deletedFile)) {
+    return exists ? [...renameOps, {kind: 'remove', file: source}] : [];
+  }
+
+  // `new file mode` без единого хунка — это создание пустого файла: содержимого
+  // нет, поэтому и хунков нет. Раньше такая секция принималась за смену режима у
+  // отсутствующего файла и роняла весь патч. В реальных патчах это встречается —
+  // так в них попадают пустые артефакты сборки.
+  if (target.hunks.length === 0 && target.newFile) {
+    if (exists) return [...renameOps];
+    return [...renameOps, {kind: 'write', file, content: '', mode: wantExecutable === true ? 0o755 : 0o644}];
+  }
+
+  const ops: PlannedOp[] = [...renameOps];
+
+  if (target.hunks.length > 0) {
+    const plan = planContentChange(target, relativePath, source, file, exists, currentMode, wantExecutable);
+    if (plan.kind === 'remove') return [{kind: 'remove', file: plan.file}];
+    ops.push(...plan.ops);
+  }
+
+  // Смена режима без изменения содержимого — отдельная секция патча.
+  if (wantExecutable !== null && !ops.some(op => op.kind === 'write')) {
+    if (currentMode === null) throw new Error(`${relativePath}: cannot change mode, file is missing`);
+    if (isExecutable(currentMode) !== wantExecutable) {
+      ops.push({kind: 'chmod', file, mode: withExecutable(currentMode, wantExecutable)});
+    }
+  }
+
+  return ops;
+}
+
+export function executeOps(ops: PlannedOp[]): void {
+  for (const op of ops) {
+    if (op.kind === 'remove') {
+      rmSync(op.file, {force: true});
+      continue;
+    }
+    if (op.kind === 'chmod') {
+      chmodSync(op.file, op.mode);
+      continue;
+    }
+    if (op.kind === 'rename') {
+      mkdirSync(join(op.to, '..'), {recursive: true});
+      renameSync(op.from, op.to);
+      continue;
+    }
+    mkdirSync(join(op.file, '..'), {recursive: true});
+    // Разрываем hardlink на общий кеш bun: запись на месте изменила бы и его.
+    rmSync(op.file, {force: true});
+    writeFileSync(op.file, op.content);
+    if (op.mode !== null) chmodSync(op.file, op.mode);
+  }
+}
