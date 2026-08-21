@@ -2,7 +2,7 @@ import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
 import {existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
 import {join, resolve, sep} from 'path';
-import {PATCHES_DIR} from './paths';
+import {PATCHES_DIR, TEMP_WRITE_SUFFIX} from './paths';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
@@ -16,6 +16,7 @@ export const EXCLUDE_PATTERNS = [
   // Следы неудачного apply — иначе они уезжают в следующий патч
   '*.rej',
   '*.orig',
+  `*${TEMP_WRITE_SUFFIX}*`,
   // Бинарные файлы Android
   '*.so',
   '*.jar',

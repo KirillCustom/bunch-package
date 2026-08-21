@@ -1,4 +1,4 @@
-import {closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync} from 'fs';
+import {closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync} from 'fs';
 import {join} from 'path';
 
 // Два apply одновременно — не выдумка: postinstall срабатывает на каждый
@@ -24,13 +24,43 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function holderOf(lockFile: string): string {
+function holderOf(lockFile: string): number | null {
   try {
-    const pid = readFileSync(lockFile, 'utf-8').trim();
-    return pid === '' ? 'unknown pid' : `pid ${pid}`;
+    const pid = Number(readFileSync(lockFile, 'utf-8').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
   } catch {
-    return 'unknown pid'; // замок мог исчезнуть прямо сейчас — это не наше дело
+    return null; // замок мог исчезнуть прямо сейчас — это не наше дело
   }
+}
+
+// Сигнал 0 ничего не посылает, а только спрашивает, есть ли такой процесс.
+// EPERM означает «есть, но чужой» — это тоже «жив».
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: any) {
+    return error.code === 'EPERM';
+  }
+}
+
+// Замок переживает SIGKILL: finally при нём не исполняется. Без разбора
+// протухших замков убитый apply запирал бы проект насовсем — а убивают его
+// ровно там, где чинить некому (упавший CI, Ctrl-C, конец места на диске).
+//
+// Снимаем через переименование, а не через удаление: rename атомарен, поэтому
+// из двух процессов, увидевших один и тот же протухший замок, файл уносит ровно
+// один. Второй получит ENOENT и просто пойдёт на новый круг.
+function dropStaleLock(lockFile: string, pid: number): boolean {
+  const claimed = `${lockFile}.stale-${process.pid}`;
+  try {
+    renameSync(lockFile, claimed);
+  } catch {
+    return false; // кто-то опередил — не наше дело
+  }
+  rmSync(claimed, {force: true});
+  console.log(`  ⚠️  removed a stale lock left by pid ${pid}, which is no longer running`);
+  return true;
 }
 
 export function withApplyLock<T>(lockFile: string, run: () => T, waitMs: number = LOCK_WAIT_MS): T {
@@ -48,9 +78,15 @@ export function withApplyLock<T>(lockFile: string, run: () => T, waitMs: number 
     } catch (error: any) {
       if (error.code !== 'EEXIST') throw error;
 
+      const holder = holderOf(lockFile);
+      if (holder !== null && !isRunning(holder) && dropStaleLock(lockFile, holder)) {
+        continue; // замок был ничей — пробуем занять его тем же кругом
+      }
+
       if (Date.now() >= deadline) {
         throw new Error(
-          `another \`bunch-package apply\` is running: ${lockFile} is held by ${holderOf(lockFile)}. ` +
+          `another \`bunch-package apply\` is running: ${lockFile} is held by ` +
+            `${holder === null ? 'an unknown pid' : `pid ${holder}`}. ` +
             `If no such process exists, that file is left over from a killed run — delete it.`,
         );
       }
@@ -58,6 +94,9 @@ export function withApplyLock<T>(lockFile: string, run: () => T, waitMs: number 
     }
   }
 
+  // Между созданием файла и записью pid есть щель шириной в несколько
+  // микросекунд: убитый ровно там apply оставит замок без владельца, и разобрать
+  // его как протухший будет нечем — придётся ждать до конца и читать сообщение.
   try {
     writeSync(handle, `${process.pid}\n`);
   } finally {
