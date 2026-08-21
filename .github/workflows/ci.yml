@@ -29,6 +29,11 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      # tsc ловит то, чего не ловят ни тесты, ни корпус: bun исполняет
+      # TypeScript, но типы не проверяет. Вызов потерянной функции прожил из-за
+      # этого три релиза.
+      - run: bun run typecheck
+
       - run: bun test
 
       - run: bun run build
