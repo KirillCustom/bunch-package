@@ -1568,3 +1568,171 @@ describe('an apply killed mid-write', () => {
     expect(readFileSync(lockFile, 'utf-8').trim()).toBe(String(process.pid));
   });
 });
+
+// Запись о применённых патчах и команда, которая отвечает на вопрос «что
+// сейчас в дереве». Запись — только запись: доказательство берётся из дерева.
+describe('state file and status', () => {
+  const PATCH = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+
+  function setupPatched() {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), PATCH);
+  }
+
+  function readStateFile(): any {
+    return JSON.parse(readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8'));
+  }
+
+  test('apply records what ended up in the tree', () => {
+    setupPatched();
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+    const state = readStateFile();
+    expect(state.version).toBe(1);
+    expect(state.patches).toHaveLength(1);
+    expect(state.patches[0].file).toBe('test-lib+1.0.0.patch');
+    expect(state.patches[0].packageDir).toBe('test-lib');
+    expect(state.patches[0].version).toBe('1.0.0');
+    expect(state.patches[0].sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(Number.isNaN(Date.parse(state.patches[0].appliedAt))).toBe(false);
+  });
+
+  test('keeps the original time until the patch file itself changes', () => {
+    setupPatched();
+    run('apply', TEST_DIR);
+    const first = readStateFile().patches[0].appliedAt;
+
+    run('apply', TEST_DIR);
+    // Иначе `appliedAt` означал бы «когда последний раз запускали apply».
+    expect(readStateFile().patches[0].appliedAt).toBe(first);
+
+    // А вот другой патч под тем же именем — уже другое событие.
+    overwriteFile(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'const a = 1;\n');
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), PATCH.replace('+const a = 2;', '+const a = 3;'));
+    run('apply', TEST_DIR);
+    expect(readStateFile().patches[0].appliedAt).not.toBe(first);
+  });
+
+  test('status says a patch is in the tree, and exits 0', () => {
+    setupPatched();
+    run('apply', TEST_DIR);
+
+    const result = run('status', TEST_DIR);
+    expect(result.stdout).toContain('✅ test-lib+1.0.0.patch — in the tree');
+    expect(result.stdout).toContain('1 of 1 in the tree');
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('status says a patch left the tree, and exits 1', () => {
+    setupPatched();
+    run('apply', TEST_DIR);
+    // Так выглядит переустановка node_modules: правка ушла, запись осталась.
+    overwriteFile(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'const a = 1;\n');
+
+    const result = run('status', TEST_DIR);
+    expect(result.stdout).toContain('⬜ test-lib+1.0.0.patch — not in the tree');
+    expect(result.stdout).toContain('0 of 1 in the tree');
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test('status says when a patch no longer fits at all', () => {
+    setupPatched();
+    run('apply', TEST_DIR);
+    overwriteFile(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'something else entirely\n');
+
+    const result = run('status', TEST_DIR);
+    expect(result.stdout).toContain('❌ test-lib+1.0.0.patch — does not fit the tree');
+    expect(result.stdout).toContain('does not fit');
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test('status reports a recorded patch whose file is gone', () => {
+    setupPatched();
+    run('apply', TEST_DIR);
+    rmSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'));
+
+    // Файл удалили, а правка осталась в node_modules — промолчать об этом
+    // значило бы ответить неправду на вопрос «что сейчас в дереве».
+    const result = run('status', TEST_DIR);
+    expect(result.stdout).toContain('no longer exist');
+    expect(result.stdout).toContain('test-lib+1.0.0.patch');
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test('status notices that the patch file changed after it was applied', () => {
+    setupPatched();
+    run('apply', TEST_DIR);
+    // Патч отредактировали, но дерево осталось прежним.
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), PATCH + '\n');
+
+    const result = run('status', TEST_DIR);
+    expect(result.stdout).toContain('changed since it was applied');
+  });
+
+  test('a corrupt state file does not stop apply', () => {
+    setupPatched();
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), '{ not json at all');
+
+    // Запись — не источник истины, и ронять из-за неё прогон нельзя.
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(result.exitCode).toBe(0);
+    expect(readStateFile().patches).toHaveLength(1);
+  });
+
+  test('apply still succeeds when the state cannot be written', () => {
+    setupPatched();
+    // Каталог на месте файла: запись провалится, патч — нет.
+    mkdirSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), {recursive: true});
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('could not write');
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 2;\n');
+  });
+
+  test('status understands a sequence', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0+001+one.patch'), PATCH);
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0+002+two.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 2;
++const a = 3;
+`);
+    run('apply', TEST_DIR);
+
+    const result = run('status', TEST_DIR);
+    // Патч из середины последовательности в одиночку не проверяется — его
+    // «после» перестаёт существовать, как только сверху лёг следующий.
+    expect(result.stdout).toContain('✅ test-lib+1.0.0+001+one.patch — in the tree');
+    expect(result.stdout).toContain('✅ test-lib+1.0.0+002+two.patch — in the tree');
+    expect(result.stdout).toContain('2 of 2 in the tree');
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('create ignores a state file left behind by patch-package', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const pkg = join(TEST_DIR, 'node_modules', 'is-number');
+    overwriteFile(join(pkg, 'index.js'), 'module.exports = "patched";\n');
+    // patch-package кладёт эту запись прямо в каталог пакета — проверено
+    // запуском его самого на последовательности из двух патчей.
+    writeFileSync(join(pkg, '.patch-package.json'), '{"version":1,"patches":[],"isRebasing":false}');
+
+    const result = run('create is-number', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    const patch = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patch).toContain('+module.exports = "patched";');
+    expect(patch).not.toContain('patch-package.json');
+  });
+});

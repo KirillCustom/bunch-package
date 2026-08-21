@@ -2,6 +2,7 @@
 
 import {applyPatches} from './src/apply';
 import {createPatch} from './src/create';
+import {showStatus} from './src/status';
 
 // Main
 const command = process.argv[2];
@@ -52,6 +53,14 @@ switch (command) {
     }
     break;
 
+  case 'status':
+    try {
+      showStatus();
+    } catch (error) {
+      fail(error);
+    }
+    break;
+
   default:
     console.log(`
 🎯 bunch-package - Patch management for Bun
@@ -60,5 +69,6 @@ Commands:
   bunch-package create <package>                  Create or update a patch
   bunch-package create <package> --append <name>  Add another patch to the package
   bunch-package apply                             Apply all patches
+  bunch-package status                            Show which patches are in the tree
     `);
 }
