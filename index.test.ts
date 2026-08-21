@@ -16,7 +16,11 @@ function overwriteFile(path: string, content: string) {
 // упираются в сеть, а не в код. Тайм-аут поднят, чтобы падения означали дефект.
 setDefaultTimeout(120_000);
 
-const TEST_DIR = join(import.meta.dir, '.test-sandbox');
+// Песочница у каждого процесса своя. Один общий каталог означал, что два
+// прогона сюиты затаптывают друг друга: beforeEach одного сносит дерево, с
+// которым работает другой. Измерено на этом коде — 26 и 27 падений из 59, и
+// однажды день ушёл на разбор девяти «дефектов», которых не было.
+const TEST_DIR = join(import.meta.dir, `.test-sandbox-${process.pid}`);
 const CLI = join(import.meta.dir, 'index.ts');
 
 // Запускаем ровно тот bun, что исполняет сам набор тестов, а не первый по PATH:
