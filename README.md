@@ -172,14 +172,14 @@ modes and missing trailing newlines. A patch the tree no longer matches is refus
 rather than half-removed, exactly like a patch that does not apply.
 
 Un-applying has a limit worth knowing, measured on 289 real patches from public
-repositories: 280 of them restore the package byte for byte, four are refused
-because the tree no longer matches them, and five come back differing from the
-original — four of those by a single `\r`. The reason is inherent: the patch is the
-only record of the lines it removed, and patches routinely store those lines with
-trailing whitespace stripped or added. `rebase` re-applies the patch to what it is
-about to write and refuses when that does not reproduce the current tree, which
-catches the mismatches it can see; a difference only in trailing whitespace passes
-that check, because re-applying the patch hides it again.
+repositories: 285 of them restore the package byte for byte, and four come back
+differing only in trailing whitespace — a `\r` here and there. The reason is
+inherent: the patch is the only record of the lines it removed, and patches
+routinely store those lines with trailing whitespace stripped or added. `rebase`
+re-applies the patch to what it is about to write and refuses when that does not
+reproduce the current tree, which catches the mismatches it can see; a difference
+only in trailing whitespace passes that check, because re-applying the patch hides
+it again.
 
 After the rebase, `create` updates the patch you rebased onto rather than the last
 one in the sequence. It knows which that is from the record `apply` and `rebase`
