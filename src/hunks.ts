@@ -79,7 +79,6 @@ export function applyHunks(
 
   for (const [index, hunk] of hunks.entries()) {
     const from = sideLines(hunk, reverse ? 'new' : 'old');
-    const to = sideLines(hunk, reverse ? 'old' : 'new');
     const declared = (reverse ? hunk.newStart : hunk.oldStart) - 1;
 
     const at = locateHunk(lines, from, Math.max(0, declared + offset), search);

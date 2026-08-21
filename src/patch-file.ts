@@ -1,4 +1,3 @@
-import {readdirSync} from 'fs';
 
 export interface Hunk {
   oldStart: number;
@@ -38,14 +37,27 @@ export function parsePatch(patchContent: string): PatchTarget[] {
 
   const asPath = (raw: string): string | null => (raw === '/dev/null' ? null : raw);
 
-  const openTarget = (): PatchTarget => {
-    if (!open || target === null) {
-      target = {oldPath: null, newPath: null, hunks: [], oldMode: null, newMode: null, newFile: false, deletedFile: false, renameFrom: null, renameTo: null};
-      targets.push(target);
-      open = true;
-      hunk = null;
-    }
-    return target;
+  // Секцию заводим через параметр, а не через изменяемую переменную из
+  // замыкания: TypeScript не отслеживает присваивания внутри замыканий и считал
+  // бы target вечно нулевым, теряя проверку типов там, где она нужнее всего.
+  const ensureTarget = (existing: PatchTarget | null): PatchTarget => {
+    if (open && existing !== null) return existing;
+
+    const fresh: PatchTarget = {
+      oldPath: null,
+      newPath: null,
+      hunks: [],
+      oldMode: null,
+      newMode: null,
+      newFile: false,
+      deletedFile: false,
+      renameFrom: null,
+      renameTo: null,
+    };
+    targets.push(fresh);
+    open = true;
+    hunk = null;
+    return fresh;
   };
 
   for (const raw of patchContent.split('\n')) {
@@ -88,7 +100,7 @@ export function parsePatch(patchContent: string): PatchTarget[] {
     const gitHeader = line.match(/^diff --git (\S+) (\S+)$/);
     if (gitHeader) {
       open = false;
-      const fresh = openTarget();
+      const fresh = (target = ensureTarget(target));
       fresh.oldPath = gitHeader[1];
       fresh.newPath = gitHeader[2];
       continue;
@@ -98,7 +110,7 @@ export function parsePatch(patchContent: string): PatchTarget[] {
     // поэтому формат патча остаётся с ним совместимым.
     const renameLine = line.match(/^rename (from|to) (.+)$/);
     if (renameLine) {
-      const current = openTarget();
+      const current = (target = ensureTarget(target));
       if (renameLine[1] === 'from') current.renameFrom = renameLine[2];
       else current.renameTo = renameLine[2];
       continue;
@@ -106,7 +118,7 @@ export function parsePatch(patchContent: string): PatchTarget[] {
 
     const modeLine = line.match(/^(old|new|new file|deleted file) mode (\d+)$/);
     if (modeLine) {
-      const current = openTarget();
+      const current = (target = ensureTarget(target));
       if (modeLine[1] === 'deleted file') {
         current.oldMode = modeLine[2];
         current.deletedFile = true;
@@ -137,7 +149,7 @@ export function parsePatch(patchContent: string): PatchTarget[] {
 
     const oldHeader = line.match(/^--- ([^\t]+)/);
     if (oldHeader) {
-      const current = openTarget();
+      const current = (target = ensureTarget(target));
       current.oldPath = asPath(oldHeader[1]);
       continue;
     }

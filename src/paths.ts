@@ -1,5 +1,4 @@
-import {statSync} from 'fs';
-import {join, resolve, sep} from 'path';
+import {resolve, sep} from 'path';
 
 export const PATCHES_DIR = 'patches';
 

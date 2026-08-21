@@ -1,6 +1,6 @@
 {
   "name": "bunch-package",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "description": "Patch management tool for Bun - alternative to patch-package",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,7 +15,8 @@
   "scripts": {
     "build": "bun build index.ts --outfile=dist/index.js --target=bun",
     "test": "bun test",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "bun",
@@ -42,5 +43,8 @@
   },
   "peerDependencies": {
     "bun": ">=1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
   }
 }
