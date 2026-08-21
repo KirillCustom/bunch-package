@@ -114,6 +114,14 @@ patch is computed in memory first, and nothing is written unless every file in i
 fits — so a patch can never leave your tree half-changed, and a failed apply leaves
 no `.rej` or `.orig` files behind. Applying the same patch twice is a no-op.
 
+Only one `apply` runs at a time. It holds `node_modules/.bunch-package.lock` for the
+length of the run; a second `apply` waits up to 30 seconds for the first to finish,
+then reports who is holding the lock. Two runs a moment apart are ordinary —
+`postinstall` firing twice, workspaces installing in parallel — and without the lock
+they can interleave into a tree that is neither the patched nor the unpatched one. If
+a run is killed outright the file stays behind; the message names it so you can
+delete it.
+
 Exit codes:
 
 | Code | Meaning |
