@@ -1,14 +1,26 @@
-import {chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
+import {chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, type Stats} from 'fs';
 import {join} from 'path';
 import {applyHunks} from './hunks';
 import {PatchTarget, sideLines} from './patch-file';
 import {MODES_SUPPORTED, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
+
+// Режим симлинка в git-заголовках. У обычных файлов — 100644 и 100755.
+export const SYMLINK_MODE = '120000';
 
 export type PlannedOp =
   | {kind: 'write'; file: string; content: string; mode: number | null}
   | {kind: 'remove'; file: string}
   | {kind: 'chmod'; file: string; mode: number}
   | {kind: 'rename'; from: string; to: string};
+
+function lstatOrNull(file: string): Stats | null {
+  try {
+    return lstatSync(file);
+  } catch (error: any) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+    throw error;
+  }
+}
 
 // По умолчанию патч ложится на корень проекта. Но при создании следующего патча
 // в последовательности те же самые секции нужно наложить на распакованный эталон
@@ -97,6 +109,14 @@ export function planTarget(target: PatchTarget, context?: TreeContext): PlannedO
 
   const relativePath = stripPathPrefix(rawPath);
 
+  // Симлинк git записывает режимом 120000, а содержимым — цель ссылки. Запись
+  // «как есть» подменила бы ссылку обычным файлом, внутри которого лежал бы
+  // путь: apply рапортовал бы успех, а в дереве оказалось бы не то. Отказываем
+  // вслух — patch-package такие патчи тоже не применяет.
+  if (target.newMode === SYMLINK_MODE || target.oldMode === SYMLINK_MODE) {
+    throw new Error(`${relativePath} is a symbolic link (mode ${SYMLINK_MODE}) — bunch-package cannot apply that`);
+  }
+
   let file: string;
   if (context === undefined) {
     file = resolveInsideProject(relativePath);
@@ -133,8 +153,16 @@ export function planTarget(target: PatchTarget, context?: TreeContext): PlannedO
     }
   }
 
-  const exists = existsSync(source);
-  const currentMode = exists ? statSync(source).mode : null;
+  // lstat, а не stat: у симлинка нас интересует он сам, а не то, куда он ведёт.
+  // Заодно это ловит битую ссылку, которую existsSync считает отсутствующим
+  // файлом — записать поверх неё обычный файл значило бы съесть ссылку молча.
+  const status = lstatOrNull(source);
+  if (status !== null && status.isSymbolicLink()) {
+    throw new Error(`${relativePath} is a symbolic link on disk — bunch-package will not replace it with a file`);
+  }
+
+  const exists = status !== null;
+  const currentMode = status?.mode ?? null;
   const wantExecutable =
     target.newMode === null || !MODES_SUPPORTED ? null : target.newMode === '100755';
 

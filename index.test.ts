@@ -1,6 +1,7 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
 import {execSync} from 'child_process';
-import {chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync, unlinkSync} from 'fs';
+import {chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
+import {findLinkDifferences, scanTree} from './src/create';
 import {join} from 'path';
 
 // writeFileSync пишет в тот же inode, что ломает тесты при hardlink-кеше bun.
@@ -871,5 +872,161 @@ describe('CLI usage', () => {
   test('shows error when create without package name', () => {
     const result = run('create', TEST_DIR);
     expect(result.exitCode).not.toBe(0);
+  });
+});
+
+// Симлинки не переносятся патчем вовсе: формат возит содержимое файлов, а
+// ссылку в нём записать нечем. Опасность не в этом, а в тишине — правка
+// молча пропадала, а на Linux вдобавок уносила с собой весь патч.
+describe('symbolic links', () => {
+  function scanFixture(files: Record<string, string>, links: Record<string, string>) {
+    const root = join(TEST_DIR, `tree-${Object.keys(files).length}-${Object.keys(links).join('-')}`);
+    mkdirSync(root, {recursive: true});
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(root, name), content);
+    for (const [name, target] of Object.entries(links)) symlinkSync(target, join(root, name));
+    return scanTree(root);
+  }
+
+  test.skipIf(isWindows)('sees every way a link can differ', () => {
+    const clean = scanFixture(
+      {'became-link.js': 'x\n', 'kept.js': 'x\n'},
+      {retargeted: 'one.js', removed: 'gone.js', 'became-file': 'real.js', same: 'real.js'},
+    );
+    const modified = scanFixture(
+      {'became-file': 'x\n', 'kept.js': 'x\n'},
+      {retargeted: 'two.js', added: 'new.js', 'became-link.js': 'real.js', same: 'real.js'},
+    );
+
+    const differences = findLinkDifferences(clean, modified);
+    const byPath = new Map(differences.map(d => [d.relativePath, d]));
+
+    // Одинаковая ссылка и обычный файл в списке не нужны.
+    expect([...byPath.keys()].sort()).toEqual([
+      'added',
+      'became-file',
+      'became-link.js',
+      'removed',
+      'retargeted',
+    ]);
+
+    expect(byPath.get('added')!.change).toBe('added');
+    expect(byPath.get('removed')!.change).toBe('removed');
+    expect(byPath.get('retargeted')!.change).toContain('two.js');
+    expect(byPath.get('became-file')!.change).toContain('regular file');
+    expect(byPath.get('became-link.js')!.change).toContain('symlink');
+
+    // missingFrom называет дерево, где пути нет вовсе: на таком сочетании GNU
+    // diff отказывается работать, и только по этому списку код возврата 2
+    // отличается от настоящего сбоя.
+    expect(byPath.get('added')!.missingFrom).toBe('clean');
+    expect(byPath.get('removed')!.missingFrom).toBe('modified');
+    expect(byPath.get('retargeted')!.missingFrom).toBe(null);
+    expect(byPath.get('became-file')!.missingFrom).toBe(null);
+  });
+
+  test.skipIf(isWindows)('create says a link changed instead of claiming nothing did', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    symlinkSync('index.js', join(TEST_DIR, 'node_modules', 'is-number', 'alias.js'));
+
+    const result = run('create is-number', TEST_DIR);
+
+    expect(result.stdout).toContain('symbolic link');
+    expect(result.stdout).toContain('alias.js');
+    // Раньше здесь было «No changes detected» — то есть неправда.
+    expect(result.stdout).not.toContain('No changes detected');
+    expect(existsSync(join(TEST_DIR, 'patches'))).toBe(false);
+  });
+
+  test.skipIf(isWindows)('create keeps the file changes a new link used to take down', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const pkg = join(TEST_DIR, 'node_modules', 'is-number');
+    symlinkSync('index.js', join(pkg, 'alias.js'));
+    overwriteFile(join(pkg, 'index.js'), 'module.exports = "patched";\n');
+
+    const result = run('create is-number', TEST_DIR);
+
+    // GNU diff (в отличие от Apple) выходит с кодом 2, когда с одной стороны
+    // симлинк, а с другой нет ничего. Код тот же, что у настоящего сбоя,
+    // поэтому один добавленный симлинк отменял весь патч целиком.
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('symbolic link');
+
+    const patch = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patch).toContain('+module.exports = "patched";');
+    expect(patch).not.toContain('alias.js');
+  });
+
+  test('apply refuses a patch that creates a symbolic link', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'real.js': 'hello\n'});
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // Так симлинк записывает git: режим 120000, содержимое — цель ссылки.
+    const patchContent = `diff --git a/node_modules/test-lib/link.js b/node_modules/test-lib/link.js
+new file mode 120000
+--- /dev/null
++++ b/node_modules/test-lib/link.js
+@@ -0,0 +1 @@
++real.js
+\\ No newline at end of file
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+
+    // Молча положить сюда обычный файл со строкой `real.js` внутри — ровно то,
+    // что делалось раньше, и рапортовалось это как успех.
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.stdout).toContain('symbolic link');
+    expect(result.exitCode).not.toBe(0);
+    expect(existsSync(join(TEST_DIR, 'node_modules', 'test-lib', 'link.js'))).toBe(false);
+  });
+
+  test('apply writes nothing at all when one section is a symbolic link', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'one.js': 'const a = 1;\n'});
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `diff --git a/node_modules/test-lib/one.js b/node_modules/test-lib/one.js
+--- a/node_modules/test-lib/one.js
++++ b/node_modules/test-lib/one.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+diff --git a/node_modules/test-lib/link.js b/node_modules/test-lib/link.js
+new file mode 120000
+--- /dev/null
++++ b/node_modules/test-lib/link.js
+@@ -0,0 +1 @@
++one.js
+\\ No newline at end of file
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'one.js'), 'utf-8')).toBe('const a = 1;\n');
+  });
+
+  test.skipIf(isWindows)('apply refuses to turn a link on disk into a file', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'real.js': 'hello\n'});
+    const pkg = join(TEST_DIR, 'node_modules', 'test-lib');
+    symlinkSync('real.js', join(pkg, 'link.js'));
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/link.js
++++ b/node_modules/test-lib/link.js
+@@ -1 +1 @@
+-hello
++patched
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.stdout).toContain('symbolic link');
+    // Ссылка на месте, и файл, на который она смотрит, не тронут.
+    expect(lstatSync(join(pkg, 'link.js')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(pkg, 'real.js'), 'utf-8')).toBe('hello\n');
   });
 });

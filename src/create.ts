@@ -1,6 +1,6 @@
 import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
-import {existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
+import {existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
 import {join, resolve, sep} from 'path';
 import {PATCHES_DIR} from './paths';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
@@ -41,6 +41,10 @@ export const EXCLUDE_PATTERNS = [
   '*.woff2',
 ];
 
+// Потолок вывода diff. Больше него — это уже не патч, а перенос дерева, и
+// писать усечённый патч нельзя ни при каких условиях.
+export const DIFF_MAX_BUFFER = 50 * 1024 * 1024;
+
 // Эти имена не бывают исходниками ни на какой глубине.
 export const ARTIFACT_SEGMENTS = ['.gradle', '.cxx', '.transforms', 'DerivedData', 'Pods'];
 
@@ -61,28 +65,83 @@ export function isBuildArtifact(relativePath: string): boolean {
 // приходится обойти самим. Как и git, из всех прав отслеживаем только бит
 // исполнения: полные режимы сравнивать нельзя — у распакованного эталона и у
 // node_modules разный umask.
-export function collectExecutableBits(root: string, prefix = ''): Map<string, boolean> {
-  const found = new Map<string, boolean>();
-  if (!existsSync(root)) return found;
+//
+// Тем же обходом собираются симлинки. Их diff не переносит ни в каком виде:
+// разницу он либо печатает строкой без хунка, либо — на GNU — не переживает
+// вовсе. Значит, заметить её можно только самим.
+export interface TreeScan {
+  executable: Map<string, boolean>; // обычные файлы → бит исполнения
+  links: Map<string, string>; // симлинки → цель ссылки
+}
+
+export function scanTree(root: string, prefix = '', into?: TreeScan): TreeScan {
+  const scan: TreeScan = into ?? {executable: new Map(), links: new Map()};
+  if (!existsSync(root)) return scan;
 
   for (const entry of readdirSync(root, {withFileTypes: true})) {
     const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
-    if (entry.isSymbolicLink()) continue;
+
+    // Симлинк на каталог сюда же: внутрь мы не идём, потому что и diff с
+    // --no-dereference внутрь не идёт.
+    if (entry.isSymbolicLink()) {
+      scan.links.set(relative, readlinkSync(join(root, entry.name)));
+      continue;
+    }
 
     if (entry.isDirectory()) {
       if (entry.name === 'node_modules' || entry.name === '.git') continue;
       if (isBuildArtifact(relative)) continue;
-      for (const [key, value] of collectExecutableBits(join(root, entry.name), relative)) {
-        found.set(key, value);
-      }
+      scanTree(join(root, entry.name), relative, scan);
       continue;
     }
 
     if (!entry.isFile()) continue;
-    found.set(relative, (statSync(join(root, entry.name)).mode & 0o111) !== 0);
+    scan.executable.set(relative, (statSync(join(root, entry.name)).mode & 0o111) !== 0);
   }
 
-  return found;
+  return scan;
+}
+
+// Что стало с симлинком между эталоном и node_modules. `missingFrom` называет
+// дерево, где пути нет вовсе: именно на этом сочетании GNU diff отказывает.
+export interface LinkDifference {
+  relativePath: string;
+  change: string;
+  missingFrom: 'clean' | 'modified' | null;
+}
+
+export function findLinkDifferences(clean: TreeScan, modified: TreeScan): LinkDifference[] {
+  const differences: LinkDifference[] = [];
+  const paths = [...new Set([...clean.links.keys(), ...modified.links.keys()])].sort();
+
+  for (const relativePath of paths) {
+    const before = clean.links.get(relativePath);
+    const after = modified.links.get(relativePath);
+
+    if (before !== undefined && after !== undefined) {
+      if (before !== after) {
+        differences.push({relativePath, change: `now points at ${after}`, missingFrom: null});
+      }
+      continue;
+    }
+
+    if (after !== undefined) {
+      differences.push(
+        clean.executable.has(relativePath)
+          ? {relativePath, change: 'a regular file became a symlink', missingFrom: null}
+          : {relativePath, change: 'added', missingFrom: 'clean'},
+      );
+      continue;
+    }
+
+    differences.push(
+      modified.executable.has(relativePath)
+        ? {relativePath, change: 'a symlink became a regular file', missingFrom: null}
+        : {relativePath, change: 'removed', missingFrom: 'modified'},
+    );
+  }
+
+  return differences;
 }
 
 export interface DiffSection {
@@ -263,7 +322,30 @@ function fetchPristine(name: string, version: string, tempDir: string): string {
   }
 }
 
-function runDiff(cleanPackagePath: string, packagePath: string, name: string, version: string): string {
+// GNU diff, в отличие от Apple, не переживает `-N`, когда с одной стороны
+// симлинк, а с другой нет ничего: он печатает `diff: <путь>: No such file or
+// directory` и выходит с кодом 2 — тем же, которым сообщает о настоящем сбое.
+// Из-за этого один добавленный симлинк отменял весь патч, включая правки,
+// которые переносятся прекрасно. Код 2 принимаем, только если каждая строка
+// диагностики говорит ровно про такой симлинк, и ни про что больше.
+function onlyMissingLinks(stderr: string, tolerated: Set<string>): boolean {
+  const lines = stderr.split('\n').map(line => line.trim()).filter(Boolean);
+  if (lines.length === 0) return false;
+
+  return lines.every(line => {
+    const match = line.match(/^diff: (.+): No such file or directory$/);
+    return match !== null && tolerated.has(match[1]);
+  });
+}
+
+export function runDiff(
+  cleanPackagePath: string,
+  packagePath: string,
+  name: string,
+  version: string,
+  toleratedMissing: Set<string> = new Set(),
+  maxBuffer: number = DIFF_MAX_BUFFER,
+): string {
   // Без шелла: раньше это была строка, в которую подставлялся process.cwd(),
   // и `|| true` превращал любой сбой diff в успокаивающее «нет изменений».
   const diffArgs = [
@@ -276,11 +358,15 @@ function runDiff(cleanPackagePath: string, packagePath: string, name: string, ve
 
   let rawBuffer: Buffer;
   try {
-    rawBuffer = execFileSync('diff', diffArgs, {maxBuffer: 50 * 1024 * 1024});
+    // stderr забираем себе, а не отдаём наружу: про симлинки diff пишет туда
+    // строку, которую пользователю читать незачем — про них он сейчас услышит
+    // понятным текстом. Настоящий сбой мы всё равно печатаем сами, из catch.
+    rawBuffer = execFileSync('diff', diffArgs, {maxBuffer, stdio: ['ignore', 'pipe', 'pipe']});
   } catch (error: any) {
     // diff: 0 — совпало, 1 — есть различия, 2 и выше — сбой.
-    if (error.status !== 1) {
-      const reason = (error.stderr?.toString() || error.message || '').split('\n').filter(Boolean)[0];
+    const stderr = error.stderr?.toString() ?? '';
+    if (error.status !== 1 && !(error.status === 2 && onlyMissingLinks(stderr, toleratedMissing))) {
+      const reason = (stderr || error.message || '').split('\n').filter(Boolean)[0];
       throw new Error(`diff failed: ${reason}`);
     }
     rawBuffer = error.stdout ?? Buffer.alloc(0);
@@ -318,6 +404,21 @@ function reportBinaryFiles(rawPatch: string, packagePath: string): void {
   if (notices.length > 5) {
     console.log(`   ...and ${notices.length - 5} more`);
   }
+}
+
+// Симлинк не переносится патчем: формат возит содержимое файлов, а не ссылки.
+// Молчать об этом нельзя — правку было бы не отличить от «ничего не менялось».
+function reportLinkDifferences(differences: LinkDifference[]): void {
+  if (differences.length === 0) return;
+
+  console.log(`⚠️  ${differences.length} symbolic link(s) differ and cannot be patched:`);
+  for (const difference of differences.slice(0, 5)) {
+    console.log(`   ${difference.relativePath} — ${difference.change}`);
+  }
+  if (differences.length > 5) {
+    console.log(`   ...and ${differences.length - 5} more`);
+  }
+  console.log(`   A patch carries file contents, not links: these changes are not in it.`);
 }
 
 function reportSkipped(skipped: DiffSection[]): void {
@@ -463,16 +564,33 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
       replayPatches(plan.replay, packageName, cleanPackagePath);
     }
 
+    // Деревья обходим до диффа: список расхождений по симлинкам нужен разбору
+    // кода возврата самого diff.
+    const cleanTree = scanTree(cleanPackagePath);
+    const modifiedTree = scanTree(packagePath);
+    const linkDifferences = findLinkDifferences(cleanTree, modifiedTree);
+    const missingLinkPaths = new Set(
+      linkDifferences
+        .filter(difference => difference.missingFrom !== null)
+        .map(difference =>
+          join(
+            difference.missingFrom === 'clean' ? cleanPackagePath : packagePath,
+            difference.relativePath,
+          ),
+        ),
+    );
+
     console.log(`🔍 Generating diff...`);
-    const rawPatch = runDiff(cleanPackagePath, packagePath, name, version);
+    const rawPatch = runDiff(cleanPackagePath, packagePath, name, version, missingLinkPaths);
     reportBinaryFiles(rawPatch, packagePath);
+    reportLinkDifferences(linkDifferences);
 
     const sections = splitDiffSections(rawPatch, cleanPackagePath, packagePath);
     const kept = sections.filter(section => !isBuildArtifact(section.relativePath));
     reportSkipped(sections.filter(section => isBuildArtifact(section.relativePath)));
 
-    const cleanBits = collectExecutableBits(cleanPackagePath);
-    const modifiedBits = collectExecutableBits(packagePath);
+    const cleanBits = cleanTree.executable;
+    const modifiedBits = modifiedTree.executable;
     const modeOnly = findModeOnlyChanges(
       cleanBits,
       modifiedBits,
@@ -480,7 +598,10 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
     );
 
     if (kept.length === 0 && modeOnly.length === 0) {
-      if (sections.length > 0) {
+      if (linkDifferences.length > 0) {
+        console.log('⚠️  Nothing patchable changed — only symbolic links did');
+        console.log(`\n💡 Symbolic links cannot travel in a patch. Everything else in ${packagePath} matches the pristine copy.`);
+      } else if (sections.length > 0) {
         console.log('⚠️  No changes outside build artifacts');
         console.log(`\n💡 Everything you changed is under a build directory — those are not patchable.`);
       } else {
