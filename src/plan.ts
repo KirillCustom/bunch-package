@@ -31,6 +31,16 @@ export interface TreeContext {
   prefix: string; // `node_modules/<пакет>/`
 }
 
+// Пустой файл — это чаще всего создаваемый. Текстовый файл принято завершать
+// переводом строки, и отсутствие маркера `\ No newline` означает именно его;
+// без этого умолчания создаваемые файлы рождались без перевода строки.
+export function splitContent(raw: string): {lines: string[]; endsWithNewline: boolean} {
+  const lines = raw === '' ? [] : raw.split('\n');
+  const endsWithNewline = lines.length === 0 || lines[lines.length - 1] === '';
+  if (lines.length > 0 && endsWithNewline) lines.pop();
+  return {lines, endsWithNewline};
+}
+
 // Самая заковыристая часть плана: решить, что стало с содержимым файла.
 // Вынесена отдельно — здесь нет ни путей, ни файловой системы сверх чтения, и
 // именно тут сидели почти все дефекты, которые нашёл корпусный прогон.
@@ -47,12 +57,7 @@ function planContentChange(
   assumeNotApplied: boolean,
 ): ContentPlan {
   const raw = exists ? readFileSync(source, 'utf-8') : '';
-  const lines = raw === '' ? [] : raw.split('\n');
-  // Пустой файл — это чаще всего создаваемый. Текстовый файл принято завершать
-  // переводом строки, и отсутствие маркера `\ No newline` означает именно его;
-  // без этого умолчания создаваемые файлы рождались без перевода строки.
-  const endsWithNewline = lines.length === 0 || lines[lines.length - 1] === '';
-  if (lines.length > 0 && endsWithNewline) lines.pop();
+  const {lines, endsWithNewline} = splitContent(raw);
 
   // Патч создаёт файл, а файл уже есть и не пуст — применять такое вслепую
   // значит подмешать содержимое к чужому файлу.

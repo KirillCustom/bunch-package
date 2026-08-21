@@ -1759,6 +1759,44 @@ new file mode 100644
     expect(readFileSync(file, 'utf-8')).toBe('line one\nlast line');
   });
 
+  test('un-applies a patch whose two sides name different files', () => {
+    // Так выглядит `diff index.js.bak index.js`: заголовков rename нет, правится
+    // один файл — тот, что назван новой стороной. На корпусе это был случай,
+    // где откат уходил в несуществующий файл и дерево не возвращалось назад.
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'index.js': 'line one\nline two\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`), `diff --git a/node_modules/${PKG}/index.js.bak b/node_modules/${PKG}/index.js
+--- a/node_modules/${PKG}/index.js.bak
++++ b/node_modules/${PKG}/index.js
+@@ -1,2 +1,2 @@
+-line one
++PATCHED
+ line two
+`);
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    const file = join(TEST_DIR, 'node_modules', PKG, 'index.js');
+    expect(readFileSync(file, 'utf-8')).toBe('PATCHED\nline two\n');
+
+    const result = run(`rebase ${PKG} 0`, TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(file, 'utf-8')).toBe('line one\nline two\n');
+    // И никакого .bak на диске не появилось.
+    expect(existsSync(join(TEST_DIR, 'node_modules', PKG, 'index.js.bak'))).toBe(false);
+  });
+
+  test('exits non-zero when a patch cannot be un-applied', () => {
+    setupSequence();
+    overwriteFile(join(TEST_DIR, 'node_modules', PKG, 'index.js'), 'something else entirely\n');
+
+    const result = run(`rebase ${PKG} 0`, TEST_DIR);
+
+    // Напечатать ❌ и выйти с нулём значит соврать вызывающему, включая CI.
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Stopped after 0 of 2');
+  });
+
   test('inverting a patch twice gives the same patch back', () => {
     const parsed = parsePatch(`diff --git a/node_modules/${PKG}/renamed.js b/node_modules/${PKG}/moved.js
 old mode 100644

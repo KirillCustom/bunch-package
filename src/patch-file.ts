@@ -172,9 +172,16 @@ export function parsePatch(patchContent: string): PatchTarget[] {
 // перевода строки в конце) остаётся один на оба направления — тот самый, что
 // выверен корпусом. Второй экземпляр той же логики разошёлся бы с первым.
 export function invertTarget(target: PatchTarget): PatchTarget {
+  // Встречаются патчи, у которых стороны названы разными файлами без заголовков
+  // rename: так выглядит `diff bootstrap.js.bak bootstrap.js`. Правят они всё
+  // равно один файл — тот, что назван новой стороной, потому что именно его
+  // берёт planTarget. Перестановка путей увела бы откат в файл, которого нет:
+  // на корпусе это ровно тот случай, где дерево не возвращалось к эталону.
+  const oneFile = target.renameFrom === null && target.oldPath !== null && target.newPath !== null;
+
   return {
     oldPath: target.newPath,
-    newPath: target.oldPath,
+    newPath: oneFile ? target.newPath : target.oldPath,
     hunks: target.hunks.map(invertHunk),
     oldMode: target.newMode,
     newMode: target.oldMode,

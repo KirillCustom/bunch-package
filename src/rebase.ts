@@ -1,9 +1,10 @@
 import {existsSync, readFileSync, readdirSync} from 'fs';
 import {join} from 'path';
 import {LOCK_FILE, withApplyLock} from './lock';
-import {invertTarget, orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
+import {applyHunks} from './hunks';
+import {invertTarget, orderPatchFiles, parsePatch, parsePatchName, PatchTarget} from './patch-file';
 import {PATCHES_DIR} from './paths';
-import {executeOps, planTarget} from './plan';
+import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
 import {recordPatches} from './state';
 
 // Патчи одного пакета — как коммиты: чтобы переделать не последний, надо сперва
@@ -31,21 +32,35 @@ export function rebasePatches(packageName: string, target: string): void {
 
   const removed = withApplyLock(LOCK_FILE, () => unApply(undo));
 
-  if (removed === undo.length) {
-    // Всё, что должно было уйти, ушло — записываем оставшееся.
-    recordPatches(all.filter(file => !undo.includes(file)));
+  if (removed < undo.length) {
+    // Часть патчей снять не удалось. Те, что выше сорвавшегося, уже сняты, сам
+    // он и всё под ним — на месте. Выходим с ошибкой: молча вернуть ноль после
+    // напечатанного ❌ значит соврать вызывающему, включая CI.
+    console.log('');
+    console.log(`⚠️  Stopped after ${removed} of ${undo.length}. Everything above ${undo[removed]} is off; it and the rest are untouched.`);
+    process.exit(1);
   }
 
+  // Всё, что должно было уйти, ушло — записываем оставшееся.
+  recordPatches(all.filter(file => !undo.includes(file)));
+
+  const next: [string, string][] = keep === 0
+    ? [
+        [`bunch-package create ${packageName} --append <name>`, 'to insert a patch before the others'],
+        ['bunch-package apply', 'to put the rest back'],
+      ]
+    : [
+        [`bunch-package create ${packageName}`, `to update ${mine[keep - 1]}`],
+        [`bunch-package create ${packageName} --append <name>`, 'to insert a patch after it'],
+        ['bunch-package apply', 'to put the rest back'],
+      ];
+
+  // Ширину колонки считаем, а не подгоняем руками: имя пакета бывает любым.
+  const width = Math.max(...next.map(([command]) => command.length)) + 3;
+
   console.log('');
-  if (keep === 0) {
-    console.log(`Now edit node_modules/${packageName}, then run:`);
-    console.log(`  bunch-package create ${packageName} --append <name>   to insert a patch before the others`);
-  } else {
-    console.log(`Now edit node_modules/${packageName}, then run:`);
-    console.log(`  bunch-package create ${packageName}                   to update ${mine[keep - 1]}`);
-    console.log(`  bunch-package create ${packageName} --append <name>   to insert a patch after it`);
-  }
-  console.log(`  bunch-package apply                                  to put the rest back`);
+  console.log(`Now edit node_modules/${packageName}, then run:`);
+  for (const [command, purpose] of next) console.log(`  ${command.padEnd(width)}${purpose}`);
 }
 
 // Цель называют как удобно: именем файла, номером в последовательности, меткой
@@ -111,12 +126,27 @@ function unApply(files: string[]): number {
 
     // Как и при применении: сначала считаем весь патч, потом пишем. Половина
     // снятого патча — состояние, из которого не выбраться.
-    let ops;
+    let ops: PlannedOp[] = [];
+    let inexact: string | null = null;
+
     try {
-      ops = targets.map(invertTarget).flatMap(target => planTarget(target, undefined, true));
+      for (const target of targets) {
+        const planned = planTarget(invertTarget(target), undefined, true);
+        inexact ??= firstInexact(planned, target);
+        ops.push(...planned);
+      }
     } catch (error: any) {
       console.log(`  ❌ ${file}`);
       console.log(`     ${error.message}`);
+      break;
+    }
+
+    if (inexact !== null) {
+      console.log(`  ❌ ${file}`);
+      console.log(`     ${inexact} cannot be restored exactly.`);
+      console.log(`     The patch is the only record of the lines it removed, and it does not`);
+      console.log(`     match them byte for byte — trailing whitespace or CRLF, most likely.`);
+      console.log(`     Writing an approximation would put that difference into the next patch.`);
       break;
     }
 
@@ -126,4 +156,41 @@ function unApply(files: string[]): number {
   }
 
   return removed;
+}
+
+// Проверка себя: применив исходный патч к тому, что мы собираемся записать,
+// обязаны получить ровно то, что лежит сейчас. Иначе восстановление неточное.
+//
+// Так и должно быть слышно: патч — единственный источник удалённых строк, а
+// хранит он их с обрезанными хвостовыми пробелами. На корпусе из 289 патчей
+// пять восстанавливались с расхождением, четыре из них — ровно в один `\r`.
+// Записать «почти то же самое» нельзя: эта разница уедет в следующий патч,
+// который create посчитает от эталона.
+function firstInexact(ops: PlannedOp[], original: PatchTarget): string | null {
+  // Переименования проверять так нельзя: содержимое к этому моменту лежит по
+  // старому пути, а op.file называет новый.
+  if (original.renameFrom !== null) return null;
+
+  for (const op of ops) {
+    if (op.kind !== 'write') continue;
+
+    const there = existsSync(op.file);
+    const {lines, endsWithNewline} = splitContent(op.content);
+    const forward = applyHunks(lines, endsWithNewline, original.hunks, false);
+
+    if ('error' in forward) return op.file;
+    const rebuilt = forward.lines.join('\n') + (forward.endsWithNewline ? '\n' : '');
+
+    // Файла нет — значит исходный патч его удалял, и от содержимого не должно
+    // остаться ничего. Пустой результат бывает и `\n`: ровно так же его
+    // трактует planContentChange, когда решает удалить файл.
+    if (!there) {
+      if (rebuilt !== '' && rebuilt !== '\n') return op.file;
+      continue;
+    }
+
+    if (rebuilt !== readFileSync(op.file, 'utf-8')) return op.file;
+  }
+
+  return null;
 }
