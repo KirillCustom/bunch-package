@@ -2,7 +2,7 @@ import {chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, r
 import {join} from 'path';
 import {applyHunks} from './hunks';
 import {Hunk, PatchTarget, sideLines} from './patch-file';
-import {MODES_SUPPORTED, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
+import {MODES_SUPPORTED, TEMP_WRITE_SUFFIX, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
 
 // Режим симлинка в git-заголовках. У обычных файлов — 100644 и 100755.
 export const SYMLINK_MODE = '120000';
@@ -123,9 +123,9 @@ function planContentChange(
       return {kind: 'remove', file};
     }
 
-    // Запись идёт через пересоздание файла, чтобы разорвать hardlink на общий
-    // кеш bun, — а значит режим надо проставить заново, иначе бит исполнения
-    // терялся бы у любого патченого файла.
+    // Запись идёт не в тот же файл, а во временный рядом (см. executeOps),
+    // чтобы разорвать hardlink на общий кеш bun, — а значит режим надо
+    // проставить заново, иначе бит исполнения терялся бы у любого патченого файла.
     const base = currentMode ?? 0o644;
     const mode = wantExecutable === null ? base : withExecutable(base, wantExecutable);
     return {kind: 'ops', ops: [{kind: 'write', file, content, mode}]};
@@ -262,9 +262,26 @@ export function executeOps(ops: PlannedOp[]): void {
       continue;
     }
     mkdirSync(join(op.file, '..'), {recursive: true});
-    // Разрываем hardlink на общий кеш bun: запись на месте изменила бы и его.
-    rmSync(op.file, {force: true});
-    writeFileSync(op.file, op.content);
-    if (op.mode !== null) chmodSync(op.file, op.mode);
+
+    // Пишем рядом и переставляем поверх. rename в пределах каталога атомарен:
+    // снаружи файл виден либо старым целиком, либо новым целиком. Прежняя
+    // последовательность «удалить, записать, выставить режим» оставляла между
+    // шагами дыру: apply, убитый там (Ctrl-C, упавший CI, кончившееся место),
+    // оставлял файл исчезнувшим или обрезанным — а из такого состояния патч
+    // больше не ложился никогда, потому что хунк не сходился с пустотой.
+    //
+    // Hardlink на общий кеш bun это разрывает ровно так же, как прежнее
+    // пересоздание: у временного файла свой инод, а rename меняет только запись
+    // в каталоге, оставляя кешу его собственный.
+    const temp = `${op.file}${TEMP_WRITE_SUFFIX}${process.pid}`;
+    try {
+      writeFileSync(temp, op.content);
+      // Режим ставим до перестановки, чтобы файл не побывал видимым с чужим.
+      if (op.mode !== null) chmodSync(temp, op.mode);
+      renameSync(temp, op.file);
+    } catch (error) {
+      rmSync(temp, {force: true});
+      throw error;
+    }
   }
 }
