@@ -2,6 +2,13 @@ import {resolve, sep} from 'path';
 
 export const PATCHES_DIR = 'patches';
 
+// Файлы пишутся рядом с целью и переставляются поверх неё, поэтому в дереве
+// пакета на мгновение появляется вот такой сосед. Если apply убьют ровно тогда,
+// сосед останется лежать — и не должен ни попасть в следующий патч, ни быть
+// принят за файл пакета. Суффикс знают оба: apply, который его создаёт, и
+// create, который его исключает из диффа.
+export const TEMP_WRITE_SUFFIX = '.bunch-tmp-';
+
 // -p1: срезаем первый компонент пути, как это делает patch.
 export function stripPathPrefix(path: string): string {
   const slash = path.indexOf('/');

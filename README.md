@@ -120,13 +120,20 @@ patch is computed in memory first, and nothing is written unless every file in i
 fits — so a patch can never leave your tree half-changed, and a failed apply leaves
 no `.rej` or `.orig` files behind. Applying the same patch twice is a no-op.
 
+Each file is written beside its target and moved over it, so a file is never visible
+half-written or briefly missing. An `apply` killed outright — Ctrl-C, a CI runner
+that died, a disk that filled up — leaves every file either as it was or fully
+patched, and running `apply` again finishes the job. Writing in place instead would
+leave a truncated file that no later `apply` could ever patch, because a hunk does
+not fit against emptiness.
+
 Only one `apply` runs at a time. It holds `node_modules/.bunch-package.lock` for the
 length of the run; a second `apply` waits up to 30 seconds for the first to finish,
 then reports who is holding the lock. Two runs a moment apart are ordinary —
 `postinstall` firing twice, workspaces installing in parallel — and without the lock
-they can interleave into a tree that is neither the patched nor the unpatched one. If
-a run is killed outright the file stays behind; the message names it so you can
-delete it.
+they can interleave into a tree that is neither the patched nor the unpatched one. A
+lock left behind by a killed run is recognised by the process id inside it and taken
+over, so a killed `apply` does not lock the project up.
 
 Exit codes:
 
