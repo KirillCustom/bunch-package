@@ -1,7 +1,7 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
 import {execSync} from 'child_process';
 import {chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
-import {findLinkDifferences, scanTree} from './src/create';
+import {findLinkDifferences, runDiff, scanTree} from './src/create';
 import {join} from 'path';
 
 // writeFileSync пишет в тот же inode, что ломает тесты при hardlink-кеше bun.
@@ -18,9 +18,11 @@ setDefaultTimeout(120_000);
 const TEST_DIR = join(import.meta.dir, '.test-sandbox');
 const CLI = join(import.meta.dir, 'index.ts');
 
+// Запускаем ровно тот bun, что исполняет сам набор тестов, а не первый по PATH:
+// иначе тест, подменяющий PATH, подменял бы заодно и запускающий процесс.
 function run(args: string, cwd: string, env?: Record<string, string>): {stdout: string; exitCode: number} {
   try {
-    const stdout = execSync(`bun ${CLI} ${args}`, {
+    const stdout = execSync(`"${process.execPath}" "${CLI}" ${args}`, {
       cwd,
       encoding: 'utf-8',
       stdio: 'pipe',
@@ -1028,5 +1030,85 @@ new file mode 120000
     // Ссылка на месте, и файл, на который она смотрит, не тронут.
     expect(lstatSync(join(pkg, 'link.js')).isSymbolicLink()).toBe(true);
     expect(readFileSync(join(pkg, 'real.js'), 'utf-8')).toBe('hello\n');
+  });
+});
+
+// Пределы, которые срабатывают только когда всё идёт плохо: буфер diff,
+// таймаут установки эталона. Ни один из них не исполнялся ни разу — ни
+// тестами, ни корпусным прогоном на 280 патчах, где всё ставится и всё влезает.
+describe('limits and failure paths', () => {
+  test('refuses a diff bigger than the buffer instead of truncating it', () => {
+    const clean = join(TEST_DIR, 'clean');
+    const modified = join(TEST_DIR, 'modified');
+    mkdirSync(clean, {recursive: true});
+    mkdirSync(modified, {recursive: true});
+
+    let before = '';
+    let after = '';
+    for (let line = 0; line < 60_000; line++) {
+      before += `line ${line}\n`;
+      after += `LINE ${line}\n`;
+    }
+    writeFileSync(join(clean, 'big.js'), before);
+    writeFileSync(join(modified, 'big.js'), after);
+
+    // Превышение буфера bun отдаёт как ENOBUFS с усечённым stdout и status =
+    // null. Принять такой вывод за нормальный значило бы записать обрезанный
+    // патч — молча и с рапортом об успехе.
+    expect(() => runDiff(clean, modified, 'big-pkg', '1.0.0', new Set(), 1024 * 1024)).toThrow(
+      /larger than 1 MB/,
+    );
+  });
+
+  test.skipIf(isWindows)('says the pristine fetch timed out, and how to allow longer', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+
+    // Оба способа добыть эталон подменяем на «висит и молчит». Подмену видит
+    // только запускаемый процесс: PATH меняется у него при старте, а не у
+    // текущего — bun не отдаёт потомку правки process.env, сделанные после
+    // старта, если env не передан явно.
+    const fakeBin = join(TEST_DIR, 'bin');
+    mkdirSync(fakeBin, {recursive: true});
+    for (const name of ['bun', 'npm']) {
+      const script = join(fakeBin, name);
+      writeFileSync(script, '#!/bin/sh\nsleep 30\n');
+      chmodSync(script, 0o755);
+    }
+
+    const result = run('create test-lib', TEST_DIR, {
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      BUNCH_FETCH_TIMEOUT: '1',
+    });
+
+    // При таймауте bun не отдаёт ни stdout, ни stderr, поэтому раньше здесь
+    // выходило `bun: spawnSync bun ETIMEDOUT` — предел выглядел чужим и
+    // непреодолимым.
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('timed out after 1s');
+    expect(result.stdout).toContain('BUNCH_FETCH_TIMEOUT');
+    // Оба пути названы: и bun, и запасной npm.
+    expect(result.stdout).toContain('bun:');
+    expect(result.stdout).toContain('npm:');
+  });
+
+  test('refuses a nonsense BUNCH_FETCH_TIMEOUT instead of quietly ignoring it', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+
+    const result = run('create test-lib', TEST_DIR, {BUNCH_FETCH_TIMEOUT: 'soon'});
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('BUNCH_FETCH_TIMEOUT');
+  });
+
+  test('prints a failure as a line to read, not as a stack trace', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+
+    const result = run('create nonexistent-pkg', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('❌ Package nonexistent-pkg not found');
+    // Текст сообщений писался для человека, а стек — это вид, в котором его
+    // не читают.
+    expect(result.stdout).not.toContain('at createPatch');
   });
 });

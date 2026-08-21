@@ -21,6 +21,15 @@ function parseAppendLabel(argv: string[]): string | null {
   return label;
 }
 
+// Сообщения об отказах написаны, чтобы их прочитал человек: «поставьте
+// diffutils», «поднимите BUNCH_FETCH_TIMEOUT». Без этой обёртки они выходили
+// стеком необработанного исключения — то есть тем видом, в котором текст не
+// читают вовсе.
+function fail(error: any): never {
+  console.error(`❌ ${error?.message ?? error}`);
+  process.exit(1);
+}
+
 switch (command) {
   case 'create':
     if (!arg || arg.startsWith('--')) {
@@ -28,11 +37,19 @@ switch (command) {
       process.exit(1);
     }
 
-    createPatch(arg, parseAppendLabel(process.argv));
+    try {
+      createPatch(arg, parseAppendLabel(process.argv));
+    } catch (error) {
+      fail(error);
+    }
     break;
 
   case 'apply':
-    applyPatches();
+    try {
+      applyPatches();
+    } catch (error) {
+      fail(error);
+    }
     break;
 
   default:

@@ -260,6 +260,34 @@ function firstDiagnosticLine(error: any): string {
   return streams[0] ?? (error.message ? String(error.message).split('\n')[0].trim() : '');
 }
 
+// Установка эталона ходит в сеть, и висеть там вечно она не должна. Шестидесяти
+// секунд хватает пакету любого разумного размера — но не на медленном канале, а
+// упереться в предел там значит остаться без create вовсе. Отсюда переменная
+// окружения: тупик должен иметь выход.
+export const FETCH_TIMEOUT_MS = 60_000;
+
+export function fetchTimeoutMs(): number {
+  const raw = process.env.BUNCH_FETCH_TIMEOUT;
+  if (raw === undefined || raw === '') return FETCH_TIMEOUT_MS;
+
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error(`BUNCH_FETCH_TIMEOUT must be a positive number of seconds, got: ${raw}`);
+  }
+  return Math.round(seconds * 1000);
+}
+
+// При таймауте bun не отдаёт ни stdout, ни stderr — измерено: процесс убивается
+// SIGTERM, потоки приходят пустыми. Поэтому firstDiagnosticLine() отдал бы
+// `spawnSync bun ETIMEDOUT`, из чего пользователю не понять ни того, что предел
+// наш, ни того, что его можно поднять.
+function describeFetchFailure(error: any, timeoutMs: number): string {
+  if (error.code === 'ETIMEDOUT') {
+    return `timed out after ${Math.round(timeoutMs / 1000)}s (raise BUNCH_FETCH_TIMEOUT to wait longer)`;
+  }
+  return firstDiagnosticLine(error) || error.message;
+}
+
 interface Manifest {
   name: string;
   version: string;
@@ -288,12 +316,13 @@ function fetchPristine(name: string, version: string, tempDir: string): string {
   );
 
   const failures: string[] = [];
+  const timeout = fetchTimeoutMs();
 
   try {
     execFileSync('bun', ['add', '--no-save', `${name}@${version}`], {
       cwd: tempDir,
       stdio: 'pipe',
-      timeout: 60000,
+      timeout,
       env: {...process.env, BUN_INSTALL_CACHE_DIR: join(tempDir, 'cache')},
     });
     // Имя каталога в node_modules не обязано совпадать с именем пакета: при
@@ -301,7 +330,7 @@ function fetchPristine(name: string, version: string, tempDir: string): string {
     // Путь к эталону строим по имени из манифеста, а не по аргументу команды.
     return join(tempDir, 'node_modules', name);
   } catch (error: any) {
-    failures.push(`bun: ${firstDiagnosticLine(error) || error.message}`);
+    failures.push(`bun: ${describeFetchFailure(error, timeout)}`);
   }
 
   // Запасной путь — тарбол из реестра. Он тоже мимо кеша bun, но требует npm,
@@ -310,14 +339,14 @@ function fetchPristine(name: string, version: string, tempDir: string): string {
     const packed = execFileSync('npm', ['pack', '--silent', '--pack-destination', tempDir, `${name}@${version}`], {
       cwd: tempDir,
       encoding: 'utf-8',
-      timeout: 60000,
+      timeout,
     });
     const printed = packed.split('\n').map(line => line.trim()).filter(Boolean).pop();
     if (!printed) throw new Error('npm pack printed no tarball name');
-    execFileSync('tar', ['-xzf', join(tempDir, printed), '-C', tempDir], {stdio: 'pipe', timeout: 60000});
+    execFileSync('tar', ['-xzf', join(tempDir, printed), '-C', tempDir], {stdio: 'pipe', timeout});
     return join(tempDir, 'package'); // тарболы npm всегда распаковываются сюда
   } catch (npmError: any) {
-    failures.push(`npm: ${firstDiagnosticLine(npmError) || npmError.message}`);
+    failures.push(`npm: ${describeFetchFailure(npmError, timeout)}`);
     throw new Error(`Could not fetch a pristine ${name}@${version}:\n   ${failures.join('\n   ')}`);
   }
 }
@@ -363,6 +392,18 @@ export function runDiff(
     // понятным текстом. Настоящий сбой мы всё равно печатаем сами, из catch.
     rawBuffer = execFileSync('diff', diffArgs, {maxBuffer, stdio: ['ignore', 'pipe', 'pipe']});
   } catch (error: any) {
+    // Вывод больше maxBuffer: bun (как и node) убивает diff сигналом и отдаёт
+    // усечённый stdout со status = null. Проверено — усечение молчаливое, и
+    // если принять его за нормальный вывод, на диск ляжет обрезанный патч.
+    // Отсюда отдельная ветка: сказать вслух и назвать причину.
+    if (error.code === 'ENOBUFS') {
+      throw new Error(
+        `The diff for ${name}@${version} is larger than ${Math.round(maxBuffer / 1024 / 1024)} MB. ` +
+          `Writing a truncated patch would be worse than writing none, so nothing was written. ` +
+          `Usually this means generated or build output is being compared — patch a smaller part of the package.`,
+      );
+    }
+
     // diff: 0 — совпало, 1 — есть различия, 2 и выше — сбой.
     const stderr = error.stderr?.toString() ?? '';
     if (error.status !== 1 && !(error.status === 2 && onlyMissingLinks(stderr, toleratedMissing))) {
