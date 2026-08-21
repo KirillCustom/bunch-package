@@ -7,7 +7,7 @@
 ## Why bunch-package?
 
 - 🚀 **Fast** - Built specifically for Bun
-- 🎯 **Simple** - Two commands: create and apply
+- 🎯 **Simple** - Three commands: create, apply and status
 - 🔒 **Safe** - Automatically excludes binary files and build artifacts
 - 📦 **Smart** - Detects already applied patches
 - 🎨 **Clean patches** - Excludes build directories, binaries, and media files
@@ -54,6 +54,12 @@ git commit -m "fix: patch some-package"
 Now whenever someone runs `bun install`, patches are automatically applied!
 
 ## Commands
+
+| Command | What it does |
+|---|---|
+| `create <package>` | Create or update a patch for a package |
+| `apply` | Apply every patch in `patches/` |
+| `status` | Show which patches are in the tree right now |
 
 ### Create a patch
 
@@ -135,6 +141,33 @@ silently shipping an unpatched build.
 Patches created by bunch-package before 1.1.0 contain absolute paths and cannot be
 applied; `apply` reports them as failed and asks you to recreate them with `create`.
 
+### What is in the tree right now
+
+```bash
+bunx bunch-package status
+```
+
+```
+📋 2 patch(es) in patches/
+
+  ✅ is-number+7.0.0.patch — in the tree, applied 2026-08-21T17:46:38.613Z
+  ⬜ left-pad+1.3.0.patch — not in the tree, applied 2026-08-20T09:12:04.201Z
+
+📊 1 of 2 in the tree
+```
+
+Every answer is worked out from `node_modules` itself, by checking whether each
+patch is already in the files. `apply` also keeps a record at
+`node_modules/.bunch-package-state.json` — which patch, which version, the hash of
+the patch file, and when it first landed — and `status` uses it only for the parts
+the tree cannot tell you: when a patch was applied, whether the patch file has been
+edited since, and whether a patch file that used to be applied has been deleted
+while its changes are still in `node_modules`. The record is never taken as proof
+that a patch is applied; the files are.
+
+`status` exits `1` when anything is missing from the tree, so it can stand in CI as
+a cheap check that `node_modules` is what the patches say it should be.
+
 ## What gets excluded?
 
 `bunch-package` automatically excludes, at any depth:
@@ -143,6 +176,9 @@ applied; `apply` reports them as failed and asks you to recreate them with `crea
 - Media files (`*.png`, `*.jpg`, `*.jpeg`, `*.gif`, `*.webp`)
 - Fonts (`*.ttf`, `*.otf`, `*.woff`, `*.woff2`)
 - Leftovers from a failed apply (`*.rej`, `*.orig`)
+- `patch-package`'s own state file (`.patch-package.json`), which it writes inside
+  the patched package — so a project moving over from it does not carry that file
+  into its first patch
 - Version control (`.git/`, `node_modules/`)
 
 Build artifacts are excluded by path, not by name:
