@@ -6,11 +6,15 @@
 
 ## Why bunch-package?
 
-- 🚀 **Fast** - Built specifically for Bun
-- 🎯 **Simple** - Five commands: create, apply, status, rebase and retarget
-- 🔒 **Safe** - Automatically excludes binary files and build artifacts
-- 📦 **Smart** - Detects already applied patches
-- 🎨 **Clean patches** - Excludes build directories, binaries, and media files
+- **Built for bun's install cache.** Bun links installed packages to a shared cache,
+  so editing a file in `node_modules` edits the cache too. Every command here knows
+  that; a tool written for npm does not.
+- **Five commands:** create, apply, status, rebase and retarget.
+- **It tells you when it cannot do something.** Binary files, symbolic links, a hunk
+  that no longer fits — all of them are named out loud rather than dropped, because
+  a patch that silently carries less than you think is worse than no patch.
+- **Applying twice changes nothing**, even for a patch that once landed a few lines
+  away from where it said it would.
 
 ## Installation
 
@@ -342,9 +346,9 @@ as applied once and stays that way instead of being reported as work on every ru
 
 ## Platforms
 
-Checked against 280 patches taken from public repositories, applied with both this
-tool and `patch-package` and compared byte for byte: the resulting trees are
-identical, apart from one patch that both refuse to parse.
+Checked against 290 patches taken from public repositories, applied with both this
+tool and `patch-package` and compared byte for byte: all 290 trees are identical,
+and the two tools agree on the exit code every time.
 
 Tested on Linux, macOS and Windows. `apply` is plain JavaScript and needs nothing
 from the system; `create` shells out to `diff`, which is present on all three
@@ -357,8 +361,6 @@ though — the text lockfile and the test runner it uses arrived there.
 
 If `diff` is not on PATH, `create` says so before it does anything else, rather
 than downloading a pristine copy of the package first and failing afterwards.
-
-This keeps your patches small and text-based.
 
 ## Example
 
@@ -390,8 +392,11 @@ git commit -m "fix: add missing include in react-native-date-picker"
 
 ## How it works
 
-1. **Create**: Fetches a pristine copy of the package into a temp directory, diffs it against your modified version, and writes the diff as a patch file
-2. **Apply**: Applies every `.patch` file in `patches/` itself, without shelling out to `patch(1)`
+1. **Create** fetches a pristine copy of the package into a temp directory, diffs it
+   against your modified version, and writes the diff as a patch file.
+2. **Apply** applies every `.patch` file in `patches/` itself, without shelling out
+   to `patch(1)`: one run at a time, each file replaced rather than rewritten in
+   place, and a record of what landed left in `node_modules`.
 
 Unified diffs are parsed and applied in process. That is a deliberate choice: `patch`
 is GNU on Linux and a much older Apple build on macOS, and they disagree on exit
@@ -400,6 +405,11 @@ write outside the project at all. Doing it in process also makes the whole patch
 atomic, keeps deletions idempotent, and means paths are checked against the project
 root by us rather than by whichever `patch` happens to be installed.
 
+Whether a patch is already in the tree is never taken on faith from that record —
+it is worked out from the files, by reading them both ways: how well the hunks' old
+side fits, and how well the new side fits. That is what makes a second `apply` a
+no-op even for a patch that landed at an offset.
+
 The pristine copy is installed with an isolated download cache. This matters: bun
 links installed packages to its shared cache, so editing a file in `node_modules`
 edits the cache entry too — and a "clean" install pulled from that cache would come
@@ -407,18 +417,34 @@ back carrying your change, making the diff come out empty. Patch headers are reb
 from the file paths rather than rewritten in place, so an absolute path that happens
 to appear *inside* a file is left alone.
 
-## Comparison with patch-package
+## Compared with patch-package
 
-| Feature | bunch-package | patch-package |
-|---------|--------------|---------------|
-| Speed | ⚡️ Fast (Bun) | Slower (Node.js) |
-| Binary exclusion | ✅ Automatic | ⚠️ Manual config |
-| Already applied detection | ✅ Smart | ⚠️ Can fail |
-| Size | 📦 Small (~200 lines) | 📦 Larger |
+Patch files are interchangeable between the two, and on real patches the result is
+the same. Everything below was measured by running both, not assumed:
+
+| | bunch-package | patch-package 8.0.1 |
+|---|---|---|
+| Result on 290 real patches | identical trees, identical exit codes | identical trees, identical exit codes |
+| `apply` on a 3-section patch | 15 ms | 71 ms |
+| `apply` on a 35-section patch | 22 ms | 76 ms |
+| Applying a patch that only appends lines, three times | applied once, then recognised | 1, then 2, then 3 copies of the added lines |
+| Patch section describing a symlink (`mode 120000`) | refused, and named as a symlink | refused as "could not be parsed" |
+| Record of what was applied | `node_modules/.bunch-package-state.json` | `.patch-package.json`, written inside the patched package |
+| Bun's shared install cache | handled | not addressed — its README does not mention bun |
+| npm, yarn, pnpm, workspaces | not attempted | documented |
+| Moving a patch to a newer version of the package | `retarget` | — |
+
+Most of the speed difference is process startup, which is what a `postinstall` hook
+pays on every install. The rest of the table is a difference in behaviour, not a
+score: `patch-package` runs where this tool does not, and that is the honest reason
+to keep using it.
 
 ## Requirements
 
-- Bun >= 1.0.0
+- **Using it:** bun >= 1.0.0, checked in CI on 1.0, 1.1 and 1.2 as well as the
+  current release. `create` also needs `diff` on PATH.
+- **Working on it:** bun >= 1.2 — the text lockfile and the test runner the suite
+  uses arrived there.
 
 ## License
 
