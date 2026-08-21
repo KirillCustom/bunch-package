@@ -3,12 +3,49 @@ import {join} from 'path';
 import {orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
 import {PATCHES_DIR} from './paths';
 import {PlannedOp, TreeContext, executeOps, planTarget} from './plan';
+import {readState} from './state';
 
 export interface SequencePlan {
   replay: string[]; // патчи, которыми надо довести эталон
   outputName: string;
   renameFrom: string | null;
   renameTo: string | null;
+}
+
+// Лежат ли изменения патча в дереве. Пустой план на применение означает, что
+// менять нечего, то есть патч уже там.
+function isInTree(file: string): boolean {
+  try {
+    const targets = parsePatch(readFileSync(join(PATCHES_DIR, file), 'utf-8'));
+    if (targets.length === 0) return false;
+    return targets.flatMap(target => planTarget(target)).length === 0;
+  } catch {
+    return false; // не ложится и не узнаётся — значит не он
+  }
+}
+
+// Какой патч последовательности пересоздаём. Обычно — последний по номеру, но
+// после `rebase` верхние сняты, и переписать надо тот, на который откатились.
+//
+// Одним лишь деревом это не решается: к моменту `create` пользователь уже
+// поменял файлы, и целевой патч перестал совпадать с деревом — по нему видно
+// только, что он «не лежит». Поэтому подсказку берём из записи о применённом, а
+// дерево используем как проверку: патчи **после** подсказанного обязаны быть не
+// в дереве, иначе их правки уехали бы в пересоздаваемый патч.
+function targetOfSequence(sequenced: string[]): number {
+  const recorded = new Set((readState()?.patches ?? []).map(patch => patch.file));
+
+  for (let index = sequenced.length - 1; index >= 0; index--) {
+    if (!recorded.has(sequenced[index])) continue;
+    if (sequenced.slice(index + 1).every(file => !isInTree(file))) return index;
+    break; // запись отстала от дерева — верим дереву
+  }
+
+  for (let index = sequenced.length - 1; index >= 0; index--) {
+    if (isInTree(sequenced[index])) return index;
+  }
+
+  return -1;
 }
 
 export function planSequence(sanitizedName: string, version: string, appendLabel: string | null): SequencePlan {
@@ -44,13 +81,26 @@ export function planSequence(sanitizedName: string, version: string, appendLabel
     };
   }
 
-  // Без --append обновляем последний патч последовательности: эталон доводим
-  // всеми предыдущими, а его самого пересоздаём.
+  // Без --append обновляем последний патч, который **сейчас в дереве**, а не
+  // последний по номеру. Обычно это одно и то же, но после `rebase` верхние
+  // патчи сняты, и переписывать надо тот, на который откатились.
   const sequenced = siblings.filter(file => sequenceOf(file) > 0);
   if (sequenced.length > 0) {
+    const target = targetOfSequence(sequenced);
+
+    // Ни одного патча последовательности в дереве нет. Раньше здесь молча
+    // переписывался последний: эталон доводился всеми предыдущими патчами, а
+    // дерево их не содержало — и в новый патч уезжала отмена чужих правок.
+    if (target === -1) {
+      throw new Error(
+        `None of the ${sequenced.length} patches for this package is in node_modules right now.\n` +
+          `   Run \`bunch-package apply\` first, or use --append to start a new patch.`,
+      );
+    }
+
     return {
-      replay: sequenced.slice(0, -1),
-      outputName: sequenced[sequenced.length - 1],
+      replay: sequenced.slice(0, target),
+      outputName: sequenced[target],
       renameFrom: null,
       renameTo: null,
     };

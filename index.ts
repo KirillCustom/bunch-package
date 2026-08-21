@@ -2,6 +2,7 @@
 
 import {applyPatches} from './src/apply';
 import {createPatch} from './src/create';
+import {rebasePatches} from './src/rebase';
 import {showStatus} from './src/status';
 
 // Main
@@ -61,6 +62,22 @@ switch (command) {
     }
     break;
 
+  case 'rebase': {
+    // Цель обязательна и без умолчания: «откатить на что-нибудь» — не команда.
+    const target = process.argv[4];
+    if (!arg || arg.startsWith('--') || !target) {
+      console.error('❌ Usage: bunch-package rebase <package-name> <patch-file|number|0>');
+      process.exit(1);
+    }
+
+    try {
+      rebasePatches(arg, target);
+    } catch (error) {
+      fail(error);
+    }
+    break;
+  }
+
   default:
     console.log(`
 🎯 bunch-package - Patch management for Bun
@@ -70,5 +87,6 @@ Commands:
   bunch-package create <package> --append <name>  Add another patch to the package
   bunch-package apply                             Apply all patches
   bunch-package status                            Show which patches are in the tree
+  bunch-package rebase <package> <patch|0>        Un-apply the patches that sit on top of one
     `);
 }

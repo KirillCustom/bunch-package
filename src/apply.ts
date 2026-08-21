@@ -5,7 +5,7 @@ import {orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
 import {PATCHES_DIR, packageDirectoryOf, stripPathPrefix} from './paths';
 import {PlannedOp, executeOps, planTarget} from './plan';
 import {appliedSequences} from './sequence';
-import {RecordedPatch, STATE_FILE, hashPatchFile, readState, writeState} from './state';
+import {recordPatches} from './state';
 
 export function applyPatches(): void {
   console.log(`🔧 Applying patches...`);
@@ -150,39 +150,9 @@ function applyAll(patchFiles: string[]): number {
     console.log(`  ✅ ${patchFile}`);
   }
 
-  recordState(inTree);
+  recordPatches(inTree);
 
   console.log(`\n📊 Summary: ${applied} applied, ${failed} failed`);
 
   return failed;
-}
-
-// Запись обновляется и когда часть патчей не легла: она описывает дерево, а не
-// прогон. Время первого попадания в дерево сохраняется, пока файл патча не
-// изменился, — иначе `appliedAt` означал бы «когда последний раз запускали».
-function recordState(inTree: string[]): void {
-  const previous = new Map((readState()?.patches ?? []).map(patch => [patch.file, patch]));
-  const now = new Date().toISOString();
-
-  const patches: RecordedPatch[] = inTree.map(file => {
-    const parsed = parsePatchName(file);
-    const sha256 = hashPatchFile(join(PATCHES_DIR, file));
-    const before = previous.get(file);
-
-    return {
-      file,
-      packageDir: parsed?.packageDir ?? '',
-      version: parsed?.version ?? '',
-      sha256,
-      appliedAt: before?.sha256 === sha256 ? before.appliedAt : now,
-    };
-  });
-
-  try {
-    writeState(patches);
-  } catch (error: any) {
-    // Запись — удобство, а не условие работы. Если node_modules только для
-    // чтения, патчи всё равно на месте, и врать про сбой не надо.
-    console.log(`  ⚠️  could not write ${STATE_FILE}: ${error.message}`);
-  }
 }

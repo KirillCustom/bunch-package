@@ -44,6 +44,7 @@ function planContentChange(
   exists: boolean,
   currentMode: number | null,
   wantExecutable: boolean | null,
+  assumeNotApplied: boolean,
 ): ContentPlan {
   const raw = exists ? readFileSync(source, 'utf-8') : '';
   const lines = raw === '' ? [] : raw.split('\n');
@@ -72,7 +73,14 @@ function planContentChange(
     // применённости — отсутствующий или пустой файл.
     const hasNewContent = target.hunks.some(h => sideLines(h, 'new').length > 0);
 
-    if (!hasNewContent) {
+    if (assumeNotApplied) {
+      // Откат зовёт нас с уже перевёрнутым патчем, установив этот флаг, потому
+      // что применённость исходного патча он проверил сам — и проверить её
+      // здесь заново нечем. Обратная проверка для перевёрнутого патча значит
+      // «прямое применение сходится», а у патча, который только дописывает
+      // строки, оно сходится и когда патч уже лежит: контекст-то на месте.
+      alreadyApplied = false;
+    } else if (!hasNewContent) {
       alreadyApplied = !exists || raw === '';
     } else {
       const reverse = applyHunks(lines, endsWithNewline, target.hunks, true, false);
@@ -103,7 +111,14 @@ function planContentChange(
   return {kind: 'ops', ops: []};
 }
 
-export function planTarget(target: PatchTarget, context?: TreeContext): PlannedOp[] {
+// assumeNotApplied выставляет только откат: он уже убедился, что исходный патч
+// лежит в дереве, и внутренняя проверка применённости для перевёрнутого патча
+// дала бы неверный ответ — см. planContentChange().
+export function planTarget(
+  target: PatchTarget,
+  context?: TreeContext,
+  assumeNotApplied = false,
+): PlannedOp[] {
   const rawPath = target.newPath ?? target.oldPath ?? target.renameTo;
   if (rawPath === null) throw new Error('patch section has no file path');
 
@@ -183,7 +198,16 @@ export function planTarget(target: PatchTarget, context?: TreeContext): PlannedO
   const ops: PlannedOp[] = [...renameOps];
 
   if (target.hunks.length > 0) {
-    const plan = planContentChange(target, relativePath, source, file, exists, currentMode, wantExecutable);
+    const plan = planContentChange(
+      target,
+      relativePath,
+      source,
+      file,
+      exists,
+      currentMode,
+      wantExecutable,
+      assumeNotApplied,
+    );
     if (plan.kind === 'remove') return [{kind: 'remove', file: plan.file}];
     ops.push(...plan.ops);
   }

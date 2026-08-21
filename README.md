@@ -7,7 +7,7 @@
 ## Why bunch-package?
 
 - 🚀 **Fast** - Built specifically for Bun
-- 🎯 **Simple** - Three commands: create, apply and status
+- 🎯 **Simple** - Four commands: create, apply, status and rebase
 - 🔒 **Safe** - Automatically excludes binary files and build artifacts
 - 📦 **Smart** - Detects already applied patches
 - 🎨 **Clean patches** - Excludes build directories, binaries, and media files
@@ -60,6 +60,7 @@ Now whenever someone runs `bun install`, patches are automatically applied!
 | `create <package>` | Create or update a patch for a package |
 | `apply` | Apply every patch in `patches/` |
 | `status` | Show which patches are in the tree right now |
+| `rebase <package> <patch>` | Un-apply the patches sitting on top of one, to edit it |
 
 ### Create a patch
 
@@ -140,6 +141,41 @@ silently shipping an unpatched build.
 
 Patches created by bunch-package before 1.1.0 contain absolute paths and cannot be
 applied; `apply` reports them as failed and asks you to recreate them with `create`.
+
+### Editing a patch that is not the last one
+
+`create` without `--append` updates the last patch of a sequence. To change an
+earlier one, first take off the patches sitting on top of it:
+
+```bash
+bunx bunch-package rebase react-native 001+initial
+```
+
+```
+🔧 Rebasing react-native onto react-native+0.81.4+001+initial.patch...
+  ↩️  react-native+0.81.4+002+fix-touchable.patch
+
+Now edit node_modules/react-native, then run:
+  bunch-package create react-native                   to update react-native+0.81.4+001+initial.patch
+  bunch-package create react-native --append <name>   to insert a patch after it
+  bunch-package apply                                 to put the rest back
+```
+
+The target can be named however is convenient — `001+initial`, `initial`, `1`, or
+the file name — and `0` un-applies the whole sequence, which is how you insert a
+new patch before all the others. This is what `--rebase` does in `patch-package`,
+so the habit travels along with the patches.
+
+Un-applying is applying the patch backwards, through the same code that applies it
+forwards: one implementation, one set of rules for creations, deletions, renames,
+modes and missing trailing newlines. A patch the tree no longer matches is refused
+rather than half-removed, exactly like a patch that does not apply.
+
+After the rebase, `create` updates the patch you rebased onto rather than the last
+one in the sequence. It knows which that is from the record `apply` and `rebase`
+keep — checked against the tree, since a record can go stale: the patches above the
+target must really be absent, or their changes would be swallowed into the patch
+being rewritten.
 
 ### What is in the tree right now
 
