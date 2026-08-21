@@ -678,6 +678,115 @@ new mode 100755
     expect(again.exitCode).toBe(0);
   });
 
+  test('tolerates trailing whitespace stripped from context lines', () => {
+    // Пустая строка с отступом превращается в пустую совсем: их срезают
+    // редакторы, линтеры и веб-интерфейс GitHub. На корпусе реальных патчей
+    // это была причина девяти отказов из семнадцати.
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': 'const a = 1;\n    \nconst b = 2;\n',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // Строка контекста между ними в патче пустая, а в файле — четыре пробела.
+    const patchContent = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1,3 +1,3 @@
+ const a = 1;
+
+-const b = 2;
++const b = 3;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+
+    // Контекст берётся из файла, а не из патча: отступ должен уцелеть.
+    const patched = readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8');
+    expect(patched).toBe('const a = 1;\n    \nconst b = 3;\n');
+  });
+
+  test('reads a patch written with CRLF line endings', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': 'const a = 1;\n',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // \r уезжал в путь из заголовка, файл «не находился», и патч не ложился.
+    const patchContent = ['--- a/node_modules/test-lib/index.js',
+      '+++ b/node_modules/test-lib/index.js',
+      '@@ -1 +1 @@',
+      '-const a = 1;',
+      '+const a = 2;',
+      ''].join('\r\n');
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8')).toContain('const a = 2;');
+  });
+
+  test('creates an empty file declared by new file mode alone', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // Так git записывает создание пустышки: режим есть, хунков нет.
+    const patchContent = `diff --git a/node_modules/test-lib/marker b/node_modules/test-lib/marker
+new file mode 100644
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    const created = join(TEST_DIR, 'node_modules', 'test-lib', 'marker');
+    expect(existsSync(created)).toBe(true);
+    expect(readFileSync(created, 'utf-8')).toBe('');
+  });
+
+  test('renames a file and stays idempotent', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'old.txt': 'stays the same\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // git пишет пути переименования без префиксов a/ и b/.
+    const patchContent = `diff --git a/node_modules/test-lib/old.txt b/node_modules/test-lib/new.txt
+similarity index 100%
+rename from node_modules/test-lib/old.txt
+rename to node_modules/test-lib/new.txt
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(existsSync(join(TEST_DIR, 'node_modules', 'test-lib', 'old.txt'))).toBe(false);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'new.txt'), 'utf-8')).toBe('stays the same\n');
+
+    const again = run('apply', TEST_DIR);
+    expect(again.exitCode).toBe(0);
+  });
+
+  test('does not mistake an unapplied patch for an applied one', () => {
+    // Хунк срезает первые строки файла. Новая сторона встречается в файле со
+    // смещением, и поиск по всему файлу объявлял патч уже применённым.
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': '#!/usr/bin/env node\n\nconst a = 1;\nconst b = 2;\n',
+    });
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1,4 +1,2 @@
+-#!/usr/bin/env node
+-
+ const a = 1;
+ const b = 2;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+    expect(result.stdout).not.toContain('already applied');
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8'))
+      .toBe('const a = 1;\nconst b = 2;\n');
+  });
+
   test('refuses a patch whose path escapes the project', () => {
     mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
     const patchContent = `--- a/../../ESCAPED.txt

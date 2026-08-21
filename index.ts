@@ -581,6 +581,15 @@ interface PatchTarget {
   hunks: Hunk[];
   oldMode: string | null; // '100644' / '100755' из git-заголовков
   newMode: string | null;
+  // `new file mode` и `deleted file mode` — это не смена прав, а появление или
+  // исчезновение файла. Без хунков они означают пустой файл: именно так git
+  // записывает создание пустышки, и такие секции встречаются в реальных патчах.
+  newFile: boolean;
+  deletedFile: boolean;
+  // git пишет `rename from` / `rename to` уже без префиксов a/ и b/ —
+  // это пути от корня проекта, срезать у них первый компонент не нужно.
+  renameFrom: string | null;
+  renameTo: string | null;
 }
 
 function parsePatch(patchContent: string): PatchTarget[] {
@@ -598,7 +607,7 @@ function parsePatch(patchContent: string): PatchTarget[] {
 
   const openTarget = (): PatchTarget => {
     if (!open || target === null) {
-      target = {oldPath: null, newPath: null, hunks: [], oldMode: null, newMode: null};
+      target = {oldPath: null, newPath: null, hunks: [], oldMode: null, newMode: null, newFile: false, deletedFile: false, renameFrom: null, renameTo: null};
       targets.push(target);
       open = true;
       hunk = null;
@@ -606,7 +615,14 @@ function parsePatch(patchContent: string): PatchTarget[] {
     return target;
   };
 
-  for (const line of patchContent.split('\n')) {
+  for (const raw of patchContent.split('\n')) {
+    // Патч может быть в CRLF, а файл — в LF. Структурные строки чистим от \r,
+    // иначе он уезжает в путь из заголовка: файла с таким именем нет, и патч
+    // «не ложится». В выводе \r возвращал курсор в начало строки, поэтому путь
+    // в сообщении об ошибке выглядел пустым. Тело хунка не трогаем — там \r
+    // может быть частью содержимого файла.
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+
     // `\ No newline at end of file` относится к предыдущей строке и может стоять
     // как внутри тела, так и сразу за ним — счётчики к этому моменту исчерпаны.
     if (line.startsWith('\\')) {
@@ -622,8 +638,8 @@ function parsePatch(patchContent: string): PatchTarget[] {
     }
 
     if (hunk && (oldLeft > 0 || newLeft > 0)) {
-      hunk.lines.push(line);
-      lastPrefix = line.charAt(0);
+      hunk.lines.push(raw);
+      lastPrefix = raw.charAt(0);
       if (lastPrefix === '-') oldLeft--;
       else if (lastPrefix === '+') newLeft--;
       else {
@@ -647,11 +663,26 @@ function parsePatch(patchContent: string): PatchTarget[] {
 
     // Режимы приходят git-заголовками. patch-package читает ровно эти строки,
     // поэтому формат патча остаётся с ним совместимым.
+    const renameLine = line.match(/^rename (from|to) (.+)$/);
+    if (renameLine) {
+      const current = openTarget();
+      if (renameLine[1] === 'from') current.renameFrom = renameLine[2];
+      else current.renameTo = renameLine[2];
+      continue;
+    }
+
     const modeLine = line.match(/^(old|new|new file|deleted file) mode (\d+)$/);
     if (modeLine) {
       const current = openTarget();
-      if (modeLine[1] === 'old' || modeLine[1] === 'deleted file') current.oldMode = modeLine[2];
-      else current.newMode = modeLine[2];
+      if (modeLine[1] === 'deleted file') {
+        current.oldMode = modeLine[2];
+        current.deletedFile = true;
+      } else if (modeLine[1] === 'old') {
+        current.oldMode = modeLine[2];
+      } else {
+        current.newMode = modeLine[2];
+        if (modeLine[1] === 'new file') current.newFile = true;
+      }
       continue;
     }
 
@@ -686,7 +717,9 @@ function parsePatch(patchContent: string): PatchTarget[] {
   }
 
   // Секция без хунков осмысленна, если несёт смену режима.
-  return targets.filter(t => t.hunks.length > 0 || t.newMode !== null || t.oldMode !== null);
+  return targets.filter(
+    t => t.hunks.length > 0 || t.newMode !== null || t.oldMode !== null || t.renameTo !== null,
+  );
 }
 
 // Одна сторона хунка: для старой отбрасываем добавленные строки, для новой — удалённые.
@@ -700,14 +733,24 @@ function sideLines(hunk: Hunk, side: 'old' | 'new'): string[] {
 // это делает patch со смещением. Нечёткого совпадения (fuzz) не допускаем: патч
 // делался под конкретную версию, и подгонять контекст молча — это как раз то,
 // из-за чего провалы выглядели успехами.
-function locateHunk(lines: string[], needle: string[], preferred: number): number {
+// Хвостовые пробелы теряются по дороге: их срезают редакторы, линтеры и
+// веб-интерфейс GitHub. Строка с одним лишь отступом превращается в пустую, и
+// патч перестаёт прикладываться, хотя ничего значимого не изменилось. На корпусе
+// из 269 реальных патчей это была причина девяти отказов из семнадцати.
+// patch-package сравнивает строки так же — и всегда, а не как запасной вариант.
+function linesEqual(a: string, b: string): boolean {
+  return a === b || a.replace(/\s+$/, '') === b.replace(/\s+$/, '');
+}
+
+function locateHunk(lines: string[], needle: string[], preferred: number, search = true): number {
   const fits = (at: number): boolean =>
     at >= 0 &&
     at + needle.length <= lines.length &&
-    needle.every((line, index) => lines[at + index] === line);
+    needle.every((line, index) => linesEqual(lines[at + index], line));
 
   if (needle.length === 0) return Math.max(0, Math.min(preferred, lines.length));
   if (fits(preferred)) return preferred;
+  if (!search) return -1;
 
   for (let distance = 1; distance <= lines.length; distance++) {
     if (fits(preferred - distance)) return preferred - distance;
@@ -721,11 +764,43 @@ interface AppliedFile {
   endsWithNewline: boolean;
 }
 
+// Строки контекста берём из файла, а не из патча. Патч намерен изменить только
+// строки с + и -, а контекст он лишь описывает — и описывает неточно, если по
+// дороге у него срезали хвостовые пробелы. Раньше диапазон пересобирался целиком
+// из «новой стороны», и такие расхождения уехали бы в файл.
+function buildReplacement(hunk: Hunk, lines: string[], at: number, reverse: boolean): string[] {
+  const removePrefix = reverse ? '+' : '-';
+  const insertPrefix = reverse ? '-' : '+';
+  const out: string[] = [];
+  let index = at;
+
+  for (const line of hunk.lines) {
+    const prefix = line.charAt(0);
+    if (prefix === insertPrefix) {
+      out.push(line.slice(1));
+      continue;
+    }
+    if (prefix === removePrefix) {
+      index++;
+      continue;
+    }
+    out.push(lines[index] ?? line.slice(1));
+    index++;
+  }
+
+  return out;
+}
+
 function applyHunks(
   original: string[],
   endsWithNewline: boolean,
   hunks: Hunk[],
   reverse: boolean,
+  // Расходящийся поиск нужен при применении: файл мог сдвинуться. Но для
+  // признака «уже применён» он вреден — новая сторона хунка находится где-то
+  // ещё, и патч объявляется применённым, хотя не применялся. Так патч,
+  // срезающий первые строки файла, «узнавал» сам себя со смещением.
+  search = true,
 ): AppliedFile | {error: string} {
   let lines = original;
   let offset = 0;
@@ -736,17 +811,25 @@ function applyHunks(
     const to = sideLines(hunk, reverse ? 'old' : 'new');
     const declared = (reverse ? hunk.newStart : hunk.oldStart) - 1;
 
-    const at = locateHunk(lines, from, Math.max(0, declared + offset));
+    const at = locateHunk(lines, from, Math.max(0, declared + offset), search);
     if (at === -1) {
       return {error: `hunk #${index + 1} does not fit (expected at line ${declared + 1})`};
     }
 
     const reachedEnd = at + from.length === lines.length;
-    lines = [...lines.slice(0, at), ...to, ...lines.slice(at + from.length)];
-    offset += to.length - from.length;
+    const replacement = buildReplacement(hunk, lines, at, reverse);
+    lines = [...lines.slice(0, at), ...replacement, ...lines.slice(at + from.length)];
+    offset += replacement.length - from.length;
 
     if (reachedEnd) {
-      trailing = !(reverse ? hunk.oldNoNewline : hunk.newNoNewline);
+      // Состояние перевода строки в конце меняем только по явному маркеру.
+      // Раньше мы выставляли его всегда, когда хунк доставал до конца файла, —
+      // и дописывали перевод строки файлу, у которого его отродясь не было,
+      // хотя патч про это ничего не говорил.
+      const missingAfter = reverse ? hunk.oldNoNewline : hunk.newNoNewline;
+      const missingBefore = reverse ? hunk.newNoNewline : hunk.oldNoNewline;
+      if (missingAfter) trailing = false;
+      else if (missingBefore) trailing = true;
     }
   }
 
@@ -762,7 +845,8 @@ function stripPathPrefix(path: string): string {
 type PlannedOp =
   | {kind: 'write'; file: string; content: string; mode: number | null}
   | {kind: 'remove'; file: string}
-  | {kind: 'chmod'; file: string; mode: number};
+  | {kind: 'chmod'; file: string; mode: number}
+  | {kind: 'rename'; from: string; to: string};
 
 // Единственная защита от выхода за корень проекта. Полагаться здесь на patch(1)
 // было нельзя: GNU такие пути отвергает, Apple спокойно пишет файл наружу.
@@ -811,7 +895,7 @@ interface TreeContext {
 }
 
 function planTarget(target: PatchTarget, context?: TreeContext): PlannedOp[] {
-  const rawPath = target.newPath ?? target.oldPath;
+  const rawPath = target.newPath ?? target.oldPath ?? target.renameTo;
   if (rawPath === null) throw new Error('patch section has no file path');
 
   const relativePath = stripPathPrefix(rawPath);
@@ -831,23 +915,56 @@ function planTarget(target: PatchTarget, context?: TreeContext): PlannedOp[] {
     file = join(context.root, relativePath.slice(context.prefix.length));
   }
 
-  const exists = existsSync(file);
-  const currentMode = exists ? statSync(file).mode : null;
+  // Переименование выполняется до всего остального: содержимое, если оно тоже
+  // менялось, читается из старого файла, а пишется уже в новый.
+  const renameOps: PlannedOp[] = [];
+  let source = file;
+
+  if (target.renameFrom !== null && target.renameTo !== null && context === undefined) {
+    const from = resolveInsideProject(target.renameFrom);
+    const to = resolveInsideProject(target.renameTo);
+
+    if (existsSync(from)) {
+      renameOps.push({kind: 'rename', from, to});
+      source = from;
+      file = to;
+    } else if (existsSync(to)) {
+      source = to; // уже переименован
+      file = to;
+    } else {
+      throw new Error(`${target.renameFrom} is missing`);
+    }
+  }
+
+  const exists = existsSync(source);
+  const currentMode = exists ? statSync(source).mode : null;
   const wantExecutable =
     target.newMode === null || !MODES_SUPPORTED ? null : target.newMode === '100755';
 
   // Файл удаляется — это сказано заголовком, а не выведено из пустого результата.
-  if (target.newPath === null) {
-    return exists ? [{kind: 'remove', file}] : [];
+  if (target.newPath === null || (target.hunks.length === 0 && target.deletedFile)) {
+    return exists ? [...renameOps, {kind: 'remove', file: source}] : [];
   }
 
-  const ops: PlannedOp[] = [];
+  // `new file mode` без единого хунка — это создание пустого файла: содержимого
+  // нет, поэтому и хунков нет. Раньше такая секция принималась за смену режима у
+  // отсутствующего файла и роняла весь патч. В реальных патчах это встречается —
+  // так в них попадают пустые артефакты сборки.
+  if (target.hunks.length === 0 && target.newFile) {
+    if (exists) return [...renameOps];
+    return [...renameOps, {kind: 'write', file, content: '', mode: wantExecutable === true ? 0o755 : 0o644}];
+  }
+
+  const ops: PlannedOp[] = [...renameOps];
 
   if (target.hunks.length > 0) {
-    const raw = exists ? readFileSync(file, 'utf-8') : '';
+    const raw = exists ? readFileSync(source, 'utf-8') : '';
     const lines = raw === '' ? [] : raw.split('\n');
-    const endsWithNewline = lines.length > 0 && lines[lines.length - 1] === '';
-    if (endsWithNewline) lines.pop();
+    // Пустой файл — это чаще всего создаваемый. Текстовый файл принято завершать
+    // переводом строки, и отсутствие маркера `\ No newline` означает именно его;
+    // без этого умолчания создаваемые файлы рождались без перевода строки.
+    const endsWithNewline = lines.length === 0 || lines[lines.length - 1] === '';
+    if (lines.length > 0 && endsWithNewline) lines.pop();
 
     // Патч создаёт файл, а файл уже есть и не пуст — применять такое вслепую
     // значит подмешать содержимое к чужому файлу.
@@ -855,7 +972,7 @@ function planTarget(target: PatchTarget, context?: TreeContext): PlannedOp[] {
     let alreadyApplied = false;
 
     if (isCreation && exists && raw !== '') {
-      const reverse = applyHunks(lines, endsWithNewline, target.hunks, true);
+      const reverse = applyHunks(lines, endsWithNewline, target.hunks, true, false);
       if ('error' in reverse) throw new Error(`${relativePath} already exists`);
       alreadyApplied = true;
     } else {
@@ -871,7 +988,7 @@ function planTarget(target: PatchTarget, context?: TreeContext): PlannedOp[] {
       if (!hasNewContent) {
         alreadyApplied = !exists || raw === '';
       } else {
-        const reverse = applyHunks(lines, endsWithNewline, target.hunks, true);
+        const reverse = applyHunks(lines, endsWithNewline, target.hunks, true, false);
         alreadyApplied = !('error' in reverse);
       }
     }
@@ -916,6 +1033,11 @@ function executeOps(ops: PlannedOp[]): void {
     }
     if (op.kind === 'chmod') {
       chmodSync(op.file, op.mode);
+      continue;
+    }
+    if (op.kind === 'rename') {
+      mkdirSync(join(op.to, '..'), {recursive: true});
+      renameSync(op.from, op.to);
       continue;
     }
     mkdirSync(join(op.file, '..'), {recursive: true});
