@@ -1,7 +1,7 @@
 import {chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, type Stats} from 'fs';
 import {join} from 'path';
 import {applyHunks} from './hunks';
-import {PatchTarget, sideLines} from './patch-file';
+import {Hunk, PatchTarget, sideLines} from './patch-file';
 import {MODES_SUPPORTED, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
 
 // Режим симлинка в git-заголовках. У обычных файлов — 100644 и 100755.
@@ -41,6 +41,29 @@ export function splitContent(raw: string): {lines: string[]; endsWithNewline: bo
   return {lines, endsWithNewline};
 }
 
+// Применён патч или нет — решается сравнением двух прочтений файла: насколько
+// хорошо садится старая сторона хунков и насколько хорошо новая. Обе ищутся
+// расходящимся поиском, потому что патч мог лечь со смещением; выигрывает та,
+// что села ближе к объявленным местам, а при равенстве — «уже применён».
+//
+// Раньше обратная проверка шла вовсе без поиска. Тогда патч, однажды лёгший со
+// смещением, не узнавался уже никогда: каждый следующий apply клал его заново и
+// дописывал содержимое. На корпусе такой нашёлся один из 243 — и `apply` живёт
+// в postinstall, то есть портил бы дерево на каждый `bun install`.
+//
+// Прямое применение без сравнения тоже не подходит: патч, который только
+// дописывает строки, ложится вперёд и во второй раз — контекст-то на месте.
+// Именно так дублирует содержимое patch-package, проверено запуском.
+function looksApplied(lines: string[], endsWithNewline: boolean, hunks: Hunk[]): boolean {
+  const backwards = applyHunks(lines, endsWithNewline, hunks, true);
+  if ('error' in backwards) return false; // новой стороны в файле нет вовсе
+
+  const forwards = applyHunks(lines, endsWithNewline, hunks, false);
+  if ('error' in forwards) return true; // старой стороны больше нет — значит лёг
+
+  return backwards.displacement <= forwards.displacement;
+}
+
 // Самая заковыристая часть плана: решить, что стало с содержимым файла.
 // Вынесена отдельно — здесь нет ни путей, ни файловой системы сверх чтения, и
 // именно тут сидели почти все дефекты, которые нашёл корпусный прогон.
@@ -69,12 +92,8 @@ function planContentChange(
     if ('error' in reverse) throw new Error(`${relativePath} already exists`);
     alreadyApplied = true;
   } else {
-    // «Уже применён» проверяем обратным применением, а не прямым: патч, который
-    // только дописывает строки, ложится вперёд и во второй раз — так дублировалось
-    // содержимое файлов.
-    //
-    // Но у патча на удаление новая сторона пуста, а пустой образец совпадает с чем
-    // угодно, поэтому для него обратная проверка ничего не значит: там признак
+    // У патча на удаление новая сторона пуста, а пустой образец совпадает с чем
+    // угодно, поэтому обратная проверка для него ничего не значит: там признак
     // применённости — отсутствующий или пустой файл.
     const hasNewContent = target.hunks.some(h => sideLines(h, 'new').length > 0);
 
@@ -88,8 +107,7 @@ function planContentChange(
     } else if (!hasNewContent) {
       alreadyApplied = !exists || raw === '';
     } else {
-      const reverse = applyHunks(lines, endsWithNewline, target.hunks, true, false);
-      alreadyApplied = !('error' in reverse);
+      alreadyApplied = looksApplied(lines, endsWithNewline, target.hunks);
     }
   }
 

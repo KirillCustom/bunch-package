@@ -33,6 +33,10 @@ export function locateHunk(lines: string[], needle: string[], preferred: number,
 export interface AppliedFile {
   lines: string[];
   endsWithNewline: boolean;
+  // Насколько далеко от объявленных мест сели хунки, суммарно. Ноль означает,
+  // что патч сошёлся ровно там, где написано. По этому числу решается, применён
+  // патч или нет: см. looksApplied() в plan.ts.
+  displacement: number;
 }
 
 // Строки контекста берём из файла, а не из патча. Патч намерен изменить только
@@ -67,15 +71,14 @@ export function applyHunks(
   endsWithNewline: boolean,
   hunks: Hunk[],
   reverse: boolean,
-  // Расходящийся поиск нужен при применении: файл мог сдвинуться. Но для
-  // признака «уже применён» он вреден — новая сторона хунка находится где-то
-  // ещё, и патч объявляется применённым, хотя не применялся. Так патч,
-  // срезающий первые строки файла, «узнавал» сам себя со смещением.
+  // Расходящийся поиск нужен при применении: файл мог сдвинуться. Выключается
+  // он только там, где место обязано совпасть точно.
   search = true,
 ): AppliedFile | {error: string} {
   let lines = original;
   let offset = 0;
   let trailing = endsWithNewline;
+  let displacement = 0;
 
   for (const [index, hunk] of hunks.entries()) {
     const from = sideLines(hunk, reverse ? 'new' : 'old');
@@ -85,6 +88,8 @@ export function applyHunks(
     if (at === -1) {
       return {error: `hunk #${index + 1} does not fit (expected at line ${declared + 1})`};
     }
+
+    displacement += Math.abs(at - Math.max(0, declared + offset));
 
     const reachedEnd = at + from.length === lines.length;
     const replacement = buildReplacement(hunk, lines, at, reverse);
@@ -103,5 +108,5 @@ export function applyHunks(
     }
   }
 
-  return {lines, endsWithNewline: trailing};
+  return {lines, endsWithNewline: trailing, displacement};
 }

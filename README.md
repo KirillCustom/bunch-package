@@ -264,6 +264,14 @@ Hunks are located at the line the patch declares, then by widening search, match
 is made against one exact version, and stretching context to fit is how a failure
 comes to look like a success.
 
+Whether a patch is already in the tree is decided by reading the file both ways:
+how well the hunks' old side fits, and how well the new side fits, each located by
+the same widening search. Whichever sits closer to the lines the patch declares
+wins, and a tie counts as applied. This matters for a patch that once landed at an
+offset — checking only the declared position would never recognise it again, and
+`apply` in a `postinstall` hook would lay it down anew on every install, appending
+its changes over and over.
+
 ## File permissions
 
 A change to a file's executable bit is captured and restored, including for files

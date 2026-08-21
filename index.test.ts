@@ -1822,3 +1822,63 @@ rename to node_modules/${PKG}/moved.js
     expect(once.hunks[0].lines).toEqual(['+before', '-after', ' kept']);
   });
 });
+
+// Патч может лечь не туда, где написано: файл в реестре успел сдвинуться. Один
+// раз узнать его после этого надо уметь — иначе apply в postinstall кладёт его
+// заново на каждый `bun install`.
+describe('a patch that landed with an offset', () => {
+  const PATCH = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1,3 +1,4 @@
+ line one
+ line two
+ line three
++APPENDED
+`;
+
+  function setup(prefix: string) {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {
+      'index.js': `${prefix}line one\nline two\nline three\n`,
+    });
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), PATCH);
+  }
+
+  const content = () => readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8');
+
+  test('is applied once and recognised afterwards', () => {
+    // Две лишние строки сверху: хунк объявлен на первой строке, а сядет на третьей.
+    setup('extra one\nextra two\n');
+
+    expect(run('apply', TEST_DIR).stdout).toContain('1 applied, 0 failed');
+    const afterFirst = content();
+    expect(afterFirst).toContain('APPENDED');
+
+    const again = run('apply', TEST_DIR);
+
+    expect(again.stdout).toContain('already applied');
+    // Раньше здесь дописывалась вторая копия — и третья, и четвёртая.
+    expect(content()).toBe(afterFirst);
+    expect(content().split('APPENDED')).toHaveLength(2);
+  });
+
+  test('status sees it in the tree', () => {
+    setup('extra one\nextra two\n');
+    run('apply', TEST_DIR);
+
+    const result = run('status', TEST_DIR);
+
+    expect(result.stdout).toContain('✅ test-lib+1.0.0.patch — in the tree');
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('and rebase can take it back off', () => {
+    setup('extra one\nextra two\n');
+    const before = content();
+    run('apply', TEST_DIR);
+
+    expect(run('rebase test-lib 0', TEST_DIR).exitCode).toBe(0);
+
+    expect(content()).toBe(before);
+  });
+});
