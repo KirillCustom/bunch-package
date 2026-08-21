@@ -66,6 +66,18 @@ Example:
 bunx bunch-package create react-native-date-picker
 ```
 
+`create` downloads a pristine copy of the package to compare against, and gives
+that download 60 seconds. On a slow link, or for a very large package, that is not
+always enough — raise it with `BUNCH_FETCH_TIMEOUT`, in seconds:
+
+```bash
+BUNCH_FETCH_TIMEOUT=300 bunx bunch-package create some-enormous-package
+```
+
+If the resulting diff would be larger than 50 MB, `create` refuses instead of
+writing a truncated patch. That size nearly always means generated or build output
+is being compared rather than source.
+
 ### Multiple patches for one package
 
 ```bash
