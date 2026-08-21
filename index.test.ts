@@ -142,6 +142,23 @@ describe('bunch-package create', () => {
     expect(existsSync(join(TEST_DIR, 'patches'))).toBe(false);
   });
 
+  test('reports both failures when the pristine copy cannot be fetched', () => {
+    // Запасной путь через npm вызывал firstDiagnosticLine, а та функция была
+    // потеряна при рефакторинге — вместо отката летел ReferenceError. Путь
+    // исполняется только при сбое bun add, поэтому ни один тест его не задевал.
+    mkdirSync(join(TEST_DIR, 'node_modules', 'ghostpkg'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'node_modules', 'ghostpkg', 'package.json'),
+      JSON.stringify({name: 'ghostpkg', version: '9.9.9-does-not-exist'}));
+    writeFileSync(join(TEST_DIR, 'node_modules', 'ghostpkg', 'index.js'), 'x\n');
+
+    const result = run('create ghostpkg', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Could not fetch a pristine');
+    expect(result.stdout).toContain('bun:');
+    expect(result.stdout).toContain('npm:');
+    expect(result.stdout).not.toContain('ReferenceError');
+  });
+
   test('refuses a package name of ..', () => {
     mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
     const result = run('create ..', TEST_DIR);
