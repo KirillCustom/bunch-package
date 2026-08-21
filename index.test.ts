@@ -1,6 +1,6 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
-import {execSync, spawn} from 'child_process';
-import {chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
+import {execSync, spawn, spawnSync} from 'child_process';
+import {chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree} from './src/create';
 import {withApplyLock} from './src/lock';
 import {join} from 'path';
@@ -1372,5 +1372,195 @@ new file mode 100644
     // До сети дело дойти не должно вовсе.
     expect(result.stdout).not.toContain('Fetching pristine');
     expect(existsSync(join(TEST_DIR, 'patches'))).toBe(false);
+  });
+});
+
+// Записывать файл на месте — значит держать окно, в котором его нет вовсе или
+// он обрезан. Убитый там apply оставлял дерево в состоянии, из которого патч
+// больше не ложился никогда: хунк не сходится с пустотой.
+describe('an apply killed mid-write', () => {
+  const PACKAGE = 'torn-lib';
+  const FILES = 100;
+  const LINES = 3000; // ~140 КБ на файл: чем длиннее запись, тем вероятнее попасть в неё
+
+  const body = (file: number, mark: string) =>
+    Array.from({length: LINES}, (_, line) => `file ${file} line ${line} ${mark} padding padding padding`).join('\n') + '\n';
+
+  function writeFixture() {
+    const sources: Record<string, string> = {};
+    for (let file = 0; file < FILES; file++) sources[`f${file}.js`] = body(file, 'original');
+    setupFakePackage(TEST_DIR, PACKAGE, '1.0.0', sources);
+
+    const sections: string[] = [];
+    for (let file = 0; file < FILES; file++) {
+      const path = `node_modules/${PACKAGE}/f${file}.js`;
+      sections.push([
+        `diff --git a/${path} b/${path}`,
+        `--- a/${path}`,
+        `+++ b/${path}`,
+        `@@ -1,${LINES} +1,${LINES} @@`,
+        ...body(file, 'original').trimEnd().split('\n').map(line => `-${line}`),
+        ...body(file, 'PATCHED').trimEnd().split('\n').map(line => `+${line}`),
+      ].join('\n'));
+    }
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', `${PACKAGE}+1.0.0.patch`), sections.join('\n') + '\n');
+  }
+
+  // Убиваем не по таймеру, а по признаку: как только первый файл перестал быть
+  // прежним, фаза записи идёт прямо сейчас. Следим за размером и инодом, а не за
+  // содержимым, и крутимся через setImmediate, а не по таймеру: у setInterval
+  // шаг в миллисекунду, а вся фаза записи укладывается в десятки — с таким
+  // шагом убийство опаздывало и тест ловил дефект лишь в трёх прогонах из шести.
+  function applyAndKillOnFirstWrite(): Promise<void> {
+    return new Promise(resolve => {
+      // Следим за файлом из середины патча, а не за первым: убийство в самом
+      // начале записи почти нечего застать в полёте, и тест ловил дефект лишь в
+      // трети прогонов. К середине в очереди остаётся ещё сотня файлов.
+      const middle = join(TEST_DIR, 'node_modules', PACKAGE, `f${Math.floor(FILES / 2)}.js`);
+      const before = statSync(middle);
+      const child = spawn(process.execPath, [CLI, 'apply'], {cwd: TEST_DIR, stdio: 'ignore'});
+
+      let finished = false;
+      const poll = () => {
+        if (finished) return;
+        let changed = false;
+        try {
+          const now = statSync(middle);
+          changed = now.size !== before.size || now.ino !== before.ino;
+        } catch {
+          changed = true; // файла нет вовсе — это и есть то самое окно
+        }
+        if (changed) {
+          child.kill('SIGKILL');
+          return;
+        }
+        setImmediate(poll);
+      };
+      setImmediate(poll);
+
+      child.on('close', () => {
+        finished = true;
+        resolve();
+      });
+    });
+  }
+
+  // Три круга, а не один: убийство может прийтись и на промежуток между
+  // файлами, где рвать нечего. С одним кругом тест ловил запись на месте в шести
+  // прогонах из восьми — то есть в CI был бы зелёным при сломанном коде каждый
+  // четвёртый раз.
+  test('leaves every file either untouched or fully patched, and stays fixable', async () => {
+    for (const round of [1, 2, 3]) {
+      rmSync(join(TEST_DIR, 'node_modules'), {force: true, recursive: true});
+      rmSync(join(TEST_DIR, 'patches'), {force: true, recursive: true});
+      writeFixture();
+
+      await applyAndKillOnFirstWrite();
+
+      const torn: string[] = [];
+      for (let file = 0; file < FILES; file++) {
+        const path = join(TEST_DIR, 'node_modules', PACKAGE, `f${file}.js`);
+        if (!existsSync(path)) {
+          torn.push(`f${file}.js исчез`);
+          continue;
+        }
+        const text = readFileSync(path, 'utf-8');
+        if (text !== body(file, 'original') && text !== body(file, 'PATCHED')) {
+          torn.push(`f${file}.js обрезан на ${text.length} байт`);
+        }
+      }
+      expect(`round ${round}: ${torn.join(', ')}`).toBe(`round ${round}: `);
+
+      // И главное: из оставшегося состояния патч обязан лечь. Обрезанный файл
+      // делал проект непочинимым — каждый следующий apply падал на нём, и
+      // замок убитого прогона держал дверь ещё тридцать секунд сверху.
+      const result = run('apply', TEST_DIR);
+      expect(`round ${round}: ${result.stdout.includes('1 applied, 0 failed')}`).toBe(`round ${round}: true`);
+      expect(result.exitCode).toBe(0);
+      for (let file = 0; file < FILES; file++) {
+        expect(readFileSync(join(TEST_DIR, 'node_modules', PACKAGE, `f${file}.js`), 'utf-8')).toBe(body(file, 'PATCHED'));
+      }
+    }
+  });
+
+  test('leaves no temporary files behind when it finishes', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`);
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+    const leftovers = readdirSync(join(TEST_DIR, 'node_modules', 'test-lib')).filter(name => name.includes('.bunch-tmp-'));
+    expect(leftovers).toEqual([]);
+  });
+
+  test('writes past a hardlink instead of through it', () => {
+    // Ровно то, как bun раскладывает пакеты: файл в node_modules и запись в
+    // кеше — один инод. Запись на месте изменила бы и кеш.
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    const patched = join(TEST_DIR, 'node_modules', 'test-lib', 'index.js');
+    const cacheEntry = join(TEST_DIR, 'cache-entry.js');
+    linkSync(patched, cacheEntry);
+    expect(statSync(cacheEntry).ino).toBe(statSync(patched).ino);
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`);
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+    expect(readFileSync(patched, 'utf-8')).toBe('const a = 2;\n');
+    expect(readFileSync(cacheEntry, 'utf-8')).toBe('const a = 1;\n');
+    expect(statSync(cacheEntry).ino).not.toBe(statSync(patched).ino);
+  });
+
+  test('takes over a lock whose holder is gone', () => {
+    const lockFile = join(TEST_DIR, 'stale.lock');
+
+    // pid завершившегося процесса: spawnSync возвращается уже после его смерти.
+    const gonePid = spawnSync(process.execPath, ['-e', ''], {stdio: 'ignore'}).pid;
+    writeFileSync(lockFile, `${gonePid}\n`);
+
+    const startedAt = Date.now();
+    // Ждать здесь нечего и некого — замок ничей. Ожидание в 30 секунд означало
+    // бы, что убитый однажды apply запер проект до ручной уборки.
+    expect(withApplyLock(lockFile, () => 'занял', 30_000)).toBe('занял');
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(existsSync(lockFile)).toBe(false);
+  });
+
+  test('keeps a leftover temporary file out of the next patch', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const pkg = join(TEST_DIR, 'node_modules', 'is-number');
+    overwriteFile(join(pkg, 'index.js'), 'module.exports = "patched";\n');
+    // След убитого apply: файл, который он не успел переставить на место.
+    writeFileSync(join(pkg, 'index.js.bunch-tmp-4242'), 'half-written\n');
+
+    const result = run('create is-number', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    const patch = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patch).toContain('+module.exports = "patched";');
+    // Иначе чужой обрывок уехал бы в патч и лёг бы на машины всей команды.
+    expect(patch).not.toContain('bunch-tmp');
+  });
+
+  test('waits for a lock whose holder is alive', () => {
+    const lockFile = join(TEST_DIR, 'alive.lock');
+    // Свой же pid — процесс заведомо жив, значит замок трогать нельзя.
+    writeFileSync(lockFile, `${process.pid}\n`);
+
+    expect(() => withApplyLock(lockFile, () => 'не должно занять', 200)).toThrow(/is running/);
+    expect(readFileSync(lockFile, 'utf-8').trim()).toBe(String(process.pid));
   });
 });
