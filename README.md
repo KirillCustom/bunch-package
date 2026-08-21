@@ -7,7 +7,7 @@
 ## Why bunch-package?
 
 - 🚀 **Fast** - Built specifically for Bun
-- 🎯 **Simple** - Four commands: create, apply, status and rebase
+- 🎯 **Simple** - Five commands: create, apply, status, rebase and retarget
 - 🔒 **Safe** - Automatically excludes binary files and build artifacts
 - 📦 **Smart** - Detects already applied patches
 - 🎨 **Clean patches** - Excludes build directories, binaries, and media files
@@ -61,6 +61,7 @@ Now whenever someone runs `bun install`, patches are automatically applied!
 | `apply` | Apply every patch in `patches/` |
 | `status` | Show which patches are in the tree right now |
 | `rebase <package> <patch>` | Un-apply the patches sitting on top of one, to edit it |
+| `retarget <package>` | Move its patches to the version now installed |
 
 ### Create a patch
 
@@ -186,6 +187,48 @@ one in the sequence. It knows which that is from the record `apply` and `rebase`
 keep — checked against the tree, since a record can go stale: the patches above the
 target must really be absent, or their changes would be swallowed into the patch
 being rewritten.
+
+### After upgrading the package
+
+A patch is written against one exact version. Upgrade the package and the patch
+file still says the old one — `apply` warns about the mismatch and then it is up to
+you. `retarget` moves the patches over:
+
+```bash
+bunx bunch-package retarget ms
+```
+
+```
+📦 Moving 1 patch(es) for ms from 2.1.2 to 2.1.3...
+📥 Fetching pristine ms@2.1.3...
+  ✅ ms+2.1.2.patch → ms+2.1.3.patch
+
+📊 1 patch(es) now target 2.1.3
+   Run `bunch-package apply` to put them into node_modules.
+```
+
+Each patch is replayed onto a pristine copy of the installed version and diffed
+back out, so the new file carries context lines and line numbers from that version
+— the patch stops being approximately right and becomes exact. A sequence moves as
+a whole, keeping its numbers and labels, and each patch keeps carrying only its own
+change.
+
+Three things it will tell you rather than paper over:
+
+- **A patch that no longer fits.** The package changed around it. Nothing is
+  written, the old patch files stay where they are, and the message names the file
+  and hunk, so you can make the change by hand and run `create`.
+- **A patch that is no longer needed**, because the fix went upstream between the
+  versions. It is dropped, and said aloud.
+- **Patches for more than one version in `patches/`**, which means the sequence is
+  not in a state anyone can move safely.
+
+How often this works is measured, not promised. Of 289 patches taken from public
+repositories, applied to the next published version of their package: 64% still fit
+and were moved, 5% had already been fixed upstream, and 30% no longer fit. Jumping
+straight to the latest version instead — often many releases later — only 22% fit.
+A patch is written against one version, and the further the package moves, the less
+of it survives.
 
 ### What is in the tree right now
 

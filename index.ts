@@ -3,6 +3,7 @@
 import {applyPatches} from './src/apply';
 import {createPatch} from './src/create';
 import {rebasePatches} from './src/rebase';
+import {retargetPatches} from './src/retarget';
 import {showStatus} from './src/status';
 
 // Main
@@ -54,6 +55,19 @@ switch (command) {
     }
     break;
 
+  case 'retarget':
+    if (!arg || arg.startsWith('--')) {
+      console.error('❌ Usage: bunch-package retarget <package-name>');
+      process.exit(1);
+    }
+
+    try {
+      retargetPatches(arg);
+    } catch (error) {
+      fail(error);
+    }
+    break;
+
   case 'status':
     try {
       showStatus();
@@ -88,5 +102,6 @@ Commands:
   bunch-package apply                             Apply all patches
   bunch-package status                            Show which patches are in the tree
   bunch-package rebase <package> <patch|0>        Un-apply the patches that sit on top of one
+  bunch-package retarget <package>                Move its patches to the installed version
     `);
 }
