@@ -552,6 +552,12 @@ function writePatch(plan: SequencePlan, patchContent: string): void {
 
   // Последний рубеж: имя собрано из чужого манифеста, и уехать за пределы
   // patches/ оно не должно ни при каких значениях полей.
+  //
+  // Тестом эта ветка не закрыта, и закрыть её нечем: validateManifestField
+  // отвергает такие поля раньше, а до сюда доходит только то, что реестр сумел
+  // отдать по `<имя>@<версия>` — то есть без слэшей и точек-точек в принципе.
+  // Проверено мутацией: снимаешь этот if — сюита остаётся зелёной. Это второй
+  // замок на той же двери, и оставлен он намеренно.
   const patchesRoot = resolve(process.cwd(), PATCHES_DIR);
   if (!resolve(patchFilePath).startsWith(patchesRoot + sep)) {
     throw new Error(`Refusing to write ${plan.outputName} outside ${PATCHES_DIR}/`);
