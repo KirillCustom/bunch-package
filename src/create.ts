@@ -298,7 +298,7 @@ interface Manifest {
   version: string;
 }
 
-function readManifest(packagePath: string): Manifest {
+export function readManifest(packagePath: string): Manifest {
   const packageJson = JSON.parse(readFileSync(join(packagePath, 'package.json'), 'utf-8'));
   return {
     name: validateManifestField('name', packageJson.name),
@@ -314,7 +314,7 @@ function readManifest(packagePath: string): Manifest {
 //
 // Лечится изоляцией кеша: BUN_INSTALL_CACHE_DIR внутри temp заставляет bun
 // скачать пакет заново, и разделить иноды с node_modules проекта он уже не может.
-function fetchPristine(name: string, version: string, tempDir: string): string {
+export function fetchPristine(name: string, version: string, tempDir: string): string {
   writeFileSync(
     join(tempDir, 'package.json'),
     JSON.stringify({name: 'temp', version: '1.0.0'}, null, 2),
@@ -579,6 +579,57 @@ function writePatch(plan: SequencePlan, patchContent: string): void {
   console.log(`   Hash: ${hash.substring(0, 12)}...`);
 }
 
+// Дифф двух деревьев одного пакета, приведённый к тексту патча. Отдельно —
+// потому что этим заняты обе команды: `create` сравнивает эталон с
+// node_modules, а `retarget` — два соседних состояния эталона новой версии.
+export interface TreeDiff {
+  content: string; // текст патча; пустой, если переносить нечего
+  kept: DiffSection[];
+  skipped: DiffSection[];
+  linkDifferences: LinkDifference[];
+  modeOnly: string[];
+  rawPatch: string;
+}
+
+export function diffTrees(
+  cleanRoot: string,
+  modifiedRoot: string,
+  packageName: string,
+  name: string,
+  version: string,
+): TreeDiff {
+  // Деревья обходим до диффа: список расхождений по симлинкам нужен разбору
+  // кода возврата самого diff.
+  const cleanTree = scanTree(cleanRoot);
+  const modifiedTree = scanTree(modifiedRoot);
+  const linkDifferences = findLinkDifferences(cleanTree, modifiedTree);
+  const missingLinkPaths = new Set(
+    linkDifferences
+      .filter(difference => difference.missingFrom !== null)
+      .map(difference =>
+        join(difference.missingFrom === 'clean' ? cleanRoot : modifiedRoot, difference.relativePath),
+      ),
+  );
+
+  const rawPatch = runDiff(cleanRoot, modifiedRoot, name, version, missingLinkPaths);
+  const sections = splitDiffSections(rawPatch, cleanRoot, modifiedRoot);
+  const kept = sections.filter(section => !isBuildArtifact(section.relativePath));
+  const skipped = sections.filter(section => isBuildArtifact(section.relativePath));
+
+  const modeOnly = findModeOnlyChanges(
+    cleanTree.executable,
+    modifiedTree.executable,
+    new Set(kept.map(section => section.relativePath)),
+  );
+
+  const content =
+    kept.length === 0 && modeOnly.length === 0
+      ? ''
+      : renderPatch(packageName, kept, modeOnly, cleanTree.executable, modifiedTree.executable);
+
+  return {content, kept, skipped, linkDifferences, modeOnly, rawPatch};
+}
+
 export function createPatch(packageName: string, appendLabel: string | null = null): void {
   validatePackageName(packageName);
   requireDiff();
@@ -620,40 +671,16 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
       replayPatches(plan.replay, packageName, cleanPackagePath);
     }
 
-    // Деревья обходим до диффа: список расхождений по симлинкам нужен разбору
-    // кода возврата самого diff.
-    const cleanTree = scanTree(cleanPackagePath);
-    const modifiedTree = scanTree(packagePath);
-    const linkDifferences = findLinkDifferences(cleanTree, modifiedTree);
-    const missingLinkPaths = new Set(
-      linkDifferences
-        .filter(difference => difference.missingFrom !== null)
-        .map(difference =>
-          join(
-            difference.missingFrom === 'clean' ? cleanPackagePath : packagePath,
-            difference.relativePath,
-          ),
-        ),
-    );
-
     console.log(`🔍 Generating diff...`);
-    const rawPatch = runDiff(cleanPackagePath, packagePath, name, version, missingLinkPaths);
-    reportBinaryFiles(rawPatch, packagePath);
-    reportLinkDifferences(linkDifferences);
+    const diff = diffTrees(cleanPackagePath, packagePath, packageName, name, version);
+    reportBinaryFiles(diff.rawPatch, packagePath);
+    reportLinkDifferences(diff.linkDifferences);
+    reportSkipped(diff.skipped);
 
-    const sections = splitDiffSections(rawPatch, cleanPackagePath, packagePath);
-    const kept = sections.filter(section => !isBuildArtifact(section.relativePath));
-    reportSkipped(sections.filter(section => isBuildArtifact(section.relativePath)));
+    const {kept, modeOnly, linkDifferences} = diff;
+    const sections = [...kept, ...diff.skipped];
 
-    const cleanBits = cleanTree.executable;
-    const modifiedBits = modifiedTree.executable;
-    const modeOnly = findModeOnlyChanges(
-      cleanBits,
-      modifiedBits,
-      new Set(kept.map(section => section.relativePath)),
-    );
-
-    if (kept.length === 0 && modeOnly.length === 0) {
+    if (diff.content === '') {
       if (linkDifferences.length > 0) {
         console.log('⚠️  Nothing patchable changed — only symbolic links did');
         console.log(`\n💡 Symbolic links cannot travel in a patch. Everything else in ${packagePath} matches the pristine copy.`);
@@ -671,7 +698,7 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
       console.log(`🔑 ${modeOnly.length} file(s) changed only their executable bit`);
     }
 
-    writePatch(plan, renderPatch(packageName, kept, modeOnly, cleanBits, modifiedBits));
+    writePatch(plan, diff.content);
   } finally {
     rmSync(tempDir, {force: true, recursive: true});
   }

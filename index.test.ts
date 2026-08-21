@@ -2078,3 +2078,130 @@ describe('a patch that landed with an offset', () => {
     expect(content()).toBe(before);
   });
 });
+
+// Пакет обновили, патч остался от старой версии. `apply` о таком только
+// предупреждает; retarget переписывает патчи под установленную версию.
+//
+// ms@2.1.2 → 2.1.3 меняет ровно одну строку: `function(val` на `function (val`.
+// На ней и строятся оба интересных случая — «больше не ложится» и «уже внутри».
+describe('retarget', () => {
+  const OLD_LINE = 'module.exports = function(val, options) {';
+  const NEW_LINE = 'module.exports = function (val, options) {';
+  const file = () => join(TEST_DIR, 'node_modules', 'ms', 'index.js');
+
+  function installAndPatch(edit: (source: string) => string, append?: string) {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    overwriteFile(file(), edit(readFileSync(file(), 'utf-8')));
+    return run(append === undefined ? 'create ms' : `create ms --append ${append}`, TEST_DIR);
+  }
+
+  function upgrade() {
+    execSync('bun add ms@2.1.3', {cwd: TEST_DIR, stdio: 'pipe'});
+    expect(readFileSync(file(), 'utf-8')).toContain(NEW_LINE);
+  }
+
+  test('moves a patch to the installed version', () => {
+    installAndPatch(source => `// MY FIX\n${source}`);
+    expect(existsSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'))).toBe(true);
+    upgrade();
+
+    const result = run('retarget ms', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('ms+2.1.2.patch → ms+2.1.3.patch');
+    expect(existsSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'))).toBe(false);
+
+    // Патч теперь точен для новой версии: строки контекста взяты из неё.
+    const moved = readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.3.patch'), 'utf-8');
+    expect(moved).toContain('+// MY FIX');
+
+    expect(run('apply', TEST_DIR).stdout).toContain('1 applied, 0 failed');
+    expect(readFileSync(file(), 'utf-8')).toContain('// MY FIX');
+  });
+
+  test('refuses when the patch no longer fits, and leaves everything alone', () => {
+    // Патч трогает ту самую строку, которая в 2.1.3 изменилась.
+    installAndPatch(source => source.replace(OLD_LINE, `${OLD_LINE}\n  // CHECKED`));
+    upgrade();
+
+    const result = run('retarget ms', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('does not fit ms@2.1.3');
+    // Подгонять контекст мы не будем, но и старый патч не тронем.
+    expect(existsSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'))).toBe(true);
+    expect(existsSync(join(TEST_DIR, 'patches', 'ms+2.1.3.patch'))).toBe(false);
+  });
+
+  test('drops a patch whose change is already in the new version', () => {
+    // Ровно то, что сделали выше по течению между 2.1.2 и 2.1.3.
+    installAndPatch(source => source.replace(OLD_LINE, NEW_LINE));
+    upgrade();
+
+    const result = run('retarget ms', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('already in 2.1.3, dropping it');
+    expect(result.stdout).toContain('all changes are already there');
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual([]);
+  });
+
+  test('moves a whole sequence, keeping numbers and labels', () => {
+    installAndPatch(source => `// FIRST\n${source}`);
+    overwriteFile(file(), readFileSync(file(), 'utf-8') + '\n// SECOND\n');
+    run('create ms --append second', TEST_DIR);
+    expect(readdirSync(join(TEST_DIR, 'patches')).sort()).toEqual([
+      'ms+2.1.2+001+initial.patch',
+      'ms+2.1.2+002+second.patch',
+    ]);
+    upgrade();
+
+    const result = run('retarget ms', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readdirSync(join(TEST_DIR, 'patches')).sort()).toEqual([
+      'ms+2.1.3+001+initial.patch',
+      'ms+2.1.3+002+second.patch',
+    ]);
+    // Каждый патч по-прежнему несёт только своё.
+    const first = readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.3+001+initial.patch'), 'utf-8');
+    const second = readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.3+002+second.patch'), 'utf-8');
+    expect(first).toContain('+// FIRST');
+    expect(first).not.toContain('SECOND');
+    expect(second).toContain('+// SECOND');
+    expect(second).not.toContain('FIRST');
+
+    expect(run('apply', TEST_DIR).stdout).toContain('2 applied, 0 failed');
+  });
+
+  test('says there is nothing to do when the versions already match', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`);
+
+    const result = run('retarget test-lib', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('already target 1.0.0');
+    // И до сети дело не дошло.
+    expect(result.stdout).not.toContain('Fetching pristine');
+  });
+
+  test('refuses when the patches carry more than one version', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '2.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0+001+one.patch'), 'x');
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.5.0+002+two.patch'), 'x');
+
+    const result = run('retarget test-lib', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('more than one version');
+    expect(result.stdout).not.toContain('Fetching pristine');
+  });
+});
