@@ -179,14 +179,14 @@ modes and missing trailing newlines. A patch the tree no longer matches is refus
 rather than half-removed, exactly like a patch that does not apply.
 
 Un-applying has a limit worth knowing, measured on 289 real patches from public
-repositories: 280 of them restore the package byte for byte, four are refused
-because the tree no longer matches them, and five come back differing from the
-original — four of those by a single `\r`. The reason is inherent: the patch is the
-only record of the lines it removed, and patches routinely store those lines with
-trailing whitespace stripped or added. `rebase` re-applies the patch to what it is
-about to write and refuses when that does not reproduce the current tree, which
-catches the mismatches it can see; a difference only in trailing whitespace passes
-that check, because re-applying the patch hides it again.
+repositories: 285 of them restore the package byte for byte, and four come back
+differing only in trailing whitespace — a `\r` here and there. The reason is
+inherent: the patch is the only record of the lines it removed, and patches
+routinely store those lines with trailing whitespace stripped or added. `rebase`
+re-applies the patch to what it is about to write and refuses when that does not
+reproduce the current tree, which catches the mismatches it can see; a difference
+only in trailing whitespace passes that check, because re-applying the patch hides
+it again.
 
 After the rebase, `create` updates the patch you rebased onto rather than the last
 one in the sequence. It knows which that is from the record `apply` and `rebase`
@@ -270,6 +270,14 @@ Hunks are located at the line the patch declares, then by widening search, match
 `patch`'s offset handling. Fuzzy context matching is deliberately absent — a patch
 is made against one exact version, and stretching context to fit is how a failure
 comes to look like a success.
+
+Whether a patch is already in the tree is decided by reading the file both ways:
+how well the hunks' old side fits, and how well the new side fits, each located by
+the same widening search. Whichever sits closer to the lines the patch declares
+wins, and a tie counts as applied. This matters for a patch that once landed at an
+offset — checking only the declared position would never recognise it again, and
+`apply` in a `postinstall` hook would lay it down anew on every install, appending
+its changes over and over.
 
 ## File permissions
 
