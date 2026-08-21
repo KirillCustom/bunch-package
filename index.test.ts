@@ -1288,3 +1288,89 @@ describe('two applies at once', () => {
     expect(withApplyLock(lockFile, () => 'снова свободен')).toBe('снова свободен');
   });
 });
+
+// Поведения, которые были описаны и закрыты, но ничем не закреплены: мутация
+// снимает защиту, а сюита остаётся зелёной. Найдено прогоном мутаций по всем
+// защитным веткам кода.
+describe('behaviours nothing was checking', () => {
+  test('refuses a creation patch when the file is already there with other content', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'extra.js': 'written by someone else\n'});
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `diff --git a/node_modules/test-lib/extra.js b/node_modules/test-lib/extra.js
+new file mode 100644
+--- /dev/null
++++ b/node_modules/test-lib/extra.js
+@@ -0,0 +1 @@
++created by the patch
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+
+    // Без этой проверки чужой файл принимался за уже применённый патч: apply
+    // рапортовал успех, а содержимое оставалось посторонним.
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.stdout).toContain('already exists');
+    expect(result.exitCode).not.toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'extra.js'), 'utf-8')).toBe(
+      'written by someone else\n',
+    );
+  });
+
+  test('names the whole directory of a scoped package that is not installed', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules', '@ghost'), {recursive: true});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/@ghost/pkg/new.js
++++ b/node_modules/@ghost/pkg/new.js
+@@ -0,0 +1 @@
++fabricated
+`;
+    writeFileSync(join(TEST_DIR, 'patches', '@ghost+pkg+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+
+    // Каталог скоупового пакета — три сегмента, а не два: @ghost сам по себе
+    // пакетом не является, и говорить про него «not installed» бессмысленно.
+    expect(result.stdout).toContain('node_modules/@ghost/pkg is not installed');
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test('checks the version of a scoped package too', () => {
+    setupFakePackage(TEST_DIR, '@scope/pkg', '2.0.0', {'index.js': 'const a = 1;\n'});
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = `--- a/node_modules/@scope/pkg/index.js
++++ b/node_modules/@scope/pkg/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+    // Патч сделан против 1.0.0, а стоит 2.0.0.
+    writeFileSync(join(TEST_DIR, 'patches', '@scope+pkg+1.0.0.patch'), patchContent);
+
+    const result = run('apply', TEST_DIR);
+
+    // Манифест лежит в node_modules/@scope/pkg. Если считать каталогом пакета
+    // node_modules/@scope, манифеста там нет — и проверка версии молча пропадает.
+    expect(result.stdout).toContain('version mismatch');
+    expect(result.stdout).toContain('patch: 1.0.0, installed: 2.0.0');
+  });
+
+  test('refuses a package whose manifest carries an unusable version', () => {
+    // name и version приходят из чужого package.json и попадают прямо в путь,
+    // по которому пишется патч.
+    const pkgDir = join(TEST_DIR, 'node_modules', 'test-lib');
+    mkdirSync(pkgDir, {recursive: true});
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({name: 'test-lib', version: '../../../escaped'}));
+    writeFileSync(join(pkgDir, 'index.js'), 'const a = 1;\n');
+
+    const result = run('create test-lib', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('unusable version');
+    // До сети дело дойти не должно вовсе.
+    expect(result.stdout).not.toContain('Fetching pristine');
+    expect(existsSync(join(TEST_DIR, 'patches'))).toBe(false);
+  });
+});
