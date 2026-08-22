@@ -117,6 +117,37 @@ describe('bunch-package create', () => {
     expect(patchContent).not.toContain(TEST_DIR);
   });
 
+  // Патч с `rename from/to` приезжает от git и patch-package — наш create такие
+  // не выпускает, он строится на `diff -r`. Поэтому пока переименование не
+  // воспроизводилось на эталоне, молчали и корпус, и сюита: эталон оставался со
+  // старым именем файла, дерево — с новым, и разница между ними снова
+  // выглядела как «удалить старый, добавить новый».
+  test('replays a rename onto the pristine copy instead of repeating it', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'patches', 'ms+2.1.2+001+one.patch'),
+      `diff --git a/node_modules/ms/index.js b/node_modules/ms/renamed.js
+similarity index 100%
+rename from node_modules/ms/index.js
+rename to node_modules/ms/renamed.js
+`,
+    );
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+    const renamed = join(TEST_DIR, 'node_modules', 'ms', 'renamed.js');
+    overwriteFile(renamed, readFileSync(renamed, 'utf-8') + '\n// SECOND\n');
+
+    expect(run('create ms --append second', TEST_DIR).exitCode).toBe(0);
+
+    const second = readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.2+002+second.patch'), 'utf-8');
+    expect(second).toContain('+// SECOND');
+    // Второй патч несёт только свою правку: ни удаления index.js, ни всего
+    // renamed.js заново.
+    expect(second).not.toContain('index.js');
+    expect(second.split('\n').length).toBeLessThan(20);
+  });
+
   test('refuses a non-UTF-8 file instead of writing a corrupt patch', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
     // latin-1 без нулевых байтов diff считает текстом и печатает как есть —
@@ -2193,6 +2224,37 @@ describe('retarget', () => {
     expect(second).not.toContain('FIRST');
 
     expect(run('apply', TEST_DIR).stdout).toContain('2 applied, 0 failed');
+  });
+
+  // Патч с `rename from/to` приезжает от git и patch-package. Пока
+  // переименование не воспроизводилось на эталоне, retarget видел между
+  // снимками пустоту и **удалял** такой патч со словами «его правка уже в новой
+  // версии» — переименования не оставалось нигде.
+  test('carries a rename over to the new version instead of dropping the patch', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'patches', 'ms+2.1.2.patch'),
+      `diff --git a/node_modules/ms/index.js b/node_modules/ms/renamed.js
+similarity index 100%
+rename from node_modules/ms/index.js
+rename to node_modules/ms/renamed.js
+`,
+    );
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    upgrade();
+
+    const result = run('retarget ms', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain('dropping it');
+    expect(existsSync(join(TEST_DIR, 'patches', 'ms+2.1.3.patch'))).toBe(true);
+
+    // Переносится оно как удаление и добавление: наш create строится на `diff
+    // -r`, заголовков rename он не выпускает — но результат тот же.
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(existsSync(join(TEST_DIR, 'node_modules', 'ms', 'renamed.js'))).toBe(true);
+    expect(existsSync(join(TEST_DIR, 'node_modules', 'ms', 'index.js'))).toBe(false);
   });
 
   test('says there is nothing to do when the versions already match', () => {
