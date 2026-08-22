@@ -169,19 +169,26 @@ export function planTarget(
     throw new Error(`${relativePath} is a symbolic link (mode ${SYMLINK_MODE}) — bunch-package cannot apply that`);
   }
 
-  let file: string;
-  if (context === undefined) {
-    file = resolveInsideProject(relativePath);
+  // Путь из патча приводится к месту на диске двумя способами: обычно — от
+  // корня проекта, а при доводке эталона — внутрь распакованной копии. Способ
+  // один на все пути секции: пока переименование умело только первый из них, при
+  // доводке эталона его молча не происходило, и весь переименованный файл уезжал
+  // в следующий патч последовательности — см. тест ниже по этому же файлу.
+  const locate = (projectRelative: string): string => {
+    if (context === undefined) return resolveInsideProject(projectRelative);
+    if (!projectRelative.startsWith(context.prefix)) {
+      throw new Error(`${projectRelative} does not belong to ${context.prefix}`);
+    }
+    return join(context.root, projectRelative.slice(context.prefix.length));
+  };
 
+  let file = locate(relativePath);
+
+  if (context === undefined) {
     const packageDir = packageDirectoryOf(relativePath);
     if (packageDir !== null && !existsSync(packageDir)) {
       throw new Error(`${packageDir} is not installed`);
     }
-  } else {
-    if (!relativePath.startsWith(context.prefix)) {
-      throw new Error(`${relativePath} does not belong to ${context.prefix}`);
-    }
-    file = join(context.root, relativePath.slice(context.prefix.length));
   }
 
   // Переименование выполняется до всего остального: содержимое, если оно тоже
@@ -189,9 +196,10 @@ export function planTarget(
   const renameOps: PlannedOp[] = [];
   let source = file;
 
-  if (target.renameFrom !== null && target.renameTo !== null && context === undefined) {
-    const from = resolveInsideProject(target.renameFrom);
-    const to = resolveInsideProject(target.renameTo);
+  if (target.renameFrom !== null && target.renameTo !== null) {
+    // git пишет эти пути уже без префиксов a/ и b/ — они от корня проекта.
+    const from = locate(target.renameFrom);
+    const to = locate(target.renameTo);
 
     if (existsSync(from)) {
       renameOps.push({kind: 'rename', from, to});
