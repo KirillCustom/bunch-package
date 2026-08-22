@@ -1,41 +1,22 @@
-import {existsSync, readFileSync, readdirSync} from 'fs';
+import {existsSync} from 'fs';
 import {join} from 'path';
-import {orderPatchFiles, parsePatch} from './patch-file';
+import {listPatchFiles} from './patch-file';
 import {PATCHES_DIR} from './paths';
-import {planTarget} from './plan';
+import {Presence, presenceOf, readTargets} from './presence';
 import {appliedSequences} from './sequence';
-import {RecordedPatch, STATE_FILE, hashPatchFile, readState} from './state';
+import {RecordedPatch, STATE_FILE, hashPatchFile, readState, recordedPatches} from './state';
 
 // Что с патчем прямо сейчас. Определяется по дереву, а не по записи: запись
-// говорит, что было, а спрашивают — что есть.
-type Presence =
-  | {kind: 'in-tree'}
-  | {kind: 'not-in-tree'}
-  | {kind: 'does-not-fit'; reason: string}
-  | {kind: 'unreadable'; reason: string};
+// говорит, что было, а спрашивают — что есть. Сам расчёт — общий с apply.
+type Shown = Presence | {kind: 'unreadable'; reason: string};
 
-function presenceOf(patchFile: string, wholeSequenceApplied: Set<string>): Presence {
+function shownPresence(patchFile: string, wholeSequenceApplied: Set<string>): Shown {
   if (wholeSequenceApplied.has(patchFile)) return {kind: 'in-tree'};
 
-  let targets;
-  try {
-    targets = parsePatch(readFileSync(join(PATCHES_DIR, patchFile), 'utf-8'));
-  } catch (error: any) {
-    return {kind: 'unreadable', reason: error.message};
-  }
+  const targets = readTargets(patchFile);
+  if ('error' in targets) return {kind: 'unreadable', reason: targets.error};
 
-  if (targets.length === 0) {
-    return {kind: 'unreadable', reason: 'no hunks found — the patch file is empty or truncated'};
-  }
-
-  // Тот же расчёт, что делает apply: пустой план означает, что менять нечего,
-  // то есть изменения патча уже в дереве.
-  try {
-    const ops = targets.flatMap(target => planTarget(target));
-    return ops.length === 0 ? {kind: 'in-tree'} : {kind: 'not-in-tree'};
-  } catch (error: any) {
-    return {kind: 'does-not-fit', reason: error.message};
-  }
+  return presenceOf(targets);
 }
 
 function describeRecord(record: RecordedPatch | undefined, patchFile: string): string {
@@ -49,15 +30,13 @@ function describeRecord(record: RecordedPatch | undefined, patchFile: string): s
 }
 
 export function showStatus(): void {
-  const patchFiles = existsSync(PATCHES_DIR)
-    ? orderPatchFiles(readdirSync(PATCHES_DIR).filter((file: string) => file.endsWith('.patch')))
-    : [];
+  const patchFiles = listPatchFiles();
 
   // Запись читается до всякого выхода: патчей может не остаться вовсе, а их
   // изменения — лежать в node_modules. Промолчать об этом было бы худшим
   // ответом на вопрос «что сейчас в дереве».
   const state = readState();
-  const recorded = new Map((state?.patches ?? []).map(patch => [patch.file, patch]));
+  const recorded = recordedPatches(state);
 
   if (patchFiles.length === 0 && recorded.size === 0) {
     console.log(existsSync(PATCHES_DIR) ? '📭 No patches found' : '📭 No patches directory found');
@@ -75,7 +54,7 @@ export function showStatus(): void {
   let missing = 0;
 
   for (const patchFile of patchFiles) {
-    const presence = presenceOf(patchFile, wholeSequenceApplied);
+    const presence = shownPresence(patchFile, wholeSequenceApplied);
     const record = describeRecord(recorded.get(patchFile), patchFile);
 
     if (presence.kind === 'in-tree') {

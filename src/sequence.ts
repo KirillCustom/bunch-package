@@ -1,27 +1,16 @@
 import {existsSync, readFileSync, readdirSync} from 'fs';
 import {join} from 'path';
-import {orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
+import {formatPatchName, orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
 import {PATCHES_DIR} from './paths';
+import {isInTree} from './presence';
 import {PlannedOp, TreeContext, executeOps, planTarget} from './plan';
-import {readState} from './state';
+import {recordedPatches} from './state';
 
 export interface SequencePlan {
   replay: string[]; // патчи, которыми надо довести эталон
   outputName: string;
   renameFrom: string | null;
   renameTo: string | null;
-}
-
-// Лежат ли изменения патча в дереве. Пустой план на применение означает, что
-// менять нечего, то есть патч уже там.
-function isInTree(file: string): boolean {
-  try {
-    const targets = parsePatch(readFileSync(join(PATCHES_DIR, file), 'utf-8'));
-    if (targets.length === 0) return false;
-    return targets.flatMap(target => planTarget(target)).length === 0;
-  } catch {
-    return false; // не ложится и не узнаётся — значит не он
-  }
 }
 
 // Какой патч последовательности пересоздаём. Обычно — последний по номеру, но
@@ -33,23 +22,19 @@ function isInTree(file: string): boolean {
 // дерево используем как проверку: патчи **после** подсказанного обязаны быть не
 // в дереве, иначе их правки уехали бы в пересоздаваемый патч.
 function targetOfSequence(sequenced: string[]): number {
-  const recorded = new Set((readState()?.patches ?? []).map(patch => patch.file));
+  const recorded = recordedPatches();
 
-  for (let index = sequenced.length - 1; index >= 0; index--) {
-    if (!recorded.has(sequenced[index])) continue;
-    if (sequenced.slice(index + 1).every(file => !isInTree(file))) return index;
-    break; // запись отстала от дерева — верим дереву
-  }
+  const hinted = sequenced.findLastIndex(file => recorded.has(file));
+  if (hinted !== -1 && !sequenced.slice(hinted + 1).some(isInTree)) return hinted;
 
-  for (let index = sequenced.length - 1; index >= 0; index--) {
-    if (isInTree(sequenced[index])) return index;
-  }
-
-  return -1;
+  // Запись отстала от дерева — верим дереву.
+  return sequenced.findLastIndex(isInTree);
 }
 
-export function planSequence(sanitizedName: string, version: string, appendLabel: string | null): SequencePlan {
-  const prefix = `${sanitizedName}+${version}`;
+export function planSequence(packageDir: string, version: string, appendLabel: string | null): SequencePlan {
+  const named = (sequence?: number, label?: string) =>
+    formatPatchName({packageDir, version, sequence, label});
+  const prefix = `${packageDir.replace(/\//g, '+')}+${version}`;
   const siblings = existsSync(PATCHES_DIR)
     ? orderPatchFiles(
         readdirSync(PATCHES_DIR).filter(
@@ -66,16 +51,16 @@ export function planSequence(sanitizedName: string, version: string, appendLabel
     if (siblings.length === 1 && sequenceOf(siblings[0]) === 0) {
       return {
         replay: siblings,
-        outputName: `${prefix}+002+${appendLabel}.patch`,
+        outputName: named(2, appendLabel),
         renameFrom: siblings[0],
-        renameTo: `${prefix}+001+initial.patch`,
+        renameTo: named(1, 'initial'),
       };
     }
 
     const next = siblings.length > 0 ? sequenceOf(siblings[siblings.length - 1]) + 1 : 1;
     return {
       replay: siblings,
-      outputName: `${prefix}+${String(next).padStart(3, '0')}+${appendLabel}.patch`,
+      outputName: named(next, appendLabel),
       renameFrom: null,
       renameTo: null,
     };
@@ -106,7 +91,7 @@ export function planSequence(sanitizedName: string, version: string, appendLabel
     };
   }
 
-  return {replay: [], outputName: `${prefix}.patch`, renameFrom: null, renameTo: null};
+  return {replay: [], outputName: named(), renameFrom: null, renameTo: null};
 }
 
 // Доводим эталон до состояния «после уже существующих патчей».
@@ -147,14 +132,9 @@ export function appliedSequences(files: string[]): Set<string> {
 
   for (const group of groups.values()) {
     if (group.length < 2) continue;
-    try {
-      const targets = parsePatch(readFileSync(join(PATCHES_DIR, group[group.length - 1]), 'utf-8'));
-      const ops = targets.flatMap(target => planTarget(target));
-      if (ops.length === 0) for (const file of group) applied.add(file);
-    } catch {
-      // Последний не ложится и не узнаётся — значит последовательность не на
-      // месте целиком, и каждый патч надо разбирать по отдельности.
-    }
+    // Последний не лёг и не узнаётся — значит последовательность не на месте
+    // целиком, и каждый патч надо разбирать по отдельности.
+    if (isInTree(group[group.length - 1])) for (const file of group) applied.add(file);
   }
 
   return applied;

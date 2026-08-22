@@ -1,8 +1,8 @@
 import {createHash} from 'crypto';
-import {existsSync, readFileSync, renameSync, rmSync, writeFileSync} from 'fs';
+import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 import {parsePatchName} from './patch-file';
-import {PATCHES_DIR} from './paths';
+import {PATCHES_DIR, atomicWrite} from './paths';
 
 // Запись о том, что и когда легло в дерево. Нужна затем, чтобы на вопрос «что
 // сейчас в node_modules» был ответ, не требующий разбирать патчи глазами.
@@ -35,11 +35,11 @@ export function hashPatchFile(path: string): string {
 // Запись — это только запись. Считать по ней, что патч на месте, нельзя:
 // файлы в node_modules меняются мимо нас, и единственное настоящее
 // доказательство — обратное применение к самому дереву.
-export function readState(stateFile: string = STATE_FILE): State | null {
-  if (!existsSync(stateFile)) return null;
+export function readState(): State | null {
+  if (!existsSync(STATE_FILE)) return null;
 
   try {
-    const parsed = JSON.parse(readFileSync(stateFile, 'utf-8'));
+    const parsed = JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
     if (parsed?.version !== VERSION || !Array.isArray(parsed.patches)) return null;
     return parsed as State;
   } catch {
@@ -49,11 +49,19 @@ export function readState(stateFile: string = STATE_FILE): State | null {
   }
 }
 
+// Спрашивают запись всегда про конкретный патч: apply — когда он лёг в первый
+// раз, status — время и хеш, create — какой патч последовательности был
+// последним лежащим. Раскладка по именам файлов жила тремя копиями, и форму
+// записи (`patches`, ключ `file`) знал каждый из трёх.
+export function recordedPatches(state: State | null = readState()): Map<string, RecordedPatch> {
+  return new Map((state?.patches ?? []).map(patch => [patch.file, patch]));
+}
+
 // Пишут запись двое: apply, когда патчи легли, и rebase, когда часть их снял.
 // Время первого попадания в дерево сохраняется, пока файл патча не изменился, —
 // иначе `appliedAt` означал бы «когда последний раз запускали».
 export function recordPatches(inTree: string[]): void {
-  const previous = new Map((readState()?.patches ?? []).map(patch => [patch.file, patch]));
+  const previous = recordedPatches();
   const now = new Date().toISOString();
 
   const patches: RecordedPatch[] = inTree.map(file => {
@@ -79,15 +87,7 @@ export function recordPatches(inTree: string[]): void {
   }
 }
 
-export function writeState(patches: RecordedPatch[], stateFile: string = STATE_FILE): void {
+function writeState(patches: RecordedPatch[]): void {
   const state: State = {version: VERSION, patches};
-  const temp = `${stateFile}.tmp-${process.pid}`;
-
-  try {
-    writeFileSync(temp, JSON.stringify(state, null, 2) + '\n');
-    renameSync(temp, stateFile);
-  } catch (error) {
-    rmSync(temp, {force: true});
-    throw error;
-  }
+  atomicWrite(STATE_FILE, JSON.stringify(state, null, 2) + '\n');
 }

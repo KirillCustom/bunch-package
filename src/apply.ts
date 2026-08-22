@@ -1,9 +1,10 @@
-import {existsSync, readFileSync, readdirSync} from 'fs';
+import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 import {LOCK_FILE, withApplyLock} from './lock';
-import {orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
+import {PatchTarget, listPatchFiles, parsePatchName} from './patch-file';
 import {PATCHES_DIR, packageDirectoryOf, stripPathPrefix} from './paths';
-import {PlannedOp, executeOps, planTarget} from './plan';
+import {executeOps} from './plan';
+import {presenceOf, readTargets} from './presence';
 import {appliedSequences} from './sequence';
 import {recordPatches} from './state';
 
@@ -15,9 +16,7 @@ export function applyPatches(): void {
     return;
   }
 
-  const patchFiles = orderPatchFiles(
-    readdirSync(PATCHES_DIR).filter((f: string) => f.endsWith('.patch')),
-  );
+  const patchFiles = listPatchFiles();
 
   if (patchFiles.length === 0) {
     console.log('📭 No patches found');
@@ -33,8 +32,47 @@ export function applyPatches(): void {
   }
 }
 
+// Версию сверяем по пакету из заголовков, а не по имени файла патча: при
+// установке через алиас каталог называется иначе, чем пакет, и разбор имени
+// файла уводил проверку к несуществующему манифесту — она молча пропадала.
+function warnVersionMismatch(patchFile: string, targets: PatchTarget[]): void {
+  const patchVersion = parsePatchName(patchFile)?.version;
+  if (patchVersion === undefined) return;
+
+  const packageDirs = new Set(
+    targets
+      .map(t => packageDirectoryOf(stripPathPrefix(t.newPath ?? t.oldPath ?? '')))
+      .filter((dir): dir is string => dir !== null),
+  );
+
+  for (const dir of packageDirs) {
+    const pkgJsonPath = join(dir, 'package.json');
+    if (!existsSync(pkgJsonPath)) continue;
+
+    // Битый манифест не должен ронять весь прогон — проверку просто пропускаем.
+    let installedVersion: string | undefined;
+    try {
+      installedVersion = JSON.parse(readFileSync(pkgJsonPath, 'utf-8')).version;
+    } catch {
+      console.log(`  ⚠️  ${patchFile} — cannot read ${pkgJsonPath}, skipping version check`);
+    }
+
+    if (installedVersion !== undefined && installedVersion !== patchVersion) {
+      console.log(`  ⚠️  ${patchFile} — version mismatch (patch: ${patchVersion}, installed: ${installedVersion})`);
+    }
+  }
+}
+
+// Патчи до 1.1.0 писали в заголовки абсолютные пути. Под -p1 первый компонент
+// срезается, и `/Users/...` превращается в `Users/...` — путь, которого в
+// проекте нет. Ловим это отдельно, чтобы сказать пользователю правду.
+function absolutePathIn(targets: PatchTarget[]): string | undefined {
+  return targets
+    .flatMap(t => [t.oldPath, t.newPath])
+    .find((path): path is string => path !== null && path.startsWith('/'));
+}
+
 function applyAll(patchFiles: string[]): number {
-  let applied = 0;
   let failed = 0;
 
   // Патчи, оказавшиеся в дереве по итогам прогона: и легшие сейчас, и уже
@@ -43,8 +81,6 @@ function applyAll(patchFiles: string[]): number {
   const wholeSequenceApplied = appliedSequences(patchFiles);
 
   for (const patchFile of patchFiles) {
-    const patchPath = join(PATCHES_DIR, patchFile);
-
     const fail = (reason: string) => {
       failed++;
       console.log(`  ❌ ${patchFile}`);
@@ -52,7 +88,6 @@ function applyAll(patchFiles: string[]): number {
     };
 
     if (wholeSequenceApplied.has(patchFile)) {
-      applied++;
       inTree.push(patchFile);
       console.log(`  ✅ ${patchFile} (already applied)`);
       continue;
@@ -60,99 +95,49 @@ function applyAll(patchFiles: string[]): number {
 
     console.log(`  Applying ${patchFile}...`);
 
-    let patchContent: string;
-    try {
-      patchContent = readFileSync(patchPath, 'utf-8');
-    } catch (error: any) {
-      fail(`cannot read patch file: ${error.message}`);
+    const targets = readTargets(patchFile);
+    if ('error' in targets) {
+      fail(targets.error);
       continue;
     }
 
-    const targets = parsePatch(patchContent);
+    warnVersionMismatch(patchFile, targets);
 
-    if (targets.length === 0) {
-      fail('no hunks found — the patch file is empty or truncated');
-      continue;
-    }
-
-    // Версию сверяем по пакету из заголовков, а не по имени файла патча: при
-    // установке через алиас каталог называется иначе, чем пакет, и разбор имени
-    // файла уводил проверку к несуществующему манифесту — она молча пропадала.
-    const patchVersion = parsePatchName(patchFile)?.version;
-    if (patchVersion !== undefined) {
-      const packageDirs = new Set(
-        targets
-          .map(t => packageDirectoryOf(stripPathPrefix(t.newPath ?? t.oldPath ?? '')))
-          .filter((dir): dir is string => dir !== null),
-      );
-      for (const dir of packageDirs) {
-        const pkgJsonPath = join(dir, 'package.json');
-        if (!existsSync(pkgJsonPath)) continue;
-        // Битый манифест не должен ронять весь прогон — проверку просто пропускаем.
-        let installedVersion: string | undefined;
-        try {
-          installedVersion = JSON.parse(readFileSync(pkgJsonPath, 'utf-8')).version;
-        } catch {
-          console.log(`  ⚠️  ${patchFile} — cannot read ${pkgJsonPath}, skipping version check`);
-        }
-        if (installedVersion !== undefined && installedVersion !== patchVersion) {
-          console.log(`  ⚠️  ${patchFile} — version mismatch (patch: ${patchVersion}, installed: ${installedVersion})`);
-        }
-      }
-    }
-
-    // Патчи до 1.1.0 писали в заголовки абсолютные пути. Под -p1 первый компонент
-    // срезается, и `/Users/...` превращается в `Users/...` — путь, которого в
-    // проекте нет. Ловим это отдельно, чтобы сказать пользователю правду.
-    const absolute = targets
-      .flatMap(t => [t.oldPath, t.newPath])
-      .find(path => path !== null && path.startsWith('/'));
+    const absolute = absolutePathIn(targets);
     if (absolute !== undefined) {
       fail(`absolute path in patch header (${absolute}) — created by bunch-package < 1.1.0, recreate it with \`create\``);
       continue;
     }
 
-    // Считаем весь патч в памяти: пока не сойдётся целиком, на диск не идёт
+    // Весь патч считается в памяти, и пока не сойдётся целиком, на диск не идёт
     // ничего. Это и есть ответ на «применилось наполовину, а в отчёте ноль».
-    const writes: PlannedOp[] = [];
-    let failure: string | null = null;
+    const presence = presenceOf(targets);
 
-    for (const target of targets) {
-      try {
-        writes.push(...planTarget(target));
-      } catch (error: any) {
-        failure = error.message;
-        break;
-      }
-    }
-
-    if (failure !== null) {
-      fail(failure);
+    if (presence.kind === 'does-not-fit') {
+      fail(presence.reason);
       continue;
     }
 
-    if (writes.length === 0) {
-      applied++;
+    if (presence.kind === 'in-tree') {
       inTree.push(patchFile);
       console.log(`  ✅ ${patchFile} (already applied)`);
       continue;
     }
 
     try {
-      executeOps(writes);
+      executeOps(presence.ops);
     } catch (error: any) {
       fail(`could not write: ${error.message}`);
       continue;
     }
 
-    applied++;
     inTree.push(patchFile);
     console.log(`  ✅ ${patchFile}`);
   }
 
   recordPatches(inTree);
 
-  console.log(`\n📊 Summary: ${applied} applied, ${failed} failed`);
+  console.log(`\n📊 Summary: ${inTree.length} applied, ${failed} failed`);
 
   return failed;
 }

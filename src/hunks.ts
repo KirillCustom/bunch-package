@@ -9,11 +9,11 @@ import {Hunk, sideLines} from './patch-file';
 // патч перестаёт прикладываться, хотя ничего значимого не изменилось. На корпусе
 // из 269 реальных патчей это была причина девяти отказов из семнадцати.
 // patch-package сравнивает строки так же — и всегда, а не как запасной вариант.
-export function linesEqual(a: string, b: string): boolean {
+function linesEqual(a: string, b: string): boolean {
   return a === b || a.replace(/\s+$/, '') === b.replace(/\s+$/, '');
 }
 
-export function locateHunk(lines: string[], needle: string[], preferred: number, search = true): number {
+function locateHunk(lines: string[], needle: string[], preferred: number, search = true): number {
   const fits = (at: number): boolean =>
     at >= 0 &&
     at + needle.length <= lines.length &&
@@ -43,7 +43,7 @@ export interface AppliedFile {
 // строки с + и -, а контекст он лишь описывает — и описывает неточно, если по
 // дороге у него срезали хвостовые пробелы. Раньше диапазон пересобирался целиком
 // из «новой стороны», и такие расхождения уехали бы в файл.
-export function buildReplacement(hunk: Hunk, lines: string[], at: number, reverse: boolean): string[] {
+function buildReplacement(hunk: Hunk, lines: string[], at: number, reverse: boolean): string[] {
   const removePrefix = reverse ? '+' : '-';
   const insertPrefix = reverse ? '-' : '+';
   const out: string[] = [];
@@ -84,12 +84,17 @@ export function applyHunks(
     const from = sideLines(hunk, reverse ? 'new' : 'old');
     const declared = (reverse ? hunk.newStart : hunk.oldStart) - 1;
 
-    const at = locateHunk(lines, from, Math.max(0, declared + offset), search);
+    // Где хунк ждут: объявленное место плюс то, на сколько предыдущие хунки уже
+    // сдвинули файл. Отсюда же считается смещение, так что число обязано быть
+    // одним и тем же — посчитанное дважды, оно бы разъехалось молча.
+    const preferred = Math.max(0, declared + offset);
+
+    const at = locateHunk(lines, from, preferred, search);
     if (at === -1) {
       return {error: `hunk #${index + 1} does not fit (expected at line ${declared + 1})`};
     }
 
-    displacement += Math.abs(at - Math.max(0, declared + offset));
+    displacement += Math.abs(at - preferred);
 
     const reachedEnd = at + from.length === lines.length;
     const replacement = buildReplacement(hunk, lines, at, reverse);
