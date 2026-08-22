@@ -1,7 +1,7 @@
 node_modules/
 dist/
 bun.lockb
-.bunch-patch-tmp/
+.bunch-patch-tmp*
 .test-sandbox*
 *.log
 .DS_Store

@@ -1,11 +1,12 @@
-import {existsSync, readFileSync, readdirSync} from 'fs';
+import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 import {LOCK_FILE, withApplyLock} from './lock';
 import {applyHunks} from './hunks';
-import {invertTarget, orderPatchFiles, parsePatch, parsePatchName, PatchTarget} from './patch-file';
+import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch-file';
 import {PATCHES_DIR} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
-import {recordPatches} from './state';
+import {presenceOf, readTargets} from './presence';
+import {recordPatches, recordedPatches} from './state';
 
 // Патчи одного пакета — как коммиты: чтобы переделать не последний, надо сперва
 // снять те, что легли поверх него. Это и делает rebase, и ровно это же значит
@@ -18,7 +19,7 @@ export function rebasePatches(packageName: string, target: string): void {
     throw new Error(`No ${PATCHES_DIR}/ directory — there is nothing to rebase`);
   }
 
-  const all = orderPatchFiles(readdirSync(PATCHES_DIR).filter(file => file.endsWith('.patch')));
+  const all = listPatchFiles();
   const mine = all.filter(file => parsePatchName(file)?.packageDir === packageName);
 
   if (mine.length === 0) {
@@ -41,8 +42,11 @@ export function rebasePatches(packageName: string, target: string): void {
     process.exit(1);
   }
 
-  // Всё, что должно было уйти, ушло — записываем оставшееся.
-  recordPatches(all.filter(file => !undo.includes(file)));
+  // Всё, что должно было уйти, ушло — записываем оставшееся. Оставшееся считаем
+  // от самой записи, а не от списка файлов в patches/: файл на диске не значит,
+  // что патч в дереве, и после rebase в запись попадали патчи чужих пакетов,
+  // которых никто никогда не применял.
+  recordPatches([...recordedPatches().keys()].filter(file => !undo.includes(file)));
 
   const next: [string, string][] = keep === 0
     ? [
@@ -73,8 +77,8 @@ function resolveTarget(mine: string[], target: string, packageName: string): num
     if (file === target || join(PATCHES_DIR, file) === target) return true;
     if (parsed === null || parsed.sequence === 0) return false;
 
-    const number = String(parsed.sequence).padStart(3, '0');
     // Номер, метка и то, как патч выглядит в имени файла — `001+initial`.
+    const number = String(parsed.sequence).padStart(3, '0');
     return (
       parsed.label === target ||
       `${number}+${parsed.label}` === target ||
@@ -96,29 +100,27 @@ function unApply(files: string[]): number {
   let removed = 0;
 
   for (const file of files) {
-    const targets = parsePatch(readFileSync(join(PATCHES_DIR, file), 'utf-8'));
-
-    if (targets.length === 0) {
+    const targets = readTargets(file);
+    if ('error' in targets) {
       console.log(`  ❌ ${file}`);
-      console.log(`     no hunks found — the patch file is empty or truncated`);
+      console.log(`     ${targets.error}`);
       break;
     }
 
-    // Сперва спрашиваем про исходный патч, а не про перевёрнутый: пустой план
-    // на прямое применение означает, что изменения патча в дереве. Спрашивать
-    // то же самое у перевёрнутого нельзя — у патча, который только дописывает
+    // Спрашиваем про исходный патч, а не про перевёрнутый: пустой план на
+    // прямое применение означает, что изменения патча в дереве. Спрашивать то
+    // же самое у перевёрнутого нельзя — у патча, который только дописывает
     // строки, прямое применение сходится и во второй раз.
-    let inTree: boolean;
-    try {
-      inTree = targets.flatMap(target => planTarget(target)).length === 0;
-    } catch (error: any) {
+    const presence = presenceOf(targets);
+
+    if (presence.kind === 'does-not-fit') {
       console.log(`  ❌ ${file}`);
-      console.log(`     ${error.message}`);
+      console.log(`     ${presence.reason}`);
       console.log(`     The tree matches neither side of this patch, so it cannot be un-applied.`);
       break;
     }
 
-    if (!inTree) {
+    if (presence.kind === 'not-in-tree') {
       console.log(`  ➖ ${file} (was not in the tree)`);
       removed++;
       continue;

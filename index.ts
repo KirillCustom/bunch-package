@@ -24,76 +24,60 @@ function parseAppendLabel(argv: string[]): string | null {
   return label;
 }
 
+// Имя пакета требуют три команды из пяти, и одинаково: пустое место — забытый
+// аргумент, `--flag` на этом месте — тоже он, только флаг уехал вперёд имени.
+function requirePackageName(usage: string): string {
+  if (!arg || arg.startsWith('--')) {
+    console.error(`❌ Usage: ${usage}`);
+    process.exit(1);
+  }
+  return arg;
+}
+
 // Сообщения об отказах написаны, чтобы их прочитал человек: «поставьте
 // diffutils», «поднимите BUNCH_FETCH_TIMEOUT». Без этой обёртки они выходили
 // стеком необработанного исключения — то есть тем видом, в котором текст не
 // читают вовсе.
-function fail(error: any): never {
-  console.error(`❌ ${error?.message ?? error}`);
-  process.exit(1);
-}
+//
+// Обёртка одна на весь разбор: пока их было по одной на команду, следующая
+// команда легко оставалась без своей, и признаком этого был бы стек.
+try {
+  switch (command) {
+    case 'create':
+      createPatch(
+        requirePackageName('bunch-package create <package-name> [--append <name>]'),
+        parseAppendLabel(process.argv),
+      );
+      break;
 
-switch (command) {
-  case 'create':
-    if (!arg || arg.startsWith('--')) {
-      console.error('❌ Usage: bunch-package create <package-name> [--append <name>]');
-      process.exit(1);
-    }
-
-    try {
-      createPatch(arg, parseAppendLabel(process.argv));
-    } catch (error) {
-      fail(error);
-    }
-    break;
-
-  case 'apply':
-    try {
+    case 'apply':
       applyPatches();
-    } catch (error) {
-      fail(error);
-    }
-    break;
+      break;
 
-  case 'retarget':
-    if (!arg || arg.startsWith('--')) {
-      console.error('❌ Usage: bunch-package retarget <package-name>');
-      process.exit(1);
-    }
+    case 'retarget':
+      retargetPatches(requirePackageName('bunch-package retarget <package-name>'));
+      break;
 
-    try {
-      retargetPatches(arg);
-    } catch (error) {
-      fail(error);
-    }
-    break;
-
-  case 'status':
-    try {
+    case 'status':
       showStatus();
-    } catch (error) {
-      fail(error);
-    }
-    break;
+      break;
 
-  case 'rebase': {
-    // Цель обязательна и без умолчания: «откатить на что-нибудь» — не команда.
-    const target = process.argv[4];
-    if (!arg || arg.startsWith('--') || !target) {
-      console.error('❌ Usage: bunch-package rebase <package-name> <patch-file|number|0>');
-      process.exit(1);
+    case 'rebase': {
+      // Цель обязательна и без умолчания: «откатить на что-нибудь» — не команда.
+      const usage = 'bunch-package rebase <package-name> <patch-file|number|0>';
+      const packageName = requirePackageName(usage);
+      const target = process.argv[4];
+      if (!target) {
+        console.error(`❌ Usage: ${usage}`);
+        process.exit(1);
+      }
+
+      rebasePatches(packageName, target);
+      break;
     }
 
-    try {
-      rebasePatches(arg, target);
-    } catch (error) {
-      fail(error);
-    }
-    break;
-  }
-
-  default:
-    console.log(`
+    default:
+      console.log(`
 🎯 bunch-package - Patch management for Bun
 
 Commands:
@@ -104,4 +88,8 @@ Commands:
   bunch-package rebase <package> <patch|0>        Un-apply the patches that sit on top of one
   bunch-package retarget <package>                Move its patches to the installed version
     `);
+  }
+} catch (error: any) {
+  console.error(`❌ ${error?.message ?? error}`);
+  process.exit(1);
 }

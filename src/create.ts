@@ -2,14 +2,14 @@ import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
 import {existsSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
 import {join, resolve, sep} from 'path';
-import {PATCHES_DIR, TEMP_WRITE_SUFFIX, ensureDir} from './paths';
+import {PATCHES_DIR, TEMP_WRITE_SUFFIX, ensureDir, isExecutable} from './paths';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
 // что артефактно на любой глубине. Каталоги сборки сюда не входят: `build` у
 // множества пакетов — это каталог с распространяемым кодом. Ими занимается
 // isBuildArtifact() уже после диффа, по относительному пути.
-export const EXCLUDE_PATTERNS = [
+const EXCLUDE_PATTERNS = [
   'node_modules',
   '.git',
   '.DS_Store',
@@ -48,16 +48,16 @@ export const EXCLUDE_PATTERNS = [
 
 // Потолок вывода diff. Больше него — это уже не патч, а перенос дерева, и
 // писать усечённый патч нельзя ни при каких условиях.
-export const DIFF_MAX_BUFFER = 50 * 1024 * 1024;
+const DIFF_MAX_BUFFER = 50 * 1024 * 1024;
 
 // Эти имена не бывают исходниками ни на какой глубине.
-export const ARTIFACT_SEGMENTS = ['.gradle', '.cxx', '.transforms', 'DerivedData', 'Pods'];
+const ARTIFACT_SEGMENTS = ['.gradle', '.cxx', '.transforms', 'DerivedData', 'Pods'];
 
 // А `build` бывает: под платформенным каталогом это артефакт, в корне пакета —
 // обычно его собранный JavaScript. Поэтому только с якорем.
-export const ARTIFACT_PREFIXES = ['android/build', 'ios/build', 'macos/build', 'windows/build'];
+const ARTIFACT_PREFIXES = ['android/build', 'ios/build', 'macos/build', 'windows/build'];
 
-export function isBuildArtifact(relativePath: string): boolean {
+function isBuildArtifact(relativePath: string): boolean {
   if (relativePath.split('/').some(segment => ARTIFACT_SEGMENTS.includes(segment))) {
     return true;
   }
@@ -101,7 +101,7 @@ export function scanTree(root: string, prefix = '', into?: TreeScan): TreeScan {
     }
 
     if (!entry.isFile()) continue;
-    scan.executable.set(relative, (statSync(join(root, entry.name)).mode & 0o111) !== 0);
+    scan.executable.set(relative, isExecutable(statSync(join(root, entry.name)).mode));
   }
 
   return scan;
@@ -160,7 +160,7 @@ export interface DiffSection {
 // Тело хунка мы переносим дословно, а заголовки собираем заново из путей. Это
 // принципиально: прежняя нормализация была заменой подстроки по всему тексту,
 // поэтому путь проекта, встретившийся внутри файла, молча портился.
-export function splitDiffSections(diffOutput: string, cleanRoot: string, modifiedRoot: string): DiffSection[] {
+function splitDiffSections(diffOutput: string, cleanRoot: string, modifiedRoot: string): DiffSection[] {
   const sections: DiffSection[] = [];
   let current: DiffSection | null = null;
   let oldLeft = 0;
@@ -227,7 +227,7 @@ export function validatePackageName(name: string): void {
 }
 
 // name и version приходят из чужого package.json и попадают прямо в путь записи.
-export function validateManifestField(field: string, value: unknown): string {
+function validateManifestField(field: string, value: unknown): string {
   if (typeof value !== 'string' || !/^[\w.@/+-]+$/.test(value) || value.split(/[/\\]/).some(s => s === '.' || s === '..')) {
     throw new Error(`Package manifest has an unusable ${field}: ${String(value)}`);
   }
@@ -258,20 +258,25 @@ export function requireDiff(): void {
 // Функция была потеряна при одном из рефакторингов, и запасной путь через npm
 // из-за этого падал с ReferenceError вместо того, чтобы отработать.
 function firstDiagnosticLine(error: any): string {
-  const streams = `${error.stderr?.toString() ?? ''}\n${error.stdout?.toString() ?? ''}`
-    .split('\n')
-    .map((line: string) => line.trim())
-    .filter(Boolean);
+  const streams = nonEmptyLines(`${error.stderr?.toString() ?? ''}\n${error.stdout?.toString() ?? ''}`);
   return streams[0] ?? (error.message ? String(error.message).split('\n')[0].trim() : '');
+}
+
+// Чужой вывод разбирают четверо — bun, npm, tar и diff, — и всем нужно одно:
+// строки, в которых после обрезки что-то осталось. Пустые строки в диагностике
+// есть всегда, и каждый раз выписывать split/trim/filter значило четыре шанса
+// забыть одно из трёх.
+function nonEmptyLines(text: string): string[] {
+  return text.split('\n').map(line => line.trim()).filter(Boolean);
 }
 
 // Установка эталона ходит в сеть, и висеть там вечно она не должна. Шестидесяти
 // секунд хватает пакету любого разумного размера — но не на медленном канале, а
 // упереться в предел там значит остаться без create вовсе. Отсюда переменная
 // окружения: тупик должен иметь выход.
-export const FETCH_TIMEOUT_MS = 60_000;
+const FETCH_TIMEOUT_MS = 60_000;
 
-export function fetchTimeoutMs(): number {
+function fetchTimeoutMs(): number {
   const raw = process.env.BUNCH_FETCH_TIMEOUT;
   if (raw === undefined || raw === '') return FETCH_TIMEOUT_MS;
 
@@ -314,7 +319,7 @@ export function readManifest(packagePath: string): Manifest {
 //
 // Лечится изоляцией кеша: BUN_INSTALL_CACHE_DIR внутри temp заставляет bun
 // скачать пакет заново, и разделить иноды с node_modules проекта он уже не может.
-export function fetchPristine(name: string, version: string, tempDir: string): string {
+function fetchPristine(name: string, version: string, tempDir: string): string {
   writeFileSync(
     join(tempDir, 'package.json'),
     JSON.stringify({name: 'temp', version: '1.0.0'}, null, 2),
@@ -346,7 +351,7 @@ export function fetchPristine(name: string, version: string, tempDir: string): s
       encoding: 'utf-8',
       timeout,
     });
-    const printed = packed.split('\n').map(line => line.trim()).filter(Boolean).pop();
+    const printed = nonEmptyLines(packed).pop();
     if (!printed) throw new Error('npm pack printed no tarball name');
     execFileSync('tar', ['-xzf', join(tempDir, printed), '-C', tempDir], {stdio: 'pipe', timeout});
     return join(tempDir, 'package'); // тарболы npm всегда распаковываются сюда
@@ -363,13 +368,39 @@ export function fetchPristine(name: string, version: string, tempDir: string): s
 // которые переносятся прекрасно. Код 2 принимаем, только если каждая строка
 // диагностики говорит ровно про такой симлинк, и ни про что больше.
 function onlyMissingLinks(stderr: string, tolerated: Set<string>): boolean {
-  const lines = stderr.split('\n').map(line => line.trim()).filter(Boolean);
+  const lines = nonEmptyLines(stderr);
   if (lines.length === 0) return false;
 
   return lines.every(line => {
     const match = line.match(/^diff: (.+): No such file or directory$/);
     return match !== null && tolerated.has(match[1]);
   });
+}
+
+// Эталон нужен и `create`, и `retarget`, а вместе с ним — временный каталог,
+// который надо убрать в любом случае. Каталог уникален по pid: два прогона в
+// одном проекте иначе работали бы в одном и том же `.bunch-patch-tmp`, и
+// уборка одного сносила бы дерево другого.
+export function withPristine<T>(name: string, version: string, run: (pristine: string, tempDir: string) => T): T {
+  const tempDir = join(process.cwd(), `.bunch-patch-tmp-${process.pid}`);
+
+  try {
+    rmSync(tempDir, {force: true, recursive: true});
+    ensureDir(tempDir);
+
+    console.log(`📥 Fetching pristine ${name}@${version}...`);
+    const pristine = fetchPristine(name, version, tempDir);
+
+    // Без этой проверки отсутствующий эталон не заметен: diff -N трактует
+    // недостающую сторону как пустую и выдаёт патч «добавить все файлы».
+    if (!existsSync(pristine)) {
+      throw new Error(`Pristine copy of ${name}@${version} did not land at ${pristine}`);
+    }
+
+    return run(pristine, tempDir);
+  } finally {
+    rmSync(tempDir, {force: true, recursive: true});
+  }
 }
 
 export function runDiff(
@@ -412,24 +443,36 @@ export function runDiff(
     // diff: 0 — совпало, 1 — есть различия, 2 и выше — сбой.
     const stderr = error.stderr?.toString() ?? '';
     if (error.status !== 1 && !(error.status === 2 && onlyMissingLinks(stderr, toleratedMissing))) {
-      const reason = (stderr || error.message || '').split('\n').filter(Boolean)[0];
+      const reason = nonEmptyLines(stderr || error.message || '')[0];
       throw new Error(`diff failed: ${reason}`);
     }
     rawBuffer = error.stdout ?? Buffer.alloc(0);
   }
 
-  // Читать вывод сразу как utf-8 нельзя: каждый неверный байт превращался в
-  // U+FFFD, патч уезжал испорченным, а apply молча записывал не те байты.
-  // Лучше отказаться вслух, чем тихо испортить файл.
-  const rawPatch = rawBuffer.toString('utf-8');
-  if (!Buffer.from(rawPatch, 'utf-8').equals(rawBuffer)) {
+  // Читать вывод как utf-8 без проверки нельзя: каждый неверный байт
+  // превращался в U+FFFD, патч уезжал испорченным, а apply молча записывал не
+  // те байты. Лучше отказаться вслух, чем тихо испортить файл. Декодер с
+  // fatal: true отвечает на этот вопрос тем же проходом, которым и декодирует,
+  // — без второй копии диффа размером до DIFF_MAX_BUFFER.
+  try {
+    return new TextDecoder('utf-8', {fatal: true}).decode(rawBuffer);
+  } catch {
     throw new Error(
       `The diff for ${name}@${version} is not valid UTF-8 — some changed file is binary ` +
         `or in another encoding. Writing this patch would corrupt it.`,
     );
   }
+}
 
-  return rawPatch;
+// Все три отчёта ниже устроены одинаково: заголовок, первые пять строк и
+// «...and N more». Предел живёт здесь, в одном месте.
+function reportList<T>(header: string, items: T[], render: (item: T) => string, footer?: string): void {
+  if (items.length === 0) return;
+
+  console.log(header);
+  for (const item of items.slice(0, 5)) console.log(`   ${render(item)}`);
+  if (items.length > 5) console.log(`   ...and ${items.length - 5} more`);
+  if (footer !== undefined) console.log(footer);
 }
 
 // Двоичные файлы diff в патч не включает, печатая одну строку. Без этого
@@ -439,44 +482,30 @@ function reportBinaryFiles(rawPatch: string, packagePath: string): void {
     .split('\n')
     .filter(line => line.startsWith('Binary files ') && line.endsWith(' differ'));
 
-  if (notices.length === 0) return;
-
-  console.log(`⚠️  ${notices.length} binary file(s) differ and cannot be patched:`);
-  for (const notice of notices.slice(0, 5)) {
+  reportList(`⚠️  ${notices.length} binary file(s) differ and cannot be patched:`, notices, notice => {
     const paths = notice.slice('Binary files '.length, -' differ'.length);
     const modified = paths.split(' and ').pop() ?? paths;
-    console.log(`   ${modified.startsWith(packagePath + sep) ? modified.slice(packagePath.length + 1) : modified}`);
-  }
-  if (notices.length > 5) {
-    console.log(`   ...and ${notices.length - 5} more`);
-  }
+    return modified.startsWith(packagePath + sep) ? modified.slice(packagePath.length + 1) : modified;
+  });
 }
 
 // Симлинк не переносится патчем: формат возит содержимое файлов, а не ссылки.
 // Молчать об этом нельзя — правку было бы не отличить от «ничего не менялось».
 function reportLinkDifferences(differences: LinkDifference[]): void {
-  if (differences.length === 0) return;
-
-  console.log(`⚠️  ${differences.length} symbolic link(s) differ and cannot be patched:`);
-  for (const difference of differences.slice(0, 5)) {
-    console.log(`   ${difference.relativePath} — ${difference.change}`);
-  }
-  if (differences.length > 5) {
-    console.log(`   ...and ${differences.length - 5} more`);
-  }
-  console.log(`   A patch carries file contents, not links: these changes are not in it.`);
+  reportList(
+    `⚠️  ${differences.length} symbolic link(s) differ and cannot be patched:`,
+    differences,
+    difference => `${difference.relativePath} — ${difference.change}`,
+    `   A patch carries file contents, not links: these changes are not in it.`,
+  );
 }
 
 function reportSkipped(skipped: DiffSection[]): void {
-  if (skipped.length === 0) return;
-
-  console.log(`⏭  Skipped ${skipped.length} build-artifact path(s):`);
-  for (const section of skipped.slice(0, 5)) {
-    console.log(`   ${section.relativePath}`);
-  }
-  if (skipped.length > 5) {
-    console.log(`   ...and ${skipped.length - 5} more`);
-  }
+  reportList(
+    `⏭  Skipped ${skipped.length} build-artifact path(s):`,
+    skipped,
+    section => section.relativePath,
+  );
 }
 
 // Файлы, у которых изменился только бит исполнения: в диффе их нет вовсе.
@@ -534,8 +563,16 @@ function renderPatch(
   ].join('\n') + '\n';
 }
 
+// Считаем переводы строк, а не режем текст на массив: патч бывает в мегабайты,
+// и миллион временных строк ради одного числа в отчёте — лишняя работа.
+function countLines(text: string): number {
+  let lines = 1;
+  for (let at = text.indexOf('\n'); at !== -1; at = text.indexOf('\n', at + 1)) lines++;
+  return lines;
+}
+
 function writePatch(plan: SequencePlan, patchContent: string): void {
-  const patchLines = patchContent.split('\n').length;
+  const patchLines = countLines(patchContent);
   const patchSizeKB = Buffer.byteLength(patchContent, 'utf-8') / 1024;
 
   if (patchSizeKB > 100) {
@@ -543,9 +580,7 @@ function writePatch(plan: SequencePlan, patchContent: string): void {
     console.log(`   This might include binary files. Consider adding more excludes.`);
   }
 
-  if (!existsSync(PATCHES_DIR)) {
-    ensureDir(PATCHES_DIR);
-  }
+  ensureDir(PATCHES_DIR);
 
   if (plan.renameFrom !== null) {
     // Одиночный патч становится первым в последовательности.
@@ -613,8 +648,11 @@ export function diffTrees(
 
   const rawPatch = runDiff(cleanRoot, modifiedRoot, name, version, missingLinkPaths);
   const sections = splitDiffSections(rawPatch, cleanRoot, modifiedRoot);
-  const kept = sections.filter(section => !isBuildArtifact(section.relativePath));
-  const skipped = sections.filter(section => isBuildArtifact(section.relativePath));
+  const kept: DiffSection[] = [];
+  const skipped: DiffSection[] = [];
+  for (const section of sections) {
+    (isBuildArtifact(section.relativePath) ? skipped : kept).push(section);
+  }
 
   const modeOnly = findModeOnlyChanges(
     cleanTree.executable,
@@ -646,26 +684,11 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
   // отсчитывается от состояния после предыдущих, а не от чистого пакета.
   // Решаем, какой из них пересоздаём, **до** скачивания эталона: отказ здесь
   // возможен, и тратить на него сеть незачем — как и с проверкой diff.
-  const plan = planSequence(name.replace(/\//g, '+'), version, appendLabel);
+  const plan = planSequence(name, version, appendLabel);
 
-  const tempDir = join(process.cwd(), '.bunch-patch-tmp');
-
-  try {
-    rmSync(tempDir, {force: true, recursive: true});
-    ensureDir(tempDir);
-
-    console.log(`📥 Fetching pristine ${name}@${version}...`);
-    const cleanPackagePath = fetchPristine(name, version, tempDir);
-
-    // Без этой проверки отсутствующий эталон не заметен: diff -N трактует
-    // недостающую сторону как пустую и выдаёт патч «добавить все файлы».
-    if (!existsSync(cleanPackagePath)) {
-      throw new Error(`Pristine copy of ${name}@${version} did not land at ${cleanPackagePath}`);
-    }
-
+  withPristine(name, version, cleanPackagePath => {
     // Эталон доводится уже существующими патчами — иначе новый патч нёс бы в
     // себе и чужие правки.
-
     if (plan.replay.length > 0) {
       console.log(`🔁 Replaying ${plan.replay.length} existing patch(es) onto the pristine copy...`);
       replayPatches(plan.replay, packageName, cleanPackagePath);
@@ -677,14 +700,11 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
     reportLinkDifferences(diff.linkDifferences);
     reportSkipped(diff.skipped);
 
-    const {kept, modeOnly, linkDifferences} = diff;
-    const sections = [...kept, ...diff.skipped];
-
     if (diff.content === '') {
-      if (linkDifferences.length > 0) {
+      if (diff.linkDifferences.length > 0) {
         console.log('⚠️  Nothing patchable changed — only symbolic links did');
         console.log(`\n💡 Symbolic links cannot travel in a patch. Everything else in ${packagePath} matches the pristine copy.`);
-      } else if (sections.length > 0) {
+      } else if (diff.skipped.length > 0) {
         console.log('⚠️  No changes outside build artifacts');
         console.log(`\n💡 Everything you changed is under a build directory — those are not patchable.`);
       } else {
@@ -694,12 +714,10 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
       return;
     }
 
-    if (modeOnly.length > 0) {
-      console.log(`🔑 ${modeOnly.length} file(s) changed only their executable bit`);
+    if (diff.modeOnly.length > 0) {
+      console.log(`🔑 ${diff.modeOnly.length} file(s) changed only their executable bit`);
     }
 
     writePatch(plan, diff.content);
-  } finally {
-    rmSync(tempDir, {force: true, recursive: true});
-  }
+  });
 }

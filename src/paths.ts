@@ -1,4 +1,4 @@
-import {mkdirSync} from 'fs';
+import {chmodSync, mkdirSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {resolve, sep} from 'path';
 
 export const PATCHES_DIR = 'patches';
@@ -48,7 +48,7 @@ export function packageDirectoryOf(relativePath: string): string | null {
 
 // Как и git, из всех прав отслеживаем только бит исполнения: сравнивать полные
 // режимы нельзя — у распакованного эталона и у node_modules разный umask.
-export const EXECUTABLE = 0o111;
+const EXECUTABLE = 0o111;
 
 // На Windows бита исполнения не существует: NTFS его не хранит, chmod почти
 // no-op, а statSync возвращает одинаковый режим всем файлам. Без этой проверки
@@ -62,5 +62,23 @@ export function isExecutable(mode: number): boolean {
 }
 
 export function withExecutable(mode: number, executable: boolean): number {
-  return executable ? mode | 0o111 : mode & ~0o111;
+  return executable ? mode | EXECUTABLE : mode & ~EXECUTABLE;
+}
+
+// Пишем рядом и переставляем поверх. rename в пределах каталога атомарен:
+// снаружи файл виден либо старым целиком, либо новым целиком, и убитый посреди
+// работы процесс не оставляет ни обрезка, ни дыры на его месте. Заодно это
+// разрывает hardlink на общий кеш bun — у временного файла свой инод.
+export function atomicWrite(file: string, content: string, mode: number | null = null): void {
+  const temp = `${file}${TEMP_WRITE_SUFFIX}${process.pid}`;
+
+  try {
+    writeFileSync(temp, content);
+    // Режим ставим до перестановки, чтобы файл не побывал видимым с чужим.
+    if (mode !== null) chmodSync(temp, mode);
+    renameSync(temp, file);
+  } catch (error) {
+    rmSync(temp, {force: true});
+    throw error;
+  }
 }

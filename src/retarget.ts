@@ -1,8 +1,8 @@
-import {cpSync, existsSync, readdirSync, rmSync, writeFileSync} from 'fs';
+import {cpSync, existsSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
-import {diffTrees, fetchPristine, readManifest, requireDiff, validatePackageName} from './create';
-import {orderPatchFiles, parsePatchName} from './patch-file';
-import {PATCHES_DIR, ensureDir} from './paths';
+import {diffTrees, readManifest, requireDiff, validatePackageName, withPristine} from './create';
+import {formatPatchName, listPatchFiles, parsePatchName} from './patch-file';
+import {PATCHES_DIR} from './paths';
 import {replayPatches} from './sequence';
 
 // Пакет обновили — патчи остались от старой версии. `apply` о таком только
@@ -26,14 +26,7 @@ export function retargetPatches(packageName: string): void {
   }
 
   const {name, version} = readManifest(packagePath);
-
-  const mine = existsSync(PATCHES_DIR)
-    ? orderPatchFiles(
-        readdirSync(PATCHES_DIR).filter(
-          file => file.endsWith('.patch') && parsePatchName(file)?.packageDir === name,
-        ),
-      )
-    : [];
+  const mine = listPatchFiles().filter(file => parsePatchName(file)?.packageDir === name);
 
   if (mine.length === 0) {
     throw new Error(`No patches found for ${name} in ${PATCHES_DIR}/`);
@@ -55,23 +48,9 @@ export function retargetPatches(packageName: string): void {
 
   console.log(`📦 Moving ${mine.length} patch(es) for ${name} from ${from} to ${version}...`);
 
-  const tempDir = join(process.cwd(), '.bunch-patch-tmp');
-
-  try {
-    rmSync(tempDir, {force: true, recursive: true});
-    ensureDir(tempDir);
-
-    console.log(`📥 Fetching pristine ${name}@${version}...`);
-    const pristine = fetchPristine(name, version, tempDir);
-    if (!existsSync(pristine)) {
-      throw new Error(`Pristine copy of ${name}@${version} did not land at ${pristine}`);
-    }
-
-    const moved = replayOnto(mine, packageName, name, version, pristine, tempDir);
-    writeMoved(mine, moved, version);
-  } finally {
-    rmSync(tempDir, {force: true, recursive: true});
-  }
+  withPristine(name, version, (pristine, tempDir) => {
+    writeMoved(replayOnto(mine, packageName, name, version, pristine, tempDir), version);
+  });
 }
 
 interface MovedPatch {
@@ -91,8 +70,12 @@ function replayOnto(
   tempDir: string,
 ): MovedPatch[] {
   const moved: MovedPatch[] = [];
+
+  // Эталон переезжает в первый снимок, а не копируется: под своим именем он
+  // дальше никому не нужен, а копия дерева пакета стоит столько же, сколько
+  // само дерево.
   let previous = join(tempDir, 'state-0');
-  cpSync(pristine, previous, {recursive: true, verbatimSymlinks: true});
+  renameSync(pristine, previous);
 
   for (const [index, file] of files.entries()) {
     const current = join(tempDir, `state-${index + 1}`);
@@ -111,37 +94,38 @@ function replayOnto(
     }
 
     const diff = diffTrees(previous, current, packageName, name, version);
-    const parsed = parsePatchName(file)!;
-    const suffix = parsed.sequence > 0
-      ? `+${String(parsed.sequence).padStart(3, '0')}+${parsed.label}`
-      : '';
 
     moved.push({
       from: file,
-      to: `${name.replace(/\//g, '+')}+${version}${suffix}.patch`,
+      to: formatPatchName({...parsePatchName(file)!, version}),
       content: diff.content,
     });
 
+    // Снимок отработал своё: он был левой стороной диффа, и больше его никто не
+    // откроет. Без этого к концу последовательности во временном каталоге лежит
+    // по копии дерева пакета на каждый патч.
+    rmSync(previous, {force: true, recursive: true});
     previous = current;
   }
 
   return moved;
 }
 
-function writeMoved(old: string[], moved: MovedPatch[], version: string): void {
+function writeMoved(moved: MovedPatch[], version: string): void {
   const carried = moved.filter(patch => patch.content !== '');
-  const empty = moved.filter(patch => patch.content === '');
 
-  for (const patch of empty) {
+  for (const patch of moved) {
     // Патч, от которого на новой версии не осталось разницы: его правку уже
     // внесли выше по течению. Молча уронить такой файл нельзя — это и есть
     // новость, ради которой команду запускали.
-    console.log(`⏭  ${patch.from} — its change is already in ${version}, dropping it`);
+    if (patch.content === '') {
+      console.log(`⏭  ${patch.from} — its change is already in ${version}, dropping it`);
+    }
   }
 
   // Старые файлы убираем только после того, как всё сошлось: полпереноса —
   // состояние, из которого не выбраться.
-  for (const file of old) rmSync(join(PATCHES_DIR, file), {force: true});
+  for (const patch of moved) rmSync(join(PATCHES_DIR, patch.from), {force: true});
 
   for (const patch of carried) {
     writeFileSync(join(PATCHES_DIR, patch.to), patch.content);

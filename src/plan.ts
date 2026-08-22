@@ -1,11 +1,11 @@
-import {chmodSync, existsSync, lstatSync, readFileSync, renameSync, rmSync, writeFileSync, type Stats} from 'fs';
+import {chmodSync, existsSync, lstatSync, readFileSync, renameSync, rmSync, type Stats} from 'fs';
 import {join} from 'path';
-import {applyHunks} from './hunks';
-import {Hunk, PatchTarget, sideLines} from './patch-file';
-import {MODES_SUPPORTED, TEMP_WRITE_SUFFIX, ensureDir, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
+import {AppliedFile, applyHunks} from './hunks';
+import {Hunk, PatchTarget, sideIsEmpty} from './patch-file';
+import {MODES_SUPPORTED, atomicWrite, ensureDir, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
 
 // Режим симлинка в git-заголовках. У обычных файлов — 100644 и 100755.
-export const SYMLINK_MODE = '120000';
+const SYMLINK_MODE = '120000';
 
 export type PlannedOp =
   | {kind: 'write'; file: string; content: string; mode: number | null}
@@ -54,14 +54,22 @@ export function splitContent(raw: string): {lines: string[]; endsWithNewline: bo
 // Прямое применение без сравнения тоже не подходит: патч, который только
 // дописывает строки, ложится вперёд и во второй раз — контекст-то на месте.
 // Именно так дублирует содержимое patch-package, проверено запуском.
-function looksApplied(lines: string[], endsWithNewline: boolean, hunks: Hunk[]): boolean {
+//
+// Не лёгший патч тут же и кладут, поэтому прямое применение возвращается вместе
+// с ответом: посчитать его второй раз — это ещё один проход по всему файлу и
+// повторный поиск каждого хунка, а зовётся всё это на каждый `bun install`.
+type Verdict = {applied: true} | {applied: false; forward: AppliedFile | {error: string}};
+
+function looksApplied(lines: string[], endsWithNewline: boolean, hunks: Hunk[]): Verdict {
   const backwards = applyHunks(lines, endsWithNewline, hunks, true);
-  if ('error' in backwards) return false; // новой стороны в файле нет вовсе
+  const forward = applyHunks(lines, endsWithNewline, hunks, false);
 
-  const forwards = applyHunks(lines, endsWithNewline, hunks, false);
-  if ('error' in forwards) return true; // старой стороны больше нет — значит лёг
+  // Порядок проверок важен: не сошлись обе стороны — значит патч не лежит и не
+  // ложится, и сказать об этом должен вызывающий, показав, где именно не сошлось.
+  if ('error' in backwards) return {applied: false, forward}; // новой стороны в файле нет вовсе
+  if ('error' in forward) return {applied: true}; // старой стороны больше нет — значит лёг
 
-  return backwards.displacement <= forwards.displacement;
+  return backwards.displacement <= forward.displacement ? {applied: true} : {applied: false, forward};
 }
 
 // Самая заковыристая часть плана: решить, что стало с содержимым файла.
@@ -74,18 +82,22 @@ function planContentChange(
   relativePath: string,
   source: string,
   file: string,
-  exists: boolean,
+  // Он же говорит, есть ли файл вообще: у существующего режим всегда какой-то
+  // есть. Отдельный флаг рядом с ним — это два ответа на один вопрос.
   currentMode: number | null,
   wantExecutable: boolean | null,
   assumeNotApplied: boolean,
 ): ContentPlan {
+  const exists = currentMode !== null;
   const raw = exists ? readFileSync(source, 'utf-8') : '';
   const {lines, endsWithNewline} = splitContent(raw);
 
   // Патч создаёт файл, а файл уже есть и не пуст — применять такое вслепую
   // значит подмешать содержимое к чужому файлу.
-  const isCreation = target.oldPath === null || target.hunks.every(h => sideLines(h, 'old').length === 0);
+  const isCreation = target.oldPath === null || target.hunks.every(h => sideIsEmpty(h, 'old'));
   let alreadyApplied = false;
+  // Прямое применение, если его посчитали по дороге, — см. looksApplied().
+  let precomputed: AppliedFile | {error: string} | null = null;
 
   if (isCreation && exists && raw !== '') {
     const reverse = applyHunks(lines, endsWithNewline, target.hunks, true, false);
@@ -95,7 +107,7 @@ function planContentChange(
     // У патча на удаление новая сторона пуста, а пустой образец совпадает с чем
     // угодно, поэтому обратная проверка для него ничего не значит: там признак
     // применённости — отсутствующий или пустой файл.
-    const hasNewContent = target.hunks.some(h => sideLines(h, 'new').length > 0);
+    const hasNewContent = target.hunks.some(h => !sideIsEmpty(h, 'new'));
 
     if (assumeNotApplied) {
       // Откат зовёт нас с уже перевёрнутым патчем, установив этот флаг, потому
@@ -107,12 +119,14 @@ function planContentChange(
     } else if (!hasNewContent) {
       alreadyApplied = !exists || raw === '';
     } else {
-      alreadyApplied = looksApplied(lines, endsWithNewline, target.hunks);
+      const verdict = looksApplied(lines, endsWithNewline, target.hunks);
+      alreadyApplied = verdict.applied;
+      if (!verdict.applied) precomputed = verdict.forward;
     }
   }
 
   if (!alreadyApplied) {
-    const forward = applyHunks(lines, endsWithNewline, target.hunks, false);
+    const forward = precomputed ?? applyHunks(lines, endsWithNewline, target.hunks, false);
     if ('error' in forward) throw new Error(`${relativePath}: ${forward.error}`);
 
     const content = forward.lines.join('\n') + (forward.endsWithNewline ? '\n' : '');
@@ -226,7 +240,6 @@ export function planTarget(
       relativePath,
       source,
       file,
-      exists,
       currentMode,
       wantExecutable,
       assumeNotApplied,
@@ -263,25 +276,10 @@ export function executeOps(ops: PlannedOp[]): void {
     }
     ensureDir(join(op.file, '..'));
 
-    // Пишем рядом и переставляем поверх. rename в пределах каталога атомарен:
-    // снаружи файл виден либо старым целиком, либо новым целиком. Прежняя
-    // последовательность «удалить, записать, выставить режим» оставляла между
-    // шагами дыру: apply, убитый там (Ctrl-C, упавший CI, кончившееся место),
-    // оставлял файл исчезнувшим или обрезанным — а из такого состояния патч
-    // больше не ложился никогда, потому что хунк не сходился с пустотой.
-    //
-    // Hardlink на общий кеш bun это разрывает ровно так же, как прежнее
-    // пересоздание: у временного файла свой инод, а rename меняет только запись
-    // в каталоге, оставляя кешу его собственный.
-    const temp = `${op.file}${TEMP_WRITE_SUFFIX}${process.pid}`;
-    try {
-      writeFileSync(temp, op.content);
-      // Режим ставим до перестановки, чтобы файл не побывал видимым с чужим.
-      if (op.mode !== null) chmodSync(temp, op.mode);
-      renameSync(temp, op.file);
-    } catch (error) {
-      rmSync(temp, {force: true});
-      throw error;
-    }
+    // Прежняя последовательность «удалить, записать, выставить режим» оставляла
+    // между шагами дыру: apply, убитый там (Ctrl-C, упавший CI, кончившееся
+    // место), оставлял файл исчезнувшим или обрезанным — а из такого состояния
+    // патч больше не ложился никогда, потому что хунк не сходился с пустотой.
+    atomicWrite(op.file, op.content, op.mode);
   }
 }

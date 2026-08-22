@@ -14,7 +14,7 @@ import {ensureDir} from './paths';
 // Патч применяется целиком или не применяется вовсе — это верно внутри одного
 // процесса и должно быть верно между процессами. Отсюда замок.
 export const LOCK_FILE = join('node_modules', '.bunch-package.lock');
-export const LOCK_WAIT_MS = 30_000;
+const LOCK_WAIT_MS = 30_000;
 
 const POLL_MS = 50;
 

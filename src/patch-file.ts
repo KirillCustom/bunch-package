@@ -1,3 +1,5 @@
+import {existsSync, readdirSync} from 'fs';
+import {PATCHES_DIR} from './paths';
 
 export interface Hunk {
   oldStart: number;
@@ -99,8 +101,11 @@ export function parsePatch(patchContent: string): PatchTarget[] {
     // пути приходится брать отсюда. Заодно это то, что печатает git.
     const gitHeader = line.match(/^diff --git (\S+) (\S+)$/);
     if (gitHeader) {
-      open = false;
-      const fresh = (target = ensureTarget(target));
+      // `diff --git` начинает секцию всегда, даже если предыдущая ещё открыта:
+      // просить нечего, поэтому и существующей секции здесь не передаём. Раньше
+      // это делалось сбросом `open` снаружи — то есть признак «секция открыта»
+      // жил в двух местах сразу.
+      const fresh = (target = ensureTarget(null));
       fresh.oldPath = gitHeader[1];
       fresh.newPath = gitHeader[2];
       continue;
@@ -215,6 +220,15 @@ export function sideLines(hunk: Hunk, side: 'old' | 'new'): string[] {
   return hunk.lines.filter(line => !line.startsWith(drop)).map(line => line.slice(1));
 }
 
+// Пуста ли сторона — спрашивают чаще, чем строят саму сторону: пустая старая
+// означает создание файла, пустая новая — удаление. Спрашивать это через
+// sideLines(...).length значит собрать список строк ради того, чтобы узнать,
+// что он пуст.
+export function sideIsEmpty(hunk: Hunk, side: 'old' | 'new'): boolean {
+  const drop = side === 'old' ? '+' : '-';
+  return hunk.lines.every(line => line.startsWith(drop));
+}
+
 // Имя файла патча несёт пакет, версию и — для последовательности — номер и
 // метку: `react-native+0.72.0+002+fix-touchable.patch`. Такой формат у
 // patch-package, и повторять его стоит: патчи людей и инструментов ходят
@@ -244,6 +258,23 @@ export function parsePatchName(file: string): PatchName | null {
     sequence: sequenced ? Number(sequenced[2]) : 0,
     label: sequenced ? sequenced[3] : '',
   };
+}
+
+// Обратная к parsePatchName: формат имени описан выше, и собирать его руками в
+// каждой команде значило бы держать разбор и сборку в разных файлах — они бы
+// разъехались молча, а признаком стал бы патч, которого никто больше не узнаёт.
+export function formatPatchName(parts: {packageDir: string; version: string; sequence?: number; label?: string}): string {
+  const head = `${parts.packageDir.replace(/\//g, '+')}+${parts.version}`;
+  if (!parts.sequence || parts.label === undefined || parts.label === '') return `${head}.patch`;
+  return `${head}+${String(parts.sequence).padStart(3, '0')}+${parts.label}.patch`;
+}
+
+// Все команды перечисляют patches/ одинаково, и все обязаны получить один и тот
+// же порядок: патчи последовательности строятся друг на друге. Отсутствующий
+// каталог — это просто пустой список; что о нём сказать, решает вызывающий.
+export function listPatchFiles(): string[] {
+  if (!existsSync(PATCHES_DIR)) return [];
+  return orderPatchFiles(readdirSync(PATCHES_DIR).filter(file => file.endsWith('.patch')));
 }
 
 // Патчи одной последовательности строятся друг на друге, как коммиты, поэтому
