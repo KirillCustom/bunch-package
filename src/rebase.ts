@@ -6,7 +6,7 @@ import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch
 import {PATCHES_DIR} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
 import {presenceOf, readTargets} from './presence';
-import {recordPatches} from './state';
+import {recordPatches, recordedPatches} from './state';
 
 // Патчи одного пакета — как коммиты: чтобы переделать не последний, надо сперва
 // снять те, что легли поверх него. Это и делает rebase, и ровно это же значит
@@ -42,8 +42,11 @@ export function rebasePatches(packageName: string, target: string): void {
     process.exit(1);
   }
 
-  // Всё, что должно было уйти, ушло — записываем оставшееся.
-  recordPatches(all.filter(file => !undo.includes(file)));
+  // Всё, что должно было уйти, ушло — записываем оставшееся. Оставшееся считаем
+  // от самой записи, а не от списка файлов в patches/: файл на диске не значит,
+  // что патч в дереве, и после rebase в запись попадали патчи чужих пакетов,
+  // которых никто никогда не применял.
+  recordPatches([...recordedPatches().keys()].filter(file => !undo.includes(file)));
 
   const next: [string, string][] = keep === 0
     ? [

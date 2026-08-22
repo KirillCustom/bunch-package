@@ -1887,6 +1887,26 @@ new file mode 100644
     expect(recorded()).toEqual([`${PKG}+1.0.0+001+one.patch`]);
   });
 
+  test('does not record a patch of another package that was never applied', () => {
+    setupSequence();
+    // Патч чужого пакета, который никто не применял: пакета нет вовсе, так что
+    // и лечь ему некуда. Раньше запись после rebase собиралась из списка файлов
+    // в patches/, и такой патч оказывался в ней как лежащий в дереве.
+    writeFileSync(join(TEST_DIR, 'patches', 'other-lib+2.0.0.patch'), `--- a/node_modules/other-lib/index.js
++++ b/node_modules/other-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`);
+
+    run(`rebase ${PKG} 1`, TEST_DIR);
+
+    const recorded = JSON.parse(
+      readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8'),
+    ).patches.map((patch: any) => patch.file);
+    expect(recorded).toEqual([`${PKG}+1.0.0+001+one.patch`]);
+  });
+
   test('create refuses when none of the sequence is in the tree', () => {
     setupSequence();
     run(`rebase ${PKG} 0`, TEST_DIR);
