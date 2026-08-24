@@ -279,6 +279,32 @@ that a patch is applied; the files are.
 `status` exits `1` when anything is missing from the tree, so it can stand in CI as
 a cheap check that `node_modules` is what the patches say it should be.
 
+### Patches for packages that production does not install
+
+A package in `devDependencies` is not there on a production install, and a patch
+for it should not fail the deploy. Name it `.dev.patch` — the same convention
+`patch-package` uses — and `apply` skips it when the package is absent:
+
+```bash
+bunx bunch-package create eslint-plugin-something --dev
+# → patches/eslint-plugin-something+1.2.3.dev.patch
+```
+
+The skip happens only when `NODE_ENV=production`. Anywhere else a missing package
+means a broken install, and you get told about it. In production a patch for a
+package listed in the root `devDependencies` counts as dev-only even without the
+suffix, and a missing package that is *not* marked names the way out:
+
+```
+❌ some-package+1.0.0.patch
+   node_modules/some-package is not installed
+   If it is a dev dependency, rename this patch to some-package+1.0.0.dev.patch
+```
+
+`status` leaves skipped patches out of its count rather than calling them missing.
+A whole sequence is dev or it is not: the mark is inherited from the patches
+already there, so `--dev` is only needed for the first one.
+
 ### Taking every patch back out
 
 ```bash
@@ -298,6 +324,7 @@ it.
 --exclude <regexp>                 These paths do not
 --case-sensitive-path-filtering    Match those two case-sensitively
 --error-on-warn                    Make `apply` exit 1 after a warning as well
+--dev                              Mark a new patch as needed only in development
 ```
 
 `--patch-dir` applies to every command, and the directory has to be inside the
@@ -499,7 +526,7 @@ the same. Everything below was measured by running both, not assumed:
 | npm, yarn, pnpm, workspaces | not attempted | documented |
 | Moving a patch to a newer version of the package | `retarget` | — |
 | Converting patches from the other tool | `import`, for the ones bun writes | — |
-| Dev-only patches (`*.dev.patch`) | — | skipped when the package is absent |
+| Dev-only patches (`*.dev.patch`) | skipped when the package is absent, `--dev` to create one | skipped when the package is absent |
 | `--create-issue` | — | opens a draft issue on GitHub |
 | Unknown command-line option | refused | ignored |
 

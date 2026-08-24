@@ -241,11 +241,19 @@ export interface PatchName {
   version: string;
   sequence: number; // 0 — одиночный патч вне последовательности
   label: string;
+  // `ms+2.1.2.dev.patch` — патч пакета, которого в production нет вовсе. Метка
+  // стоит в имени файла, а не в отдельном списке: так её видно там же, где и
+  // сам патч, и так же её отмечает patch-package.
+  devOnly: boolean;
 }
+
+const DEV_SUFFIX = '.dev.patch';
 
 export function parsePatchName(file: string): PatchName | null {
   if (!file.endsWith('.patch')) return null;
-  const base = file.slice(0, -'.patch'.length);
+
+  const devOnly = file.endsWith(DEV_SUFFIX);
+  const base = file.slice(0, -(devOnly ? DEV_SUFFIX.length : '.patch'.length));
 
   const sequenced = base.match(/^(.+)\+(\d{3})\+([^+]+)$/);
   const head = sequenced ? sequenced[1] : base;
@@ -257,6 +265,7 @@ export function parsePatchName(file: string): PatchName | null {
     version: head.slice(separator + 1),
     sequence: sequenced ? Number(sequenced[2]) : 0,
     label: sequenced ? sequenced[3] : '',
+    devOnly,
   };
 }
 
@@ -277,10 +286,17 @@ function encodePackageDir(packageDir: string): string {
 // Обратная к parsePatchName: формат имени описан выше, и собирать его руками в
 // каждой команде значило бы держать разбор и сборку в разных файлах — они бы
 // разъехались молча, а признаком стал бы патч, которого никто больше не узнаёт.
-export function formatPatchName(parts: {packageDir: string; version: string; sequence?: number; label?: string}): string {
+export function formatPatchName(parts: {
+  packageDir: string;
+  version: string;
+  sequence?: number;
+  label?: string;
+  devOnly?: boolean;
+}): string {
+  const suffix = parts.devOnly ? DEV_SUFFIX : '.patch';
   const head = `${encodePackageDir(parts.packageDir)}+${parts.version}`;
-  if (!parts.sequence || parts.label === undefined || parts.label === '') return `${head}.patch`;
-  return `${head}+${String(parts.sequence).padStart(3, '0')}+${parts.label}.patch`;
+  if (!parts.sequence || parts.label === undefined || parts.label === '') return `${head}${suffix}`;
+  return `${head}+${String(parts.sequence).padStart(3, '0')}+${parts.label}${suffix}`;
 }
 
 // Все команды перечисляют patches/ одинаково, и все обязаны получить один и тот

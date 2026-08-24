@@ -723,6 +723,7 @@ export function createPatch(
   packageName: string,
   appendLabel: string | null = null,
   filters: PathFilters = {include: null, exclude: null},
+  dev = false,
 ): void {
   validatePackageName(packageName);
   requireDiff();
@@ -756,7 +757,7 @@ export function createPatch(
   // отсчитывается от состояния после предыдущих, а не от чистого пакета.
   // Решаем, какой из них пересоздаём, **до** скачивания эталона: отказ здесь
   // возможен, и тратить на него сеть незачем — как и с проверкой diff.
-  const plan = planSequence(patchDir, version, appendLabel);
+  const plan = planSequence(patchDir, version, appendLabel, dev);
 
   withPristine(name, version, cleanPackagePath => {
     // Эталон доводится уже существующими патчами — иначе новый патч нёс бы в

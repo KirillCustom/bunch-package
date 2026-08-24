@@ -1,8 +1,9 @@
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
+import {inProduction, missingPackages, skipsMissingPackage} from './dev';
 import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
 import {LOCK_FILE, withApplyLock} from './lock';
-import {PatchTarget, listPatchFiles, parsePatchName} from './patch-file';
+import {PatchTarget, formatPatchName, listPatchFiles, parsePatchName} from './patch-file';
 import {patchesDirectory, packageDirectoryOf, stripPathPrefix} from './paths';
 import {executeOps} from './plan';
 import {presenceOf, readTargets} from './presence';
@@ -137,6 +138,23 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
           `are relative to the package root. bun applies those itself; list it in patchedDependencies, ` +
           `or recreate it with \`bunch-package create\`.`,
       );
+      continue;
+    }
+
+    // Пакета нет на диске — про это и сообщаем, вместо «хунк не подошёл». А
+    // дев-патч на production-установке пропускаем: пакет там и не должен быть.
+    const missing = missingPackages(targets);
+    if (missing.length > 0) {
+      if (skipsMissingPackage(patchFile)) {
+        console.log(`  ⏭  ${patchFile} — dev-only, and ${missing[0]} is not installed`);
+        continue;
+      }
+
+      fail(`${missing[0]} is not installed`);
+      const parsed = parsePatchName(patchFile);
+      if (inProduction() && parsed !== null && !parsed.devOnly) {
+        console.log(`     If it is a dev dependency, rename this patch to ${formatPatchName({...parsed, devOnly: true})}`);
+      }
       continue;
     }
 

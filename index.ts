@@ -44,7 +44,7 @@ try {
 
       for (const name of names) {
         try {
-          createPatch(name, options.append, filters);
+          createPatch(name, options.append, filters, options.dev);
         } catch (error: any) {
           console.error(`❌ ${error?.message ?? error}`);
           failed++;
@@ -95,6 +95,7 @@ try {
 Commands:
   bunch-package create <package>...               Create or update a patch
   bunch-package create <package> --append <name>  Add another patch to the package
+  bunch-package create <package> --dev             Mark it as needed only in development
   bunch-package apply                             Apply all patches
   bunch-package reverse                           Un-apply all of them
   bunch-package status                            Show which patches are in the tree

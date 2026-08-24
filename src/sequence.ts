@@ -1,6 +1,6 @@
-import {existsSync, readFileSync, readdirSync} from 'fs';
+import {readFileSync} from 'fs';
 import {join} from 'path';
-import {formatPatchName, orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
+import {formatPatchName, listPatchFiles, parsePatch, parsePatchName} from './patch-file';
 import {patchesDirectory} from './paths';
 import {isInTree} from './presence';
 import {PlannedOp, TreeContext, executeOps, planTarget} from './plan';
@@ -31,17 +31,26 @@ function targetOfSequence(sequenced: string[]): number {
   return sequenced.findLastIndex(isInTree);
 }
 
-export function planSequence(packageDir: string, version: string, appendLabel: string | null): SequencePlan {
+export function planSequence(
+  packageDir: string,
+  version: string,
+  appendLabel: string | null,
+  dev = false,
+): SequencePlan {
+  // Родню ищем разбором имени, а не сравнением префиксов. Префикс не знал ни
+  // про `outer++inner` у вложенной зависимости, ни про суффикс `.dev.patch`:
+  // существующий патч просто не находился, и следующий уезжал первым в
+  // последовательности, унося в себя правки предыдущего.
+  const siblings = listPatchFiles().filter(file => {
+    const parsed = parsePatchName(file);
+    return parsed !== null && parsed.packageDir === packageDir && parsed.version === version;
+  });
+
+  // Патч последовательности не бывает наполовину дев: метка либо у всех, либо
+  // ни у кого. Поэтому она наследуется от уже лежащих.
+  const devOnly = dev || siblings.some(file => parsePatchName(file)?.devOnly === true);
   const named = (sequence?: number, label?: string) =>
-    formatPatchName({packageDir, version, sequence, label});
-  const prefix = `${packageDir.replace(/\//g, '+')}+${version}`;
-  const siblings = existsSync(patchesDirectory())
-    ? orderPatchFiles(
-        readdirSync(patchesDirectory()).filter(
-          (f: string) => f.endsWith('.patch') && (f === `${prefix}.patch` || f.startsWith(`${prefix}+`)),
-        ),
-      )
-    : [];
+    formatPatchName({packageDir, version, sequence, label, devOnly});
 
   const sequenceOf = (file: string): number => parsePatchName(file)?.sequence ?? 0;
 

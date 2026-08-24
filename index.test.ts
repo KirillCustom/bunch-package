@@ -1239,6 +1239,32 @@ describe('nested dependencies', () => {
     expect(readFileSync(join(TEST_DIR, 'node_modules', 'ms', 'index.js'), 'utf-8')).not.toContain('NESTED FIX');
   });
 
+  // Родню по последовательности искали сравнением префикса имени, а он не знал
+  // про `outer++inner`: существующий патч не находился, и второй уезжал первым
+  // в последовательности, унося правки первого.
+  test('create --append finds the patch that is already there', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    setupFakePackage(TEST_DIR, 'outer', '9.9.9', {'index.js': 'const outer = 1;\n'});
+    const nested = join(TEST_DIR, 'node_modules', 'outer', 'node_modules', 'ms');
+    mkdirSync(join(nested, '..'), {recursive: true});
+    cpSync(join(TEST_DIR, 'node_modules', 'ms'), nested, {recursive: true});
+    const file = join(nested, 'index.js');
+
+    overwriteFile(file, `// FIRST\n${readFileSync(file, 'utf-8')}`);
+    expect(run('create outer/node_modules/ms', TEST_DIR).exitCode).toBe(0);
+
+    overwriteFile(file, `${readFileSync(file, 'utf-8')}\n// SECOND\n`);
+    expect(run('create outer/node_modules/ms --append second', TEST_DIR).exitCode).toBe(0);
+
+    expect(readdirSync(join(TEST_DIR, 'patches')).sort()).toEqual([
+      'outer++ms+2.1.2+001+initial.patch',
+      'outer++ms+2.1.2+002+second.patch',
+    ]);
+    const second = readFileSync(join(TEST_DIR, 'patches', 'outer++ms+2.1.2+002+second.patch'), 'utf-8');
+    expect(second).toContain('+// SECOND');
+    expect(second).not.toContain('FIRST');
+  });
+
   test('retarget moves a nested patch to the version installed there', () => {
     execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
     setupFakePackage(TEST_DIR, 'outer', '9.9.9', {'index.js': 'const outer = 1;\n'});
@@ -1391,6 +1417,108 @@ describe('command-line options', () => {
 
     expect(result.exitCode).not.toBe(0);
     expect(result.stdout).toContain('Unknown option: --exclud');
+  });
+});
+
+// Пакет из devDependencies на production-установке не ставится вовсе, и патч
+// для него не должен валить деплой. Соглашение то же, что у patch-package:
+// суффикс `.dev.patch` в имени файла.
+describe('dev-only patches', () => {
+  const PATCH = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+
+  function patchWithoutPackage(file: string) {
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', file), PATCH);
+  }
+
+  test('apply skips one in production when its package is absent', () => {
+    patchWithoutPackage('test-lib+1.0.0.dev.patch');
+
+    const result = run('apply', TEST_DIR, {NODE_ENV: 'production'});
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('dev-only');
+    expect(result.stdout).toContain('0 applied, 0 failed');
+  });
+
+  test('apply still refuses it outside production — the package should be there', () => {
+    patchWithoutPackage('test-lib+1.0.0.dev.patch');
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('node_modules/test-lib is not installed');
+  });
+
+  test('applies normally when the package is installed', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.dev.patch'), PATCH);
+
+    const result = run('apply', TEST_DIR, {NODE_ENV: 'production'});
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 2;\n');
+  });
+
+  test('in production, a devDependency counts even without the suffix', () => {
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({name: 'test-project', version: '1.0.0', devDependencies: {'test-lib': '1.0.0'}}),
+    );
+    patchWithoutPackage('test-lib+1.0.0.patch');
+
+    const result = run('apply', TEST_DIR, {NODE_ENV: 'production'});
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('dev-only');
+  });
+
+  test('names the way out when a missing package is not marked dev', () => {
+    patchWithoutPackage('test-lib+1.0.0.patch');
+
+    const result = run('apply', TEST_DIR, {NODE_ENV: 'production'});
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('rename this patch to test-lib+1.0.0.dev.patch');
+  });
+
+  test('status leaves it out of the count instead of calling it missing', () => {
+    patchWithoutPackage('test-lib+1.0.0.dev.patch');
+
+    const result = run('status', TEST_DIR, {NODE_ENV: 'production'});
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('dev-only');
+    expect(result.stdout).not.toContain('of 1 in the tree');
+  });
+
+  test('create --dev marks the patch, and the next one in the sequence keeps the mark', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    const file = join(TEST_DIR, 'node_modules', 'ms', 'index.js');
+    overwriteFile(file, `// FIRST\n${readFileSync(file, 'utf-8')}`);
+
+    expect(run('create ms --dev', TEST_DIR).exitCode).toBe(0);
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['ms+2.1.2.dev.patch']);
+
+    overwriteFile(file, `${readFileSync(file, 'utf-8')}\n// SECOND\n`);
+    expect(run('create ms --append second', TEST_DIR).exitCode).toBe(0);
+
+    // Метку наследует вся последовательность, и первый патч получает номер.
+    expect(readdirSync(join(TEST_DIR, 'patches')).sort()).toEqual([
+      'ms+2.1.2+001+initial.dev.patch',
+      'ms+2.1.2+002+second.dev.patch',
+    ]);
+    // И каждый несёт только своё.
+    const second = readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.2+002+second.dev.patch'), 'utf-8');
+    expect(second).toContain('+// SECOND');
+    expect(second).not.toContain('FIRST');
   });
 });
 

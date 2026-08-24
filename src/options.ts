@@ -10,10 +10,11 @@ export interface Options {
   exclude: string | null;
   caseSensitive: boolean;
   errorOnWarn: boolean;
+  dev: boolean;
 }
 
 const WITH_VALUE = new Set(['--append', '--patch-dir', '--include', '--exclude']);
-const WITHOUT_VALUE = new Set(['--case-sensitive-path-filtering', '--error-on-warn']);
+const WITHOUT_VALUE = new Set(['--case-sensitive-path-filtering', '--error-on-warn', '--dev']);
 
 export function parseOptions(argv: string[]): Options {
   const options: Options = {
@@ -24,6 +25,7 @@ export function parseOptions(argv: string[]): Options {
     exclude: null,
     caseSensitive: false,
     errorOnWarn: false,
+    dev: false,
   };
 
   for (let at = 0; at < argv.length; at++) {
@@ -42,7 +44,8 @@ export function parseOptions(argv: string[]): Options {
     if (WITHOUT_VALUE.has(flag)) {
       if (inline !== null) throw new Error(`${flag} takes no value`);
       if (flag === '--case-sensitive-path-filtering') options.caseSensitive = true;
-      else options.errorOnWarn = true;
+      else if (flag === '--error-on-warn') options.errorOnWarn = true;
+      else options.dev = true;
       continue;
     }
 
