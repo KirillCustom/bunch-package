@@ -1,6 +1,7 @@
 import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
 import {existsSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
+import {homedir} from 'os';
 import {join, resolve, sep} from 'path';
 import {PATCHES_DIR, TEMP_WRITE_SUFFIX, ensureDir, isExecutable} from './paths';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
@@ -276,6 +277,28 @@ function nonEmptyLines(text: string): string[] {
 // окружения: тупик должен иметь выход.
 const FETCH_TIMEOUT_MS = 60_000;
 
+// Кеш эталона у нас свой, не бунов. bun раскладывает пакеты из общего кеша
+// hardlink'ами — на Linux это умолчание, проверено на 1.0.36: у файла в
+// node_modules две ссылки, и вторая ведёт в кеш. Правка такого файла меняет
+// саму запись кеша, «чистая» установка приезжает уже изменённой, а diff
+// сравнивает файл сам с собой и отвечает «No changes detected».
+//
+// Но выбрасывать этот кеш вместе с временным каталогом незачем, а раньше
+// именно так и было: каждый `create` и каждый `retarget` качали пакет заново.
+// Измерено на typescript@5.4.5 (31 МБ): установка эталона 3,44 с против 66 мс,
+// когда кеш уже тёплый.
+function pristineCacheDir(): string {
+  const override = process.env.BUNCH_PRISTINE_CACHE;
+  if (override !== undefined && override !== '') return override;
+
+  const base =
+    process.platform === 'win32'
+      ? process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local')
+      : process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache');
+
+  return join(base, 'bunch-package', 'pristine');
+}
+
 function fetchTimeoutMs(): number {
   const raw = process.env.BUNCH_FETCH_TIMEOUT;
   if (raw === undefined || raw === '') return FETCH_TIMEOUT_MS;
@@ -317,8 +340,8 @@ export function readManifest(packagePath: string): Manifest {
 // сравнивает файл сам с собой, отдавая «No changes detected». На Linux это
 // поведение по умолчанию.
 //
-// Лечится изоляцией кеша: BUN_INSTALL_CACHE_DIR внутри temp заставляет bun
-// скачать пакет заново, и разделить иноды с node_modules проекта он уже не может.
+// Лечится своим кешем: BUN_INSTALL_CACHE_DIR уводит установку в каталог, до
+// которого редактору пользователя не дотянуться, — см. pristineCacheDir().
 function fetchPristine(name: string, version: string, tempDir: string): string {
   writeFileSync(
     join(tempDir, 'package.json'),
@@ -328,12 +351,20 @@ function fetchPristine(name: string, version: string, tempDir: string): string {
   const failures: string[] = [];
   const timeout = fetchTimeoutMs();
 
+  const cache = pristineCacheDir();
+
   try {
-    execFileSync('bun', ['add', '--no-save', `${name}@${version}`], {
+    ensureDir(cache);
+    // --backend=copyfile: из своего кеша тоже незачем тянуть hardlink, потому
+    // что в эталон мы пишем — им доводятся предыдущие патчи последовательности.
+    // Сейчас все записи ссылку рвут (atomicWrite пишет рядом и переставляет),
+    // но это невидимый инвариант, а копия снимает вопрос вовсе: у файла эталона
+    // одна ссылка. Стоит это 66 мс против 27 на 31 МБ, и флаг есть с bun 1.0.
+    execFileSync('bun', ['add', '--no-save', '--backend=copyfile', `${name}@${version}`], {
       cwd: tempDir,
       stdio: 'pipe',
       timeout,
-      env: {...process.env, BUN_INSTALL_CACHE_DIR: join(tempDir, 'cache')},
+      env: {...process.env, BUN_INSTALL_CACHE_DIR: cache},
     });
     // Имя каталога в node_modules не обязано совпадать с именем пакета: при
     // установке через алиас (`"mynum": "npm:is-number@7.0.0"`) они разные.
