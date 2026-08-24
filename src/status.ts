@@ -1,5 +1,6 @@
 import {existsSync} from 'fs';
 import {join} from 'path';
+import {missingPackages, skipsMissingPackage} from './dev';
 import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
 import {listPatchFiles} from './patch-file';
 import {patchesDirectory} from './paths';
@@ -9,7 +10,7 @@ import {RecordedPatch, STATE_FILE, hashPatchFile, readState, recordedPatches} fr
 
 // Что с патчем прямо сейчас. Определяется по дереву, а не по записи: запись
 // говорит, что было, а спрашивают — что есть. Сам расчёт — общий с apply.
-type Shown = Presence | {kind: 'unreadable'; reason: string};
+type Shown = Presence | {kind: 'unreadable'; reason: string} | {kind: 'dev-only'; missing: string};
 
 function shownPresence(patchFile: string, wholeSequenceApplied: Set<string>): Shown {
   if (wholeSequenceApplied.has(patchFile)) return {kind: 'in-tree'};
@@ -20,6 +21,14 @@ function shownPresence(patchFile: string, wholeSequenceApplied: Set<string>): Sh
   const outside = firstPathOutsideNodeModules(targets);
   if (outside !== undefined) {
     return {kind: 'does-not-fit', reason: `${outside} is not inside node_modules/ — this patch is not ours`};
+  }
+
+  // На production-установке пакета дев-патча нет и не должно быть — это не
+  // пропажа, а ровно то, чего от такой установки ждут. Ровно так же на него
+  // смотрит apply.
+  const missing = missingPackages(targets);
+  if (missing.length > 0 && skipsMissingPackage(patchFile)) {
+    return {kind: 'dev-only', missing: missing[0]};
   }
 
   return presenceOf(targets);
@@ -63,6 +72,9 @@ export function showStatus(): void {
   console.log('');
 
   let missing = 0;
+  // Пропущенные дев-патчи не считаются ни лежащими, ни пропавшими: их пакета на
+  // этой установке нет по замыслу, и в «столько-то из стольких» им места нет.
+  let skipped = 0;
 
   for (const patchFile of ours) {
     const presence = shownPresence(patchFile, wholeSequenceApplied);
@@ -70,6 +82,12 @@ export function showStatus(): void {
 
     if (presence.kind === 'in-tree') {
       console.log(`  ✅ ${patchFile} — in the tree, ${record}`);
+      continue;
+    }
+
+    if (presence.kind === 'dev-only') {
+      skipped++;
+      console.log(`  ⏭  ${patchFile} — dev-only, and ${presence.missing} is not installed`);
       continue;
     }
 
@@ -99,9 +117,10 @@ export function showStatus(): void {
     console.log(`   Their changes may still be in node_modules. Reinstall it to be sure.`);
   }
 
-  if (ours.length > 0) {
+  const counted = ours.length - skipped;
+  if (counted > 0) {
     console.log('');
-    console.log(`📊 ${ours.length - missing} of ${ours.length} in the tree`);
+    console.log(`📊 ${counted - missing} of ${counted} in the tree`);
   }
 
   if (missing > 0 || orphans.length > 0) {
