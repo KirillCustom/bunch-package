@@ -454,6 +454,32 @@ pays on every install. The rest of the table is a difference in behaviour, not a
 score: `patch-package` runs where this tool does not, and that is the honest reason
 to keep using it.
 
+## Alongside `bun patch`
+
+bun has patched packages itself since 1.2: `bun patch --commit` writes a patch into
+the same `patches/` directory and records it under `patchedDependencies` in
+`package.json`, and the installer applies it — no `postinstall` involved. Those
+patches are written differently: the file is named `ms@2.1.2.patch`, and the paths
+inside it are relative to the package root (`a/index.js`), not to the project
+(`a/node_modules/ms/index.js`).
+
+This tool leaves them alone. `apply` skips anything listed in `patchedDependencies`
+and says who owns it; `status` lists those separately rather than counting them;
+and a patch whose paths are not under `node_modules/` is refused out loud, because
+applying it as if the paths were ours would write into the project's own files.
+`create` refuses a package bun already patches, since bun's patch is in
+`node_modules` but not in the pristine copy and would end up inside the new patch.
+
+What the two tools do is not the same job. Measured on bun 1.4.0: `bun install`
+applies a patch by line number without checking the lines it claims to remove — a
+hunk deleting a line that is not in the file still rewrites whatever sits at that
+position, silently, exit code 0 — and when the installed version no longer matches
+the `patchedDependencies` key, the patch is quietly not applied at all, with nothing
+in the output to say so. There is one patch per package, regenerated whole. This
+tool refuses instead of guessing, warns when the version drifts, moves patches to a
+new version with `retarget`, keeps a sequence of patches per package, and can tell
+you what is in the tree right now.
+
 ## Requirements
 
 - **Using it:** bun >= 1.0.0, checked in CI on 1.0, 1.1 and 1.2 as well as the

@@ -964,6 +964,84 @@ rename to node_modules/test-lib/new.txt
   });
 });
 
+// bun с 1.2 патчит пакеты сам: `bun patch --commit` кладёт файл в тот же
+// patches/ и записывает его в `patchedDependencies`. Пути в таком патче — от
+// корня пакета, а не от корня проекта, и раньше мы срезали `a/` и били по
+// файлам самого проекта: `apply` переписывал ./index.js и печатал `✅ 1 applied`.
+describe('patches that belong to bun', () => {
+  const BUN_PATCH = `diff --git a/index.js b/index.js
+index c4498bcc..74988d81 100644
+--- a/index.js
++++ b/index.js
+@@ -1,1 +1,1 @@
+-const original = 1;
++const patchedByBun = 2;
+`;
+
+  function setupProjectFile(patchedDependencies?: Record<string, string>) {
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({name: 'test-project', version: '1.0.0', ...(patchedDependencies ? {patchedDependencies} : {})}),
+    );
+    // Файл проекта, по которому патч bun и попадал: путь `a/index.js` мы
+    // решали от корня проекта.
+    overwriteFile(join(TEST_DIR, 'index.js'), 'const original = 1;\n');
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'ms@2.1.2.patch'), BUN_PATCH);
+  }
+
+  test('apply leaves them to bun and does not touch the project', () => {
+    setupProjectFile({'ms@2.1.2': 'patches/ms@2.1.2.patch'});
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('bun applies this one itself');
+    expect(readFileSync(join(TEST_DIR, 'index.js'), 'utf-8')).toBe('const original = 1;\n');
+  });
+
+  test('apply refuses one that is not even listed, instead of patching the project', () => {
+    // Тот же патч, но в patchedDependencies его нет: единственный признак — пути.
+    setupProjectFile();
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('is not inside node_modules/');
+    expect(readFileSync(join(TEST_DIR, 'index.js'), 'utf-8')).toBe('const original = 1;\n');
+  });
+
+  test('status names them instead of counting them as ours', () => {
+    setupProjectFile({'ms@2.1.2': 'patches/ms@2.1.2.patch'});
+
+    const result = run('status', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('applied by bun itself');
+    expect(result.stdout).toContain('ms@2.1.2.patch');
+    expect(result.stdout).toContain('📋 0 patch(es)');
+  });
+
+  test('create refuses a package bun already patches', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({
+        name: 'test-project',
+        version: '1.0.0',
+        patchedDependencies: {'test-lib@1.0.0': 'patches/test-lib@1.0.0.patch'},
+      }),
+    );
+
+    const result = run('create test-lib', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('already patched by bun');
+    // Отказ до сети: эталон не качается.
+    expect(result.stdout).not.toContain('Fetching pristine');
+  });
+});
+
 describe('CLI usage', () => {
   test('shows help with no arguments', () => {
     const result = run('', TEST_DIR);

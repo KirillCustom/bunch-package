@@ -3,6 +3,7 @@ import {createHash} from 'crypto';
 import {existsSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
 import {homedir} from 'os';
 import {join, resolve, sep} from 'path';
+import {bunAlsoPatches} from './foreign';
 import {PATCHES_DIR, TEMP_WRITE_SUFFIX, ensureDir, isExecutable} from './paths';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 
@@ -710,6 +711,17 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
   }
 
   const {name, version} = readManifest(packagePath);
+
+  // Два механизма на один пакет дерутся, и проигрывает пользователь: патч bun
+  // уже в дереве, а в эталоне его нет — значит он целиком уехал бы в наш патч,
+  // и дальше применялся бы дважды. Отказываем до скачивания эталона.
+  if (bunAlsoPatches(name)) {
+    throw new Error(
+      `${name} is already patched by bun through patchedDependencies.\n` +
+        `   That patch is in node_modules but not in the pristine copy, so a patch created now\n` +
+        `   would carry bun's changes too. Remove the entry from patchedDependencies first.`,
+    );
+  }
 
   // Патчи одного пакета образуют последовательность, где каждый следующий
   // отсчитывается от состояния после предыдущих, а не от чистого пакета.
