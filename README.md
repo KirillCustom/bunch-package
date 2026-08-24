@@ -319,6 +319,14 @@ Unified diffs as `git diff` and `patch-package` write them: content hunks, file
 creation and deletion, renames, mode changes, and files with no trailing newline.
 Patch files in CRLF are read correctly against LF sources.
 
+Nested dependencies use `patch-package`'s naming: `outer++inner+1.0.0.patch` is a
+patch for `node_modules/outer/node_modules/inner`, the copy bun installs when two
+versions of a package are needed at once. Create one by naming the path:
+
+```bash
+bunx bunch-package create outer/node_modules/inner
+```
+
 Context lines are compared ignoring trailing whitespace, because trailing
 whitespace does not survive editors, linters or the GitHub web editor — and a line
 that is only indentation becomes an empty one. Context is verified but never

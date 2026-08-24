@@ -26,7 +26,10 @@ export function retargetPatches(packageName: string): void {
   }
 
   const {name, version} = readManifest(packagePath);
-  const mine = listPatchFiles().filter(file => parsePatchName(file)?.packageDir === name);
+
+  // Патчи вложенной зависимости названы путём под node_modules — см. create().
+  const patchDir = packageName.includes('/node_modules/') ? packageName : name;
+  const mine = listPatchFiles().filter(file => parsePatchName(file)?.packageDir === patchDir);
 
   if (mine.length === 0) {
     throw new Error(`No patches found for ${name} in ${PATCHES_DIR}/`);

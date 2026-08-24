@@ -1,7 +1,7 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
 import {execSync, spawn, spawnSync} from 'child_process';
 import {createHash} from 'crypto';
-import {chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
+import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree} from './src/create';
 import {withApplyLock} from './src/lock';
 import {ensureDir} from './src/paths';
@@ -1144,6 +1144,119 @@ index 1111111111111111111111111111111111111111..22222222222222222222222222222222
 
     expect(run('apply', TEST_DIR).exitCode).toBe(0);
     expect(readFileSync(file, 'utf-8')).toBe(byBun);
+  });
+});
+
+// Вложенная зависимость — `node_modules/outer/node_modules/inner` — появляется,
+// когда версии конфликтуют, и bun разводит их именно так. patch-package пишет
+// такие патчи через двойной плюс: `outer++inner+1.0.0.patch`.
+describe('nested dependencies', () => {
+  const NESTED_PATCH = `--- a/node_modules/outer/node_modules/inner/index.js
++++ b/node_modules/outer/node_modules/inner/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+
+  function setupNested() {
+    setupFakePackage(TEST_DIR, 'outer', '9.9.9', {'index.js': 'const outer = 1;\n'});
+    setupFakePackage(TEST_DIR, join('outer', 'node_modules', 'inner'), '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'outer++inner+1.0.0.patch'), NESTED_PATCH);
+  }
+
+  const innerFile = () => join(TEST_DIR, 'node_modules', 'outer', 'node_modules', 'inner', 'index.js');
+
+  test('applies without inventing a version mismatch', () => {
+    setupNested();
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(innerFile(), 'utf-8')).toBe('const a = 2;\n');
+    // Версия в имени патча — версия inner. Пока каталогом пакета считался outer,
+    // она сверялась с манифестом outer и на каждый install печаталось ложное
+    // `version mismatch (patch: 1.0.0, installed: 9.9.9)`.
+    expect(result.stdout).not.toContain('version mismatch');
+  });
+
+  test('still warns when the nested version really differs', () => {
+    setupNested();
+    writeFileSync(
+      join(TEST_DIR, 'node_modules', 'outer', 'node_modules', 'inner', 'package.json'),
+      JSON.stringify({name: 'inner', version: '2.0.0'}),
+    );
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.stdout).toContain('version mismatch (patch: 1.0.0, installed: 2.0.0)');
+  });
+
+  test('says which package is missing when the nested copy is not there', () => {
+    setupFakePackage(TEST_DIR, 'outer', '9.9.9', {'index.js': 'const outer = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'outer++inner+1.0.0.patch'), NESTED_PATCH);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('node_modules/outer/node_modules/inner is not installed');
+  });
+
+  test('status reads the nested name too', () => {
+    setupNested();
+    run('apply', TEST_DIR);
+
+    const result = run('status', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('outer++inner+1.0.0.patch — in the tree');
+  });
+
+  // Создать патч для вложенной зависимости было нельзя вовсе: имя пакета с
+  // путём не проходило проверку.
+  test('create makes one, named the way patch-package names them', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    setupFakePackage(TEST_DIR, 'outer', '9.9.9', {'index.js': 'const outer = 1;\n'});
+    const nested = join(TEST_DIR, 'node_modules', 'outer', 'node_modules', 'ms');
+    mkdirSync(join(nested, '..'), {recursive: true});
+    cpSync(join(TEST_DIR, 'node_modules', 'ms'), nested, {recursive: true});
+    overwriteFile(join(nested, 'index.js'), `// NESTED FIX\n${readFileSync(join(nested, 'index.js'), 'utf-8')}`);
+
+    const result = run('create outer/node_modules/ms', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(TEST_DIR, 'patches', 'outer++ms+2.1.2.patch'))).toBe(true);
+
+    const patch = readFileSync(join(TEST_DIR, 'patches', 'outer++ms+2.1.2.patch'), 'utf-8');
+    expect(patch).toContain('a/node_modules/outer/node_modules/ms/index.js');
+    expect(patch).toContain('+// NESTED FIX');
+    // И он ложится обратно: снимаем правку и применяем.
+    overwriteFile(join(nested, 'index.js'), readFileSync(join(TEST_DIR, 'node_modules', 'ms', 'index.js'), 'utf-8'));
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(readFileSync(join(nested, 'index.js'), 'utf-8')).toContain('// NESTED FIX');
+    // Пакет верхнего уровня при этом не тронут.
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'ms', 'index.js'), 'utf-8')).not.toContain('NESTED FIX');
+  });
+
+  test('retarget moves a nested patch to the version installed there', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    setupFakePackage(TEST_DIR, 'outer', '9.9.9', {'index.js': 'const outer = 1;\n'});
+    const nested = join(TEST_DIR, 'node_modules', 'outer', 'node_modules', 'ms');
+    mkdirSync(join(nested, '..'), {recursive: true});
+    cpSync(join(TEST_DIR, 'node_modules', 'ms'), nested, {recursive: true});
+    overwriteFile(join(nested, 'index.js'), `// NESTED FIX\n${readFileSync(join(nested, 'index.js'), 'utf-8')}`);
+    expect(run('create outer/node_modules/ms', TEST_DIR).exitCode).toBe(0);
+
+    // Вложенную копию обновили, верхнюю — нет.
+    rmSync(nested, {force: true, recursive: true});
+    execSync('bun add ms@2.1.3', {cwd: TEST_DIR, stdio: 'pipe'});
+    cpSync(join(TEST_DIR, 'node_modules', 'ms'), nested, {recursive: true});
+
+    const result = run('retarget outer/node_modules/ms', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['outer++ms+2.1.3.patch']);
   });
 });
 

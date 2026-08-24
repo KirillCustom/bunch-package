@@ -39,11 +39,27 @@ export function resolveInsideProject(relativePath: string): string {
   return resolved;
 }
 
+// Каталог пакета, которому принадлежит путь. Идём до самого внутреннего:
+// `node_modules/foo/node_modules/bar/index.js` — это файл bar, а не foo. Пока
+// брался первый, патч вложенной зависимости сверялся с манифестом внешнего
+// пакета и на каждый `bun install` печаталось ложное `version mismatch`.
 export function packageDirectoryOf(relativePath: string): string | null {
   const parts = relativePath.split('/');
-  if (parts[0] !== 'node_modules' || parts.length < 2) return null;
-  const depth = parts[1].startsWith('@') ? 3 : 2;
-  return parts.slice(0, depth).join('/');
+  if (parts[0] !== 'node_modules') return null;
+
+  let at = 0;
+  let directory: string | null = null;
+
+  while (parts[at] === 'node_modules') {
+    // У пакета со скоупом имя занимает два сегмента: `@scope/pkg`.
+    const depth = parts[at + 1]?.startsWith('@') ? 3 : 2;
+    if (parts.length < at + depth) return directory;
+
+    directory = parts.slice(0, at + depth).join('/');
+    at += depth;
+  }
+
+  return directory;
 }
 
 // Как и git, из всех прав отслеживаем только бит исполнения: сравнивать полные
