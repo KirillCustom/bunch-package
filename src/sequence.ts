@@ -1,7 +1,7 @@
 import {existsSync, readFileSync, readdirSync} from 'fs';
 import {join} from 'path';
 import {formatPatchName, orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
-import {PATCHES_DIR} from './paths';
+import {patchesDirectory} from './paths';
 import {isInTree} from './presence';
 import {PlannedOp, TreeContext, executeOps, planTarget} from './plan';
 import {recordedPatches} from './state';
@@ -35,9 +35,9 @@ export function planSequence(packageDir: string, version: string, appendLabel: s
   const named = (sequence?: number, label?: string) =>
     formatPatchName({packageDir, version, sequence, label});
   const prefix = `${packageDir.replace(/\//g, '+')}+${version}`;
-  const siblings = existsSync(PATCHES_DIR)
+  const siblings = existsSync(patchesDirectory())
     ? orderPatchFiles(
-        readdirSync(PATCHES_DIR).filter(
+        readdirSync(patchesDirectory()).filter(
           (f: string) => f.endsWith('.patch') && (f === `${prefix}.patch` || f.startsWith(`${prefix}+`)),
         ),
       )
@@ -98,7 +98,7 @@ export function planSequence(packageDir: string, version: string, appendLabel: s
 export function replayPatches(files: string[], packageDir: string, root: string): void {
   const context: TreeContext = {root, prefix: `node_modules/${packageDir}/`};
   for (const file of files) {
-    const targets = parsePatch(readFileSync(join(PATCHES_DIR, file), 'utf-8'));
+    const targets = parsePatch(readFileSync(join(patchesDirectory(), file), 'utf-8'));
     const ops: PlannedOp[] = [];
     for (const target of targets) {
       try {

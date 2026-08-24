@@ -1,5 +1,5 @@
 import {existsSync, readdirSync} from 'fs';
-import {PATCHES_DIR} from './paths';
+import {patchesDirectory} from './paths';
 
 export interface Hunk {
   oldStart: number;
@@ -287,8 +287,8 @@ export function formatPatchName(parts: {packageDir: string; version: string; seq
 // же порядок: патчи последовательности строятся друг на друге. Отсутствующий
 // каталог — это просто пустой список; что о нём сказать, решает вызывающий.
 export function listPatchFiles(): string[] {
-  if (!existsSync(PATCHES_DIR)) return [];
-  return orderPatchFiles(readdirSync(PATCHES_DIR).filter(file => file.endsWith('.patch')));
+  if (!existsSync(patchesDirectory())) return [];
+  return orderPatchFiles(readdirSync(patchesDirectory()).filter(file => file.endsWith('.patch')));
 }
 
 // Патчи одной последовательности строятся друг на друге, как коммиты, поэтому

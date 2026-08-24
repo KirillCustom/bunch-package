@@ -2,7 +2,7 @@ import {cpSync, existsSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 import {diffTrees, readManifest, requireDiff, validatePackageName, withPristine} from './create';
 import {formatPatchName, listPatchFiles, parsePatchName} from './patch-file';
-import {PATCHES_DIR} from './paths';
+import {patchesDirectory} from './paths';
 import {replayPatches} from './sequence';
 
 // Пакет обновили — патчи остались от старой версии. `apply` о таком только
@@ -32,7 +32,7 @@ export function retargetPatches(packageName: string): void {
   const mine = listPatchFiles().filter(file => parsePatchName(file)?.packageDir === patchDir);
 
   if (mine.length === 0) {
-    throw new Error(`No patches found for ${name} in ${PATCHES_DIR}/`);
+    throw new Error(`No patches found for ${name} in ${patchesDirectory()}/`);
   }
 
   const versions = new Set(mine.map(file => parsePatchName(file)!.version));
@@ -128,10 +128,10 @@ function writeMoved(moved: MovedPatch[], version: string): void {
 
   // Старые файлы убираем только после того, как всё сошлось: полпереноса —
   // состояние, из которого не выбраться.
-  for (const patch of moved) rmSync(join(PATCHES_DIR, patch.from), {force: true});
+  for (const patch of moved) rmSync(join(patchesDirectory(), patch.from), {force: true});
 
   for (const patch of carried) {
-    writeFileSync(join(PATCHES_DIR, patch.to), patch.content);
+    writeFileSync(join(patchesDirectory(), patch.to), patch.content);
     console.log(`  ✅ ${patch.from} → ${patch.to}`);
   }
 

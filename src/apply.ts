@@ -3,16 +3,16 @@ import {join} from 'path';
 import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
 import {LOCK_FILE, withApplyLock} from './lock';
 import {PatchTarget, listPatchFiles, parsePatchName} from './patch-file';
-import {PATCHES_DIR, packageDirectoryOf, stripPathPrefix} from './paths';
+import {patchesDirectory, packageDirectoryOf, stripPathPrefix} from './paths';
 import {executeOps} from './plan';
 import {presenceOf, readTargets} from './presence';
 import {appliedSequences} from './sequence';
 import {recordPatches} from './state';
 
-export function applyPatches(): void {
+export function applyPatches(errorOnWarn = false): void {
   console.log(`🔧 Applying patches...`);
 
-  if (!existsSync(PATCHES_DIR)) {
+  if (!existsSync(patchesDirectory())) {
     console.log('📭 No patches directory found');
     return;
   }
@@ -26,9 +26,12 @@ export function applyPatches(): void {
 
   // Замок держится ровно на время работы, а выход по коду — уже снаружи:
   // process.exit не исполняет finally, и замок пережил бы сам прогон.
-  const failed = withApplyLock(LOCK_FILE, () => applyAll(patchFiles));
+  const {failed, warned} = withApplyLock(LOCK_FILE, () => applyAll(patchFiles));
 
-  if (failed > 0) {
+  // Предупреждение — это «патч лёг, но что-то не сходится»: чаще всего версия
+  // пакета уехала. Для CI такое иногда должно валить сборку, но решает это
+  // вызывающий, а не мы: по умолчанию установка из-за расхождения не падает.
+  if (failed > 0 || (errorOnWarn && warned > 0)) {
     process.exit(1);
   }
 }
@@ -36,9 +39,11 @@ export function applyPatches(): void {
 // Версию сверяем по пакету из заголовков, а не по имени файла патча: при
 // установке через алиас каталог называется иначе, чем пакет, и разбор имени
 // файла уводил проверку к несуществующему манифесту — она молча пропадала.
-function warnVersionMismatch(patchFile: string, targets: PatchTarget[]): void {
+function warnVersionMismatch(patchFile: string, targets: PatchTarget[]): number {
   const patchVersion = parsePatchName(patchFile)?.version;
-  if (patchVersion === undefined) return;
+  if (patchVersion === undefined) return 0;
+
+  let warnings = 0;
 
   const packageDirs = new Set(
     targets
@@ -56,12 +61,16 @@ function warnVersionMismatch(patchFile: string, targets: PatchTarget[]): void {
       installedVersion = JSON.parse(readFileSync(pkgJsonPath, 'utf-8')).version;
     } catch {
       console.log(`  ⚠️  ${patchFile} — cannot read ${pkgJsonPath}, skipping version check`);
+      warnings++;
     }
 
     if (installedVersion !== undefined && installedVersion !== patchVersion) {
       console.log(`  ⚠️  ${patchFile} — version mismatch (patch: ${patchVersion}, installed: ${installedVersion})`);
+      warnings++;
     }
   }
+
+  return warnings;
 }
 
 // Патчи до 1.1.0 писали в заголовки абсолютные пути. Под -p1 первый компонент
@@ -73,8 +82,9 @@ function absolutePathIn(targets: PatchTarget[]): string | undefined {
     .find((path): path is string => path !== null && path.startsWith('/'));
 }
 
-function applyAll(patchFiles: string[]): number {
+function applyAll(patchFiles: string[]): {failed: number; warned: number} {
   let failed = 0;
+  let warned = 0;
 
   // Патчи, оказавшиеся в дереве по итогам прогона: и легшие сейчас, и уже
   // лежавшие. Из них собирается запись о состоянии.
@@ -110,7 +120,7 @@ function applyAll(patchFiles: string[]): number {
       continue;
     }
 
-    warnVersionMismatch(patchFile, targets);
+    warned += warnVersionMismatch(patchFile, targets);
 
     const absolute = absolutePathIn(targets);
     if (absolute !== undefined) {
@@ -160,5 +170,5 @@ function applyAll(patchFiles: string[]): number {
 
   console.log(`\n📊 Summary: ${inTree.length} applied, ${failed} failed`);
 
-  return failed;
+  return {failed, warned};
 }

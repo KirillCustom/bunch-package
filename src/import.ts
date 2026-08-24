@@ -2,7 +2,7 @@ import {existsSync, readFileSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {basename, join} from 'path';
 import {firstPathOutsideNodeModules} from './foreign';
 import {formatPatchName, listPatchFiles, parsePatch} from './patch-file';
-import {PATCHES_DIR} from './paths';
+import {patchesDirectory} from './paths';
 
 // Патчи ходят между инструментами, а форматов в обиходе три. Наш и
 // patch-package'овский совпадают: имя `ms+2.1.2.patch`, пути от корня проекта.
@@ -99,7 +99,7 @@ function collect(): Foreign[] {
     if (typeof value !== 'string') continue;
     const parts = splitNameAndVersion(key);
     const file = basename(value);
-    if (parts === null || !existsSync(join(PATCHES_DIR, file))) continue;
+    if (parts === null || !existsSync(join(patchesDirectory(), file))) continue;
 
     found.push({file, name: parts.name, version: parts.version, key});
     seen.add(file);
@@ -110,7 +110,7 @@ function collect(): Foreign[] {
   for (const file of listPatchFiles()) {
     if (seen.has(file)) continue;
 
-    const targets = parsePatch(readFileSync(join(PATCHES_DIR, file), 'utf-8'));
+    const targets = parsePatch(readFileSync(join(patchesDirectory(), file), 'utf-8'));
     if (targets.length === 0 || firstPathOutsideNodeModules(targets) === undefined) continue;
 
     const parts = fromFileName(file);
@@ -122,7 +122,7 @@ function collect(): Foreign[] {
 }
 
 export function importPatches(): void {
-  if (!existsSync(PATCHES_DIR)) {
+  if (!existsSync(patchesDirectory())) {
     console.log('📭 No patches directory found');
     return;
   }
@@ -138,7 +138,7 @@ export function importPatches(): void {
   const imported: Foreign[] = [];
 
   for (const patch of foreign) {
-    const path = join(PATCHES_DIR, patch.file);
+    const path = join(patchesDirectory(), patch.file);
     const content = readFileSync(path, 'utf-8');
 
     if (firstPathOutsideNodeModules(parsePatch(content)) === undefined) {
@@ -151,7 +151,7 @@ export function importPatches(): void {
 
     // Сначала пишем новый файл, потом убираем старый: половина переноса —
     // состояние, из которого не выбраться.
-    writeFileSync(join(PATCHES_DIR, target), rewritten);
+    writeFileSync(join(patchesDirectory(), target), rewritten);
     if (target !== patch.file) rmSync(path, {force: true});
 
     console.log(`  ✅ ${patch.file} → ${target}`);

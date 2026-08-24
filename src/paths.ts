@@ -1,7 +1,28 @@
 import {chmodSync, mkdirSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {resolve, sep} from 'path';
 
-export const PATCHES_DIR = 'patches';
+// Каталог патчей по умолчанию тот же, что у patch-package, — патчи ходят между
+// инструментами. Монорепозиторию этого мало: воркспейсам нужен свой каталог на
+// каждый, отсюда --patch-dir. Значение живёт здесь, а не передаётся параметром
+// через все команды: его спрашивают девять мест, и девять лишних параметров
+// стоили бы дороже одной переменной, которую выставляют один раз при разборе
+// аргументов.
+const DEFAULT_PATCHES_DIR = 'patches';
+
+let patchesDir = DEFAULT_PATCHES_DIR;
+
+export function patchesDirectory(): string {
+  return patchesDir;
+}
+
+// Каталог приходит из командной строки и попадает прямо в пути записи, поэтому
+// проверяем его тем же правилом, что и пути внутри патча.
+export function usePatchesDirectory(dir: string): void {
+  if (dir === '') throw new Error('--patch-dir needs a directory name');
+
+  resolveInsideProject(dir);
+  patchesDir = dir;
+}
 
 // Файлы пишутся рядом с целью и переставляются поверх неё, поэтому в дереве
 // пакета на мгновение появляется вот такой сосед. Если apply убьют ровно тогда,

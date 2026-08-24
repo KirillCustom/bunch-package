@@ -279,6 +279,48 @@ that a patch is applied; the files are.
 `status` exits `1` when anything is missing from the tree, so it can stand in CI as
 a cheap check that `node_modules` is what the patches say it should be.
 
+### Taking every patch back out
+
+```bash
+bunx bunch-package reverse
+```
+
+Un-applies all of them, top down, and empties the record. Patches bun owns are left
+alone. This is `rebase <package> 0` for the whole project, and it is what to reach
+for when `node_modules` needs to be what the installer produced without reinstalling
+it.
+
+## Options
+
+```
+--patch-dir <dir>                  Where the patches live (default: patches)
+--include <regexp>                 Only these paths go into a new patch
+--exclude <regexp>                 These paths do not
+--case-sensitive-path-filtering    Match those two case-sensitively
+--error-on-warn                    Make `apply` exit 1 after a warning as well
+```
+
+`--patch-dir` applies to every command, and the directory has to be inside the
+project. A monorepo is the reason it exists: each workspace can keep its own.
+
+`--include` and `--exclude` are matched against paths relative to the root of the
+package being patched, and only affect `create`. Case is ignored unless you say
+otherwise. What they leave out is listed rather than silently dropped — a typo in a
+regexp would otherwise look like "nothing changed". The built-in exclusions below
+apply regardless.
+
+`--error-on-warn` is for CI. The warnings it counts are the ones about the package's
+version: the patch was made for another version, or the manifest could not be read
+to check. By default those do not fail the install, because the patch still applied;
+with this flag they do.
+
+`create` takes more than one package at a time (`bunch-package create react-native
+react-native-svg`), and a failure on one does not cancel the others: each is
+reported, and the exit code is `1` if any of them failed.
+
+Anything else starting with `--` is refused rather than ignored, so a mistyped
+`--exclud` cannot quietly widen a patch.
+
 ## What gets excluded?
 
 `bunch-package` automatically excludes, at any depth:
@@ -456,6 +498,10 @@ the same. Everything below was measured by running both, not assumed:
 | Bun's shared install cache | handled | not addressed — its README does not mention bun |
 | npm, yarn, pnpm, workspaces | not attempted | documented |
 | Moving a patch to a newer version of the package | `retarget` | — |
+| Converting patches from the other tool | `import`, for the ones bun writes | — |
+| Dev-only patches (`*.dev.patch`) | — | skipped when the package is absent |
+| `--create-issue` | — | opens a draft issue on GitHub |
+| Unknown command-line option | refused | ignored |
 
 Most of the speed difference is process startup, which is what a `postinstall` hook
 pays on every install. The rest of the table is a difference in behaviour, not a
