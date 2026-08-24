@@ -86,6 +86,17 @@ always enough — raise it with `BUNCH_FETCH_TIMEOUT`, in seconds:
 BUNCH_FETCH_TIMEOUT=300 bunx bunch-package create some-enormous-package
 ```
 
+The pristine copy is kept in a cache of its own — `~/.cache/bunch-package/pristine`
+(`%LOCALAPPDATA%\bunch-package\pristine` on Windows), moved elsewhere with
+`BUNCH_PRISTINE_CACHE`. It is separate from bun's own cache on purpose: bun links
+packages out of that cache, so a file edited in place in `node_modules` would
+change the cached copy too, and the "pristine" package would arrive already
+patched. Deleting the cache is always safe; the next `create` refills it.
+
+Keeping it costs disk and saves the download. Measured on `typescript@5.4.5`
+(31 MB): `create` takes 3.8 s the first time and 0.6 s after that, against 8–10 s
+every single run when the copy was fetched from scratch.
+
 If the resulting diff would be larger than 50 MB, `create` refuses instead of
 writing a truncated patch. That size nearly always means generated or build output
 is being compared rather than source.
@@ -410,12 +421,16 @@ it is worked out from the files, by reading them both ways: how well the hunks' 
 side fits, and how well the new side fits. That is what makes a second `apply` a
 no-op even for a patch that landed at an offset.
 
-The pristine copy is installed with an isolated download cache. This matters: bun
-links installed packages to its shared cache, so editing a file in `node_modules`
-edits the cache entry too — and a "clean" install pulled from that cache would come
-back carrying your change, making the diff come out empty. Patch headers are rebuilt
-from the file paths rather than rewritten in place, so an absolute path that happens
-to appear *inside* a file is left alone.
+The pristine copy is installed with a download cache of its own, and copied out of
+it rather than linked. This matters: bun links installed packages to its shared
+cache, so editing a file in `node_modules` edits the cache entry too — and a "clean"
+install pulled from that cache would come back carrying your change, making the diff
+come out empty. Our own cache is never written to, which is checked by a test rather
+than assumed: patches are replayed onto the pristine copy, and the cache has to come
+out of that byte for byte the same.
+
+Patch headers are rebuilt from the file paths rather than rewritten in place, so an
+absolute path that happens to appear *inside* a file is left alone.
 
 ## Compared with patch-package
 

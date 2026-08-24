@@ -1,5 +1,6 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
 import {execSync, spawn, spawnSync} from 'child_process';
+import {createHash} from 'crypto';
 import {chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree} from './src/create';
 import {withApplyLock} from './src/lock';
@@ -12,6 +13,31 @@ import {join} from 'path';
 function overwriteFile(path: string, content: string) {
   if (existsSync(path)) unlinkSync(path);
   writeFileSync(path, content);
+}
+
+// Дерево целиком одним числом: имя, содержимое, порядок. Нужен там, где
+// проверяется, что каталога не касались вовсе.
+function hashTree(root: string): string {
+  const hash = createHash('sha256');
+
+  const walk = (dir: string, prefix: string) => {
+    for (const entry of readdirSync(dir, {withFileTypes: true}).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = join(dir, entry.name);
+      const relative = prefix + entry.name;
+      if (entry.isDirectory()) {
+        walk(full, `${relative}/`);
+      } else if (entry.isFile()) {
+        hash.update(`F ${relative} `);
+        hash.update(readFileSync(full));
+      } else {
+        hash.update(`? ${relative}`);
+      }
+      hash.update('\n');
+    }
+  };
+
+  walk(root, '');
+  return hash.digest('hex');
 }
 
 // Часть тестов ставит реальный пакет из реестра, а дефолтные 5 секунд bun'а
@@ -146,6 +172,43 @@ rename to node_modules/ms/renamed.js
     // renamed.js заново.
     expect(second).not.toContain('index.js');
     expect(second.split('\n').length).toBeLessThan(20);
+  });
+
+  // Эталон стоит скачивания, и раньше оно повторялось на каждый запуск: кеш
+  // лежал внутри временного каталога, а тот убирается в finally. Измерено на
+  // typescript@5.4.5 (31 МБ): 8–10 с на каждый create против 0,6 с, когда кеш
+  // пережил прогон.
+  test('keeps its pristine cache outside the run', () => {
+    const cache = join(TEST_DIR, 'pristine-cache');
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// patched\n');
+
+    const result = run('create is-number', TEST_DIR, {BUNCH_PRISTINE_CACHE: cache});
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(cache)).toBe(true);
+    expect(readdirSync(cache).length).toBeGreaterThan(0);
+  });
+
+  // В эталон мы пишем: им доводятся предыдущие патчи последовательности. Пойди
+  // такая запись «на месте», а bun разложи эталон hardlink'ами (на Linux это
+  // умолчание) — она изменила бы сам кеш, и следующая «чистая» установка
+  // приехала бы уже пропатченной, а diff ответил бы «No changes detected».
+  // Инвариант: после доводки кеш обязан быть тем же байт в байт.
+  test('never writes into the pristine cache while replaying patches', () => {
+    const cache = join(TEST_DIR, 'pristine-cache');
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    const file = join(TEST_DIR, 'node_modules', 'ms', 'index.js');
+    overwriteFile(file, `// FIRST\n${readFileSync(file, 'utf-8')}`);
+    expect(run('create ms', TEST_DIR, {BUNCH_PRISTINE_CACHE: cache}).exitCode).toBe(0);
+
+    const before = hashTree(cache);
+
+    overwriteFile(file, readFileSync(file, 'utf-8') + '\n// SECOND\n');
+    expect(run('create ms --append second', TEST_DIR, {BUNCH_PRISTINE_CACHE: cache}).exitCode).toBe(0);
+
+    expect(hashTree(cache)).toBe(before);
   });
 
   test('refuses a non-UTF-8 file instead of writing a corrupt patch', () => {
