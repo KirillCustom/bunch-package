@@ -217,7 +217,9 @@ function splitDiffSections(diffOutput: string, cleanRoot: string, modifiedRoot: 
 }
 
 export function validatePackageName(name: string): void {
-  if (!/^(@[\w.-]+\/)?[\w.-]+$/.test(name)) {
+  // Вложенная зависимость называется путём под node_modules:
+  // `foo/node_modules/bar`. Каждое звено проверяем как обычное имя пакета.
+  if (name.split('/node_modules/').some(segment => !/^(@[\w.-]+\/)?[\w.-]+$/.test(segment))) {
     throw new Error(`Invalid package name: ${name}`);
   }
   // Регулярка выше пропускает `.` и `..`: точка входит в \w.-. С таким именем
@@ -724,11 +726,16 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
     );
   }
 
+  // Имя патча говорит, куда он ложится, поэтому для вложенной зависимости в нём
+  // стоит путь, а не имя из манифеста: `foo++bar+1.0.0.patch`. Для обычного
+  // пакета берём имя из манифеста — оно верно и при установке через алиас.
+  const patchDir = packageName.includes('/node_modules/') ? packageName : name;
+
   // Патчи одного пакета образуют последовательность, где каждый следующий
   // отсчитывается от состояния после предыдущих, а не от чистого пакета.
   // Решаем, какой из них пересоздаём, **до** скачивания эталона: отказ здесь
   // возможен, и тратить на него сеть незачем — как и с проверкой diff.
-  const plan = planSequence(name, version, appendLabel);
+  const plan = planSequence(patchDir, version, appendLabel);
 
   withPristine(name, version, cleanPackagePath => {
     // Эталон доводится уже существующими патчами — иначе новый патч нёс бы в

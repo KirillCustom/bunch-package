@@ -237,7 +237,7 @@ export function sideIsEmpty(hunk: Hunk, side: 'old' | 'new'): boolean {
 // Версия сама может содержать `+` (метаданные сборки), поэтому разбираем справа:
 // номер — ровно три цифры, метка без `+`, остальное слева — пакет и версия.
 export interface PatchName {
-  packageDir: string; // как каталог в node_modules, со слэшем для скоупа
+  packageDir: string; // как каталог в node_modules: `@scope/pkg`, `outer/node_modules/inner`
   version: string;
   sequence: number; // 0 — одиночный патч вне последовательности
   label: string;
@@ -253,18 +253,32 @@ export function parsePatchName(file: string): PatchName | null {
   if (separator === -1) return null;
 
   return {
-    packageDir: head.slice(0, separator).replace(/\+/g, '/'),
+    packageDir: decodePackageDir(head.slice(0, separator)),
     version: head.slice(separator + 1),
     sequence: sequenced ? Number(sequenced[2]) : 0,
     label: sequenced ? sequenced[3] : '',
   };
 }
 
+// Вложенную зависимость patch-package записывает через двойной плюс:
+// `foo++bar+1.0.0.patch` — это `node_modules/foo/node_modules/bar`. Слэш внутри
+// имени со скоупом при этом кодируется одиночным плюсом, поэтому разделители
+// разбираем до того, как трогать имена.
+const NESTED = '/node_modules/';
+
+function decodePackageDir(head: string): string {
+  return head.split('++').map(part => part.replace(/\+/g, '/')).join(NESTED);
+}
+
+function encodePackageDir(packageDir: string): string {
+  return packageDir.split(NESTED).map(part => part.replace(/\//g, '+')).join('++');
+}
+
 // Обратная к parsePatchName: формат имени описан выше, и собирать его руками в
 // каждой команде значило бы держать разбор и сборку в разных файлах — они бы
 // разъехались молча, а признаком стал бы патч, которого никто больше не узнаёт.
 export function formatPatchName(parts: {packageDir: string; version: string; sequence?: number; label?: string}): string {
-  const head = `${parts.packageDir.replace(/\//g, '+')}+${parts.version}`;
+  const head = `${encodePackageDir(parts.packageDir)}+${parts.version}`;
   if (!parts.sequence || parts.label === undefined || parts.label === '') return `${head}.patch`;
   return `${head}+${String(parts.sequence).padStart(3, '0')}+${parts.label}.patch`;
 }
