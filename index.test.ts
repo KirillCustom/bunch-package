@@ -1238,6 +1238,26 @@ describe('nested dependencies', () => {
     // Пакет верхнего уровня при этом не тронут.
     expect(readFileSync(join(TEST_DIR, 'node_modules', 'ms', 'index.js'), 'utf-8')).not.toContain('NESTED FIX');
   });
+
+  test('retarget moves a nested patch to the version installed there', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    setupFakePackage(TEST_DIR, 'outer', '9.9.9', {'index.js': 'const outer = 1;\n'});
+    const nested = join(TEST_DIR, 'node_modules', 'outer', 'node_modules', 'ms');
+    mkdirSync(join(nested, '..'), {recursive: true});
+    cpSync(join(TEST_DIR, 'node_modules', 'ms'), nested, {recursive: true});
+    overwriteFile(join(nested, 'index.js'), `// NESTED FIX\n${readFileSync(join(nested, 'index.js'), 'utf-8')}`);
+    expect(run('create outer/node_modules/ms', TEST_DIR).exitCode).toBe(0);
+
+    // Вложенную копию обновили, верхнюю — нет.
+    rmSync(nested, {force: true, recursive: true});
+    execSync('bun add ms@2.1.3', {cwd: TEST_DIR, stdio: 'pipe'});
+    cpSync(join(TEST_DIR, 'node_modules', 'ms'), nested, {recursive: true});
+
+    const result = run('retarget outer/node_modules/ms', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['outer++ms+2.1.3.patch']);
+  });
 });
 
 describe('CLI usage', () => {
