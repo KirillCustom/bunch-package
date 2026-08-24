@@ -470,6 +470,21 @@ applying it as if the paths were ours would write into the project's own files.
 `create` refuses a package bun already patches, since bun's patch is in
 `node_modules` but not in the pristine copy and would end up inside the new patch.
 
+If you would rather this tool owned them, `bunch-package import` converts them:
+it renames `ms@2.1.2.patch` to `ms+2.1.2.patch` (`@vercel%2Fog@0.4.1.patch` to
+`@vercel+og+0.4.1.patch`), rewrites the paths inside to start from the project root,
+drops the `.bun-tag-…` file bun adds while you edit, and removes the entry from
+`patchedDependencies` so bun stops looking for a file that is no longer there.
+Patches written by `patch-package` need no conversion — that format is this one.
+
+```bash
+bunx bunch-package import
+```
+
+The conversion is checked against bun itself: a patch made with `bun patch --commit`
+and then imported produces, through `bunch-package apply`, the same bytes bun's own
+installer produced.
+
 What the two tools do is not the same job. Measured on bun 1.4.0: `bun install`
 applies a patch by line number without checking the lines it claims to remove — a
 hunk deleting a line that is not in the file still rewrites whatever sits at that

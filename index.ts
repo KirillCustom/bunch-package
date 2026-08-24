@@ -2,6 +2,7 @@
 
 import {applyPatches} from './src/apply';
 import {createPatch} from './src/create';
+import {importPatches} from './src/import';
 import {rebasePatches} from './src/rebase';
 import {retargetPatches} from './src/retarget';
 import {showStatus} from './src/status';
@@ -62,6 +63,10 @@ try {
       showStatus();
       break;
 
+    case 'import':
+      importPatches();
+      break;
+
     case 'rebase': {
       // Цель обязательна и без умолчания: «откатить на что-нибудь» — не команда.
       const usage = 'bunch-package rebase <package-name> <patch-file|number|0>';
@@ -87,6 +92,7 @@ Commands:
   bunch-package status                            Show which patches are in the tree
   bunch-package rebase <package> <patch|0>        Un-apply the patches that sit on top of one
   bunch-package retarget <package>                Move its patches to the installed version
+  bunch-package import                            Convert patches written by \`bun patch\` to this format
     `);
   }
 } catch (error: any) {
