@@ -3,7 +3,8 @@ import {join} from 'path';
 import {LOCK_FILE, withApplyLock} from './lock';
 import {applyHunks} from './hunks';
 import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch-file';
-import {PATCHES_DIR} from './paths';
+import {patchesAppliedByBun} from './foreign';
+import {patchesDirectory} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
 import {presenceOf, readTargets} from './presence';
 import {recordPatches, recordedPatches} from './state';
@@ -15,15 +16,15 @@ import {recordPatches, recordedPatches} from './state';
 // Откат — применение перевёрнутого патча тем же кодом, что и обычное
 // применение: см. invertTarget().
 export function rebasePatches(packageName: string, target: string): void {
-  if (!existsSync(PATCHES_DIR)) {
-    throw new Error(`No ${PATCHES_DIR}/ directory — there is nothing to rebase`);
+  if (!existsSync(patchesDirectory())) {
+    throw new Error(`No ${patchesDirectory()}/ directory — there is nothing to rebase`);
   }
 
   const all = listPatchFiles();
   const mine = all.filter(file => parsePatchName(file)?.packageDir === packageName);
 
   if (mine.length === 0) {
-    throw new Error(`No patches found for ${packageName} in ${PATCHES_DIR}/`);
+    throw new Error(`No patches found for ${packageName} in ${patchesDirectory()}/`);
   }
 
   const keep = resolveTarget(mine, target, packageName);
@@ -67,6 +68,35 @@ export function rebasePatches(packageName: string, target: string): void {
   for (const [command, purpose] of next) console.log(`  ${command.padEnd(width)}${purpose}`);
 }
 
+// Снять всё — отдельная команда, а не rebase с особым аргументом: rebase просит
+// пакет, а «снять все патчи проекта» пакета не называет. У patch-package это
+// `--reverse`, и повод тот же: вернуть node_modules к тому, что поставил
+// установщик, не переустанавливая их.
+export function reverseAll(): void {
+  const all = listPatchFiles().filter(file => !patchesAppliedByBun().has(file));
+
+  if (all.length === 0) {
+    console.log('📭 No patches to un-apply');
+    return;
+  }
+
+  console.log(`🔧 Un-applying ${all.length} patch(es)...`);
+
+  // Сверху вниз: патчи последовательности лежат друг на друге.
+  const undo = [...all].reverse();
+  const removed = withApplyLock(LOCK_FILE, () => unApply(undo));
+
+  recordPatches([...recordedPatches().keys()].filter(file => !undo.slice(0, removed).includes(file)));
+
+  console.log('');
+  console.log(`📊 ${removed} of ${undo.length} un-applied`);
+
+  if (removed < undo.length) {
+    console.log(`⚠️  Stopped at ${undo[removed]}; it and everything under it are untouched.`);
+    process.exit(1);
+  }
+}
+
 // Цель называют как удобно: именем файла, номером в последовательности, меткой
 // или нулём — как у patch-package, чтобы привычка переносилась вместе с патчами.
 function resolveTarget(mine: string[], target: string, packageName: string): number {
@@ -74,7 +104,7 @@ function resolveTarget(mine: string[], target: string, packageName: string): num
 
   const index = mine.findIndex(file => {
     const parsed = parsePatchName(file);
-    if (file === target || join(PATCHES_DIR, file) === target) return true;
+    if (file === target || join(patchesDirectory(), file) === target) return true;
     if (parsed === null || parsed.sequence === 0) return false;
 
     // Номер, метка и то, как патч выглядит в имени файла — `001+initial`.

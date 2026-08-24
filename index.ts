@@ -3,37 +3,14 @@
 import {applyPatches} from './src/apply';
 import {createPatch} from './src/create';
 import {importPatches} from './src/import';
-import {rebasePatches} from './src/rebase';
+import {filtersOf, parseOptions} from './src/options';
+import {usePatchesDirectory} from './src/paths';
+import {rebasePatches, reverseAll} from './src/rebase';
 import {retargetPatches} from './src/retarget';
 import {showStatus} from './src/status';
 
 // Main
 const command = process.argv[2];
-const arg = process.argv[3];
-
-// --append <метка> заводит следующий патч в последовательности вместо того,
-// чтобы переписать существующий.
-function parseAppendLabel(argv: string[]): string | null {
-  const at = argv.indexOf('--append');
-  if (at === -1) return null;
-
-  const label = argv[at + 1];
-  if (!label || !/^[\w.-]+$/.test(label)) {
-    console.error('❌ --append needs a name made of letters, digits, dots, dashes or underscores');
-    process.exit(1);
-  }
-  return label;
-}
-
-// Имя пакета требуют три команды из пяти, и одинаково: пустое место — забытый
-// аргумент, `--flag` на этом месте — тоже он, только флаг уехал вперёд имени.
-function requirePackageName(usage: string): string {
-  if (!arg || arg.startsWith('--')) {
-    console.error(`❌ Usage: ${usage}`);
-    process.exit(1);
-  }
-  return arg;
-}
 
 // Сообщения об отказах написаны, чтобы их прочитал человек: «поставьте
 // diffutils», «поднимите BUNCH_FETCH_TIMEOUT». Без этой обёртки они выходили
@@ -43,36 +20,66 @@ function requirePackageName(usage: string): string {
 // Обёртка одна на весь разбор: пока их было по одной на команду, следующая
 // команда легко оставалась без своей, и признаком этого был бы стек.
 try {
+  const options = parseOptions(process.argv.slice(3));
+  if (options.patchDir !== null) usePatchesDirectory(options.patchDir);
+
+  // Имя пакета требуют три команды из шести, и одинаково: пустое место —
+  // забытый аргумент.
+  const requirePackages = (usage: string): string[] => {
+    if (options.packages.length === 0) {
+      console.error(`❌ Usage: ${usage}`);
+      process.exit(1);
+    }
+    return options.packages;
+  };
+
   switch (command) {
-    case 'create':
-      createPatch(
-        requirePackageName('bunch-package create <package-name> [--append <name>]'),
-        parseAppendLabel(process.argv),
-      );
+    case 'create': {
+      // Несколько пакетов за раз: правка часто задевает пару соседних, и
+      // разбираться, какой из них не сошёлся, лучше по общему отчёту, чем по
+      // трём запускам подряд. Поэтому отказ на одном не отменяет остальных.
+      const names = requirePackages('bunch-package create <package-name>... [--append <name>]');
+      const filters = filtersOf(options);
+      let failed = 0;
+
+      for (const name of names) {
+        try {
+          createPatch(name, options.append, filters);
+        } catch (error: any) {
+          console.error(`❌ ${error?.message ?? error}`);
+          failed++;
+        }
+      }
+
+      if (failed > 0) process.exit(1);
       break;
+    }
 
     case 'apply':
-      applyPatches();
+      applyPatches(options.errorOnWarn);
       break;
 
-    case 'retarget':
-      retargetPatches(requirePackageName('bunch-package retarget <package-name>'));
-      break;
-
-    case 'status':
-      showStatus();
+    case 'reverse':
+      reverseAll();
       break;
 
     case 'import':
       importPatches();
       break;
 
+    case 'retarget':
+      retargetPatches(requirePackages('bunch-package retarget <package-name>')[0]);
+      break;
+
+    case 'status':
+      showStatus();
+      break;
+
     case 'rebase': {
       // Цель обязательна и без умолчания: «откатить на что-нибудь» — не команда.
       const usage = 'bunch-package rebase <package-name> <patch-file|number|0>';
-      const packageName = requirePackageName(usage);
-      const target = process.argv[4];
-      if (!target) {
+      const [packageName, target] = requirePackages(usage);
+      if (target === undefined) {
         console.error(`❌ Usage: ${usage}`);
         process.exit(1);
       }
@@ -86,13 +93,20 @@ try {
 🎯 bunch-package - Patch management for Bun
 
 Commands:
-  bunch-package create <package>                  Create or update a patch
+  bunch-package create <package>...               Create or update a patch
   bunch-package create <package> --append <name>  Add another patch to the package
   bunch-package apply                             Apply all patches
+  bunch-package reverse                           Un-apply all of them
   bunch-package status                            Show which patches are in the tree
   bunch-package rebase <package> <patch|0>        Un-apply the patches that sit on top of one
   bunch-package retarget <package>                Move its patches to the installed version
   bunch-package import                            Convert patches written by \`bun patch\` to this format
+
+Options:
+  --patch-dir <dir>                               Where the patches live (default: patches)
+  --include <regexp>, --exclude <regexp>          Which paths go into a patch, from the package root
+  --case-sensitive-path-filtering                 Match those two case-sensitively
+  --error-on-warn                                 Make \`apply\` exit 1 after a warning too
     `);
   }
 } catch (error: any) {

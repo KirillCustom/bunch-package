@@ -4,7 +4,8 @@ import {existsSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync,
 import {homedir} from 'os';
 import {join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
-import {PATCHES_DIR, TEMP_WRITE_SUFFIX, ensureDir, isExecutable} from './paths';
+import {PathFilters, pathAllowed} from './options';
+import {patchesDirectory, TEMP_WRITE_SUFFIX, ensureDir, isExecutable} from './paths';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
@@ -534,6 +535,16 @@ function reportLinkDifferences(differences: LinkDifference[]): void {
   );
 }
 
+// Отсеянное фильтрами называем поимённо: человек сам их задал, но «ничего не
+// изменилось» после --include с опечаткой выглядит как отсутствие правок.
+function reportFiltered(filtered: DiffSection[]): void {
+  reportList(
+    `⏭  ${filtered.length} path(s) left out by --include/--exclude:`,
+    filtered,
+    section => section.relativePath,
+  );
+}
+
 function reportSkipped(skipped: DiffSection[]): void {
   reportList(
     `⏭  Skipped ${skipped.length} build-artifact path(s):`,
@@ -614,15 +625,15 @@ function writePatch(plan: SequencePlan, patchContent: string): void {
     console.log(`   This might include binary files. Consider adding more excludes.`);
   }
 
-  ensureDir(PATCHES_DIR);
+  ensureDir(patchesDirectory());
 
   if (plan.renameFrom !== null) {
     // Одиночный патч становится первым в последовательности.
-    renameSync(join(PATCHES_DIR, plan.renameFrom), join(PATCHES_DIR, plan.renameTo!));
+    renameSync(join(patchesDirectory(), plan.renameFrom), join(patchesDirectory(), plan.renameTo!));
     console.log(`🔢 ${plan.renameFrom} → ${plan.renameTo}`);
   }
 
-  const patchFilePath = join(PATCHES_DIR, plan.outputName);
+  const patchFilePath = join(patchesDirectory(), plan.outputName);
 
   // Последний рубеж: имя собрано из чужого манифеста, и уехать за пределы
   // patches/ оно не должно ни при каких значениях полей.
@@ -632,9 +643,9 @@ function writePatch(plan: SequencePlan, patchContent: string): void {
   // отдать по `<имя>@<версия>` — то есть без слэшей и точек-точек в принципе.
   // Проверено мутацией: снимаешь этот if — сюита остаётся зелёной. Это второй
   // замок на той же двери, и оставлен он намеренно.
-  const patchesRoot = resolve(process.cwd(), PATCHES_DIR);
+  const patchesRoot = resolve(process.cwd(), patchesDirectory());
   if (!resolve(patchFilePath).startsWith(patchesRoot + sep)) {
-    throw new Error(`Refusing to write ${plan.outputName} outside ${PATCHES_DIR}/`);
+    throw new Error(`Refusing to write ${plan.outputName} outside ${patchesDirectory()}/`);
   }
 
   writeFileSync(patchFilePath, patchContent);
@@ -655,6 +666,7 @@ export interface TreeDiff {
   content: string; // текст патча; пустой, если переносить нечего
   kept: DiffSection[];
   skipped: DiffSection[];
+  filtered: DiffSection[]; // отсеянные --include/--exclude
   linkDifferences: LinkDifference[];
   modeOnly: string[];
   rawPatch: string;
@@ -666,6 +678,7 @@ export function diffTrees(
   packageName: string,
   name: string,
   version: string,
+  filters: PathFilters = {include: null, exclude: null},
 ): TreeDiff {
   // Деревья обходим до диффа: список расхождений по симлинкам нужен разбору
   // кода возврата самого diff.
@@ -684,25 +697,33 @@ export function diffTrees(
   const sections = splitDiffSections(rawPatch, cleanRoot, modifiedRoot);
   const kept: DiffSection[] = [];
   const skipped: DiffSection[] = [];
+  const filtered: DiffSection[] = [];
+
   for (const section of sections) {
-    (isBuildArtifact(section.relativePath) ? skipped : kept).push(section);
+    if (isBuildArtifact(section.relativePath)) skipped.push(section);
+    else if (!pathAllowed(section.relativePath, filters)) filtered.push(section);
+    else kept.push(section);
   }
 
   const modeOnly = findModeOnlyChanges(
     cleanTree.executable,
     modifiedTree.executable,
     new Set(kept.map(section => section.relativePath)),
-  );
+  ).filter(relativePath => pathAllowed(relativePath, filters));
 
   const content =
     kept.length === 0 && modeOnly.length === 0
       ? ''
       : renderPatch(packageName, kept, modeOnly, cleanTree.executable, modifiedTree.executable);
 
-  return {content, kept, skipped, linkDifferences, modeOnly, rawPatch};
+  return {content, kept, skipped, filtered, linkDifferences, modeOnly, rawPatch};
 }
 
-export function createPatch(packageName: string, appendLabel: string | null = null): void {
+export function createPatch(
+  packageName: string,
+  appendLabel: string | null = null,
+  filters: PathFilters = {include: null, exclude: null},
+): void {
   validatePackageName(packageName);
   requireDiff();
   console.log(`📦 Creating patch for ${packageName}...`);
@@ -746,15 +767,19 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
     }
 
     console.log(`🔍 Generating diff...`);
-    const diff = diffTrees(cleanPackagePath, packagePath, packageName, name, version);
+    const diff = diffTrees(cleanPackagePath, packagePath, packageName, name, version, filters);
     reportBinaryFiles(diff.rawPatch, packagePath);
     reportLinkDifferences(diff.linkDifferences);
     reportSkipped(diff.skipped);
+    reportFiltered(diff.filtered);
 
     if (diff.content === '') {
       if (diff.linkDifferences.length > 0) {
         console.log('⚠️  Nothing patchable changed — only symbolic links did');
         console.log(`\n💡 Symbolic links cannot travel in a patch. Everything else in ${packagePath} matches the pristine copy.`);
+      } else if (diff.filtered.length > 0) {
+        console.log('⚠️  Everything that changed was left out by --include/--exclude');
+        console.log(`\n💡 The paths are listed above; they are matched against the package root.`);
       } else if (diff.skipped.length > 0) {
         console.log('⚠️  No changes outside build artifacts');
         console.log(`\n💡 Everything you changed is under a build directory — those are not patchable.`);

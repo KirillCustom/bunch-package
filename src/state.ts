@@ -2,7 +2,7 @@ import {createHash} from 'crypto';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 import {parsePatchName} from './patch-file';
-import {PATCHES_DIR, atomicWrite} from './paths';
+import {patchesDirectory, atomicWrite} from './paths';
 
 // Запись о том, что и когда легло в дерево. Нужна затем, чтобы на вопрос «что
 // сейчас в node_modules» был ответ, не требующий разбирать патчи глазами.
@@ -66,7 +66,7 @@ export function recordPatches(inTree: string[]): void {
 
   const patches: RecordedPatch[] = inTree.map(file => {
     const parsed = parsePatchName(file);
-    const sha256 = hashPatchFile(join(PATCHES_DIR, file));
+    const sha256 = hashPatchFile(join(patchesDirectory(), file));
     const before = previous.get(file);
 
     return {

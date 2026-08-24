@@ -1,7 +1,7 @@
 import {readFileSync} from 'fs';
 import {join} from 'path';
 import {PatchTarget, parsePatch} from './patch-file';
-import {PATCHES_DIR} from './paths';
+import {patchesDirectory} from './paths';
 import {PlannedOp, planTarget} from './plan';
 
 // Один вопрос — «что сейчас с этим патчем относительно дерева» — и один ответ на
@@ -18,7 +18,7 @@ export type Presence =
 export function readTargets(patchFile: string): PatchTarget[] | {error: string} {
   let content: string;
   try {
-    content = readFileSync(join(PATCHES_DIR, patchFile), 'utf-8');
+    content = readFileSync(join(patchesDirectory(), patchFile), 'utf-8');
   } catch (error: any) {
     return {error: `cannot read patch file: ${error.message}`};
   }

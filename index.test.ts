@@ -1260,6 +1260,140 @@ describe('nested dependencies', () => {
   });
 });
 
+// Опции, которые есть у patch-package и которых у нас не было: свой каталог
+// патчей, фильтры путей при создании, строгий код возврата на предупреждении,
+// снятие всех патчей разом и несколько пакетов за один вызов.
+describe('command-line options', () => {
+  const PATCH = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+
+  test('--patch-dir puts patches somewhere else, and finds them there', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'vendor-patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'vendor-patches', 'test-lib+1.0.0.patch'), PATCH);
+
+    // Каталог по умолчанию пуст, так что без флага применять нечего.
+    expect(run('apply', TEST_DIR).stdout).toContain('No patches directory found');
+
+    const applied = run('apply --patch-dir vendor-patches', TEST_DIR);
+    expect(applied.exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 2;\n');
+
+    const status = run('status --patch-dir vendor-patches', TEST_DIR);
+    expect(status.exitCode).toBe(0);
+    expect(status.stdout).toContain('vendor-patches/');
+  });
+
+  test('--patch-dir refuses a directory outside the project', () => {
+    const result = run('apply --patch-dir ../elsewhere', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('outside the project');
+  });
+
+  test('--exclude leaves paths out of a new patch, --include keeps only some', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    const pkg = join(TEST_DIR, 'node_modules', 'ms');
+    overwriteFile(join(pkg, 'index.js'), `// INDEX FIX\n${readFileSync(join(pkg, 'index.js'), 'utf-8')}`);
+    overwriteFile(join(pkg, 'license.md'), `// LICENSE FIX\n${readFileSync(join(pkg, 'license.md'), 'utf-8')}`);
+
+    const excluded = run('create ms --exclude license', TEST_DIR);
+    expect(excluded.exitCode).toBe(0);
+    expect(excluded.stdout).toContain('left out by --include/--exclude');
+    let patch = readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'), 'utf-8');
+    expect(patch).toContain('INDEX FIX');
+    expect(patch).not.toContain('LICENSE FIX');
+
+    rmSync(join(TEST_DIR, 'patches'), {force: true, recursive: true});
+
+    expect(run('create ms --include license', TEST_DIR).exitCode).toBe(0);
+    patch = readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'), 'utf-8');
+    expect(patch).toContain('LICENSE FIX');
+    expect(patch).not.toContain('INDEX FIX');
+  });
+
+  test('path filters ignore case until --case-sensitive-path-filtering says otherwise', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    const pkg = join(TEST_DIR, 'node_modules', 'ms');
+    overwriteFile(join(pkg, 'license.md'), `// LICENSE FIX\n${readFileSync(join(pkg, 'license.md'), 'utf-8')}`);
+
+    // Файл называется license.md, шаблон — LICENSE: без флага регистр не важен,
+    // и отсеивается всё, что менялось.
+    expect(run('create ms --exclude LICENSE', TEST_DIR).stdout).toContain(
+      'Everything that changed was left out by --include/--exclude',
+    );
+
+    const sensitive = run('create ms --exclude LICENSE --case-sensitive-path-filtering', TEST_DIR);
+    expect(sensitive.exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'), 'utf-8')).toContain('LICENSE FIX');
+  });
+
+  test('--error-on-warn turns a version mismatch into a failed install', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '2.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), PATCH);
+
+    const quiet = run('apply', TEST_DIR);
+    expect(quiet.stdout).toContain('version mismatch');
+    // Патч лёг: расхождение версии само по себе установку не валит.
+    expect(quiet.exitCode).toBe(0);
+
+    // Второй прогон предупреждает так же, а патч уже в дереве.
+    const strict = run('apply --error-on-warn', TEST_DIR);
+    expect(strict.stdout).toContain('version mismatch');
+    expect(strict.exitCode).toBe(1);
+  });
+
+  test('reverse takes every patch back out', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    setupFakePackage(TEST_DIR, 'other-lib', '1.0.0', {'index.js': 'const b = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), PATCH);
+    writeFileSync(join(TEST_DIR, 'patches', 'other-lib+1.0.0.patch'), `--- a/node_modules/other-lib/index.js
++++ b/node_modules/other-lib/index.js
+@@ -1 +1 @@
+-const b = 1;
++const b = 2;
+`);
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+    const result = run('reverse', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('2 of 2 un-applied');
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 1;\n');
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'other-lib', 'index.js'), 'utf-8')).toBe('const b = 1;\n');
+    // Запись о применённом больше ничего не утверждает.
+    const state = JSON.parse(readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8'));
+    expect(state.patches).toEqual([]);
+  });
+
+  test('create takes several packages, and one failure does not cancel the rest', () => {
+    execSync('bun add ms@2.1.2 is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    for (const name of ['ms', 'is-number']) {
+      const file = join(TEST_DIR, 'node_modules', name, 'index.js');
+      overwriteFile(file, `// FIX ${name}\n${readFileSync(file, 'utf-8')}`);
+    }
+
+    const result = run('create ms nonexistent-package is-number', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('nonexistent-package not found');
+    expect(readdirSync(join(TEST_DIR, 'patches')).sort()).toEqual(['is-number+7.0.0.patch', 'ms+2.1.2.patch']);
+  });
+
+  test('refuses an option it does not know instead of ignoring it', () => {
+    const result = run('apply --exclud license', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Unknown option: --exclud');
+  });
+});
+
 describe('CLI usage', () => {
   test('shows help with no arguments', () => {
     const result = run('', TEST_DIR);
