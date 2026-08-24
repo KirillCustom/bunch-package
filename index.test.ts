@@ -1042,6 +1042,111 @@ index c4498bcc..74988d81 100644
   });
 });
 
+// Форматов в обиходе три. Наш и patch-package'овский совпадают, а bun пишет
+// иначе: имя `ms@2.1.2.patch` (у scoped-пакетов слэш закодирован как %2F) и пути
+// от корня пакета. Десяток таких файлов руками никто не перепишет.
+describe('import', () => {
+  const BUN_PATCH = `diff --git a/node_modules/@scope/pkg/.bun-tag-abc123 b/.bun-tag-abc123
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/index.js b/index.js
+index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644
+--- a/index.js
++++ b/index.js
+@@ -1,1 +1,1 @@
+-const a = 1;
++const a = 2;
+`;
+
+  function setupBunPatch() {
+    setupFakePackage(TEST_DIR, '@scope/pkg', '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify(
+        {
+          name: 'test-project',
+          version: '1.0.0',
+          patchedDependencies: {'@scope/pkg@1.0.0': 'patches/@scope%2Fpkg@1.0.0.patch'},
+        },
+        null,
+        2,
+      ),
+    );
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', '@scope%2Fpkg@1.0.0.patch'), BUN_PATCH);
+  }
+
+  test('converts a bun patch, name and paths, and hands it to apply', () => {
+    setupBunPatch();
+
+    const result = run('import', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['@scope+pkg+1.0.0.patch']);
+
+    const converted = readFileSync(join(TEST_DIR, 'patches', '@scope+pkg+1.0.0.patch'), 'utf-8');
+    expect(converted).toContain('--- a/node_modules/@scope/pkg/index.js');
+    expect(converted).toContain('+++ b/node_modules/@scope/pkg/index.js');
+    // Служебный файл, который bun заводит себе на время правки, в дереве пакета
+    // делать нечего.
+    expect(converted).not.toContain('.bun-tag-');
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', '@scope', 'pkg', 'index.js'), 'utf-8')).toBe('const a = 2;\n');
+    expect(existsSync(join(TEST_DIR, 'node_modules', '@scope', 'pkg', '.bun-tag-abc123'))).toBe(false);
+  });
+
+  test('takes the patch out of patchedDependencies, so bun stops looking for it', () => {
+    setupBunPatch();
+
+    run('import', TEST_DIR);
+
+    const manifest = JSON.parse(readFileSync(join(TEST_DIR, 'package.json'), 'utf-8'));
+    expect(manifest.patchedDependencies).toBeUndefined();
+    // Остальное в манифесте не тронуто.
+    expect(manifest.name).toBe('test-project');
+  });
+
+  test('says so when there is nothing to import', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`);
+
+    const result = run('import', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Nothing to import');
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['test-lib+1.0.0.patch']);
+  });
+
+  // Настоящий `bun patch`, а не рукописный образец: формат его патча — то, что
+  // мы обещаем понимать, и меняет его bun, а не мы.
+  test('a patch made by bun itself ends up applying the same bytes', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    execSync('bun patch ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    const file = join(TEST_DIR, 'node_modules', 'ms', 'index.js');
+    overwriteFile(file, readFileSync(file, 'utf-8').replace('var s = 1000;', 'var s = 1000; // MY FIX'));
+    execSync('bun patch --commit node_modules/ms', {cwd: TEST_DIR, stdio: 'pipe'});
+    const byBun = readFileSync(file, 'utf-8');
+
+    expect(run('import', TEST_DIR).exitCode).toBe(0);
+    expect(existsSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'))).toBe(true);
+
+    // Чистая установка: bun больше не патчит, потому что записи о патче нет.
+    rmSync(join(TEST_DIR, 'node_modules'), {force: true, recursive: true});
+    execSync('bun install', {cwd: TEST_DIR, stdio: 'pipe'});
+    expect(readFileSync(file, 'utf-8')).not.toContain('MY FIX');
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(readFileSync(file, 'utf-8')).toBe(byBun);
+  });
+});
+
 describe('CLI usage', () => {
   test('shows help with no arguments', () => {
     const result = run('', TEST_DIR);

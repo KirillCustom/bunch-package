@@ -719,7 +719,8 @@ export function createPatch(packageName: string, appendLabel: string | null = nu
     throw new Error(
       `${name} is already patched by bun through patchedDependencies.\n` +
         `   That patch is in node_modules but not in the pristine copy, so a patch created now\n` +
-        `   would carry bun's changes too. Remove the entry from patchedDependencies first.`,
+        `   would carry bun's changes too. Run \`bunch-package import\` to take it over, or remove\n` +
+        `   the entry from patchedDependencies yourself.`,
     );
   }
 
