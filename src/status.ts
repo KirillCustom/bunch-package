@@ -1,5 +1,6 @@
 import {existsSync} from 'fs';
 import {join} from 'path';
+import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
 import {listPatchFiles} from './patch-file';
 import {PATCHES_DIR} from './paths';
 import {Presence, presenceOf, readTargets} from './presence';
@@ -15,6 +16,11 @@ function shownPresence(patchFile: string, wholeSequenceApplied: Set<string>): Sh
 
   const targets = readTargets(patchFile);
   if ('error' in targets) return {kind: 'unreadable', reason: targets.error};
+
+  const outside = firstPathOutsideNodeModules(targets);
+  if (outside !== undefined) {
+    return {kind: 'does-not-fit', reason: `${outside} is not inside node_modules/ — this patch is not ours`};
+  }
 
   return presenceOf(targets);
 }
@@ -43,9 +49,14 @@ export function showStatus(): void {
     return;
   }
 
-  const wholeSequenceApplied = appliedSequences(patchFiles);
+  // Патчи bun лежат в том же каталоге, но применяет их установщик. Считать их
+  // своими нельзя, а молчать о них — значит отвечать не на весь вопрос «что
+  // сейчас в дереве».
+  const byBun = patchesAppliedByBun();
+  const ours = patchFiles.filter(file => !byBun.has(file));
+  const wholeSequenceApplied = appliedSequences(ours);
 
-  console.log(`📋 ${patchFiles.length} patch(es) in ${PATCHES_DIR}/`);
+  console.log(`📋 ${ours.length} patch(es) in ${PATCHES_DIR}/`);
   if (state === null) {
     console.log(`   No state file yet (${STATE_FILE}) — it is written by \`apply\`.`);
   }
@@ -53,7 +64,7 @@ export function showStatus(): void {
 
   let missing = 0;
 
-  for (const patchFile of patchFiles) {
+  for (const patchFile of ours) {
     const presence = shownPresence(patchFile, wholeSequenceApplied);
     const record = describeRecord(recorded.get(patchFile), patchFile);
 
@@ -71,9 +82,16 @@ export function showStatus(): void {
     }
   }
 
+  const bunOwned = patchFiles.filter(file => byBun.has(file));
+  if (bunOwned.length > 0) {
+    console.log('');
+    console.log(`🥟 ${bunOwned.length} patch(es) applied by bun itself (patchedDependencies):`);
+    for (const file of bunOwned) console.log(`   ${file}`);
+  }
+
   // Записи о патчах, которых в patches/ больше нет: сам файл удалили, а
   // изменения, скорее всего, так и лежат в node_modules.
-  const orphans = [...recorded.keys()].filter(file => !patchFiles.includes(file));
+  const orphans = [...recorded.keys()].filter(file => !ours.includes(file));
   if (orphans.length > 0) {
     console.log('');
     console.log(`⚠️  ${orphans.length} recorded patch file(s) no longer exist in ${PATCHES_DIR}/:`);
@@ -81,9 +99,9 @@ export function showStatus(): void {
     console.log(`   Their changes may still be in node_modules. Reinstall it to be sure.`);
   }
 
-  if (patchFiles.length > 0) {
+  if (ours.length > 0) {
     console.log('');
-    console.log(`📊 ${patchFiles.length - missing} of ${patchFiles.length} in the tree`);
+    console.log(`📊 ${ours.length - missing} of ${ours.length} in the tree`);
   }
 
   if (missing > 0 || orphans.length > 0) {

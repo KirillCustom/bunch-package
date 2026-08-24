@@ -1,5 +1,6 @@
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
+import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
 import {LOCK_FILE, withApplyLock} from './lock';
 import {PatchTarget, listPatchFiles, parsePatchName} from './patch-file';
 import {PATCHES_DIR, packageDirectoryOf, stripPathPrefix} from './paths';
@@ -78,6 +79,7 @@ function applyAll(patchFiles: string[]): number {
   // Патчи, оказавшиеся в дереве по итогам прогона: и легшие сейчас, и уже
   // лежавшие. Из них собирается запись о состоянии.
   const inTree: string[] = [];
+  const byBun = patchesAppliedByBun();
   const wholeSequenceApplied = appliedSequences(patchFiles);
 
   for (const patchFile of patchFiles) {
@@ -86,6 +88,13 @@ function applyAll(patchFiles: string[]): number {
       console.log(`  ❌ ${patchFile}`);
       console.log(`     ${reason}`);
     };
+
+    // Патч, записанный в `patchedDependencies`, применяет сам bun при
+    // установке. Это не отказ и не наше дело — просто говорим, чей он.
+    if (byBun.has(patchFile)) {
+      console.log(`  ⏭  ${patchFile} — bun applies this one itself (patchedDependencies)`);
+      continue;
+    }
 
     if (wholeSequenceApplied.has(patchFile)) {
       inTree.push(patchFile);
@@ -106,6 +115,18 @@ function applyAll(patchFiles: string[]): number {
     const absolute = absolutePathIn(targets);
     if (absolute !== undefined) {
       fail(`absolute path in patch header (${absolute}) — created by bunch-package < 1.1.0, recreate it with \`create\``);
+      continue;
+    }
+
+    // Пути не под node_modules/ — это патч не нашего формата. У `bun patch`
+    // они от корня пакета, и, срезав `a/`, мы взялись бы за файлы проекта.
+    const outside = firstPathOutsideNodeModules(targets);
+    if (outside !== undefined) {
+      fail(
+        `${outside} is not inside node_modules/ — this looks like a \`bun patch\` patch, whose paths ` +
+          `are relative to the package root. bun applies those itself; list it in patchedDependencies, ` +
+          `or recreate it with \`bunch-package create\`.`,
+      );
       continue;
     }
 
