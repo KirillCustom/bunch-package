@@ -1522,6 +1522,75 @@ describe('dev-only patches', () => {
   });
 });
 
+// Патч — единственный источник удалённых строк, а переводы строк в нём
+// нормализуют по дороге и git, и веб-интерфейс GitHub. Поэтому при откате
+// строку из патча приводим к тому переводу строки, каким живёт сам файл.
+describe('line endings when un-applying', () => {
+  function setup(fileText: string, patchText: string) {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'placeholder\n'});
+    overwriteFile(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), fileText);
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patchText);
+  }
+
+  const file = () => readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8');
+
+  const HEADER = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+`;
+
+  test('gives a CRLF file its \\r back, when the patch had none', () => {
+    const original = 'one\r\ntwo\r\nthree\r\n';
+    // Патч в LF: ровно так его записал бы git с autocrlf или веб-редактор.
+    setup(original, `${HEADER}@@ -1,3 +1,3 @@
+ one
+-two
++patched
+ three
+`);
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(file()).toContain('patched');
+    expect(run('rebase test-lib 0', TEST_DIR).exitCode).toBe(0);
+
+    expect(file()).toBe(original);
+  });
+
+  test('does not bring \\r into an LF file, when the patch is CRLF', () => {
+    const original = 'one\ntwo\nthree\n';
+    // Патч целиком в CRLF — такой в корпусе тоже нашёлся.
+    setup(original, `--- a/node_modules/test-lib/index.js\r
++++ b/node_modules/test-lib/index.js\r
+@@ -1,3 +1,3 @@\r
+ one\r
+-two\r
++patched\r
+ three\r
+`);
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(run('rebase test-lib 0', TEST_DIR).exitCode).toBe(0);
+
+    expect(file()).toBe(original);
+  });
+
+  test('leaves a mixed file the way the neighbours of the hunk are', () => {
+    // Первые строки в CRLF, хвост в LF. Хунк трогает CRLF-часть.
+    const original = 'one\r\ntwo\r\nthree\r\nfour\nfive\n';
+    setup(original, `${HEADER}@@ -1,3 +1,3 @@
+ one
+-two
++patched
+ three
+`);
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(run('rebase test-lib 0', TEST_DIR).exitCode).toBe(0);
+
+    expect(file()).toBe(original);
+  });
+});
+
 describe('CLI usage', () => {
   test('shows help with no arguments', () => {
     const result = run('', TEST_DIR);

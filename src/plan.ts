@@ -126,7 +126,11 @@ function planContentChange(
   }
 
   if (!alreadyApplied) {
-    const forward = precomputed ?? applyHunks(lines, endsWithNewline, target.hunks, false);
+    // assumeNotApplied выставляет только откат — там же и приводим переводы
+    // строки к файловым: патч единственный помнит удалённые строки, а помнит он
+    // их так, как их записал чужой инструмент.
+    const forward =
+      precomputed ?? applyHunks(lines, endsWithNewline, target.hunks, false, true, assumeNotApplied);
     if ('error' in forward) throw new Error(`${relativePath}: ${forward.error}`);
 
     const content = forward.lines.join('\n') + (forward.endsWithNewline ? '\n' : '');

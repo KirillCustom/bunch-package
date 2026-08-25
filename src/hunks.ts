@@ -39,27 +39,73 @@ export interface AppliedFile {
   displacement: number;
 }
 
+// Перевод строки, каким его знает этот кусок файла: `\r` у CRLF, пустая строка
+// у LF, null — если решать не по чему. Строки уже разрезаны по `\n`, поэтому у
+// CRLF-файла каждая оканчивается на `\r`.
+function endingOf(lines: string[]): string | null {
+  let crlf = 0;
+  let lf = 0;
+  for (const line of lines) (line.endsWith('\r') ? crlf++ : lf++);
+
+  if (crlf === 0 && lf === 0) return null;
+  return crlf > lf ? '\r' : '';
+}
+
+function withEnding(line: string, ending: string | null): string {
+  if (ending === null) return line;
+  const bare = line.endsWith('\r') ? line.slice(0, -1) : line;
+  return bare + ending;
+}
+
 // Строки контекста берём из файла, а не из патча. Патч намерен изменить только
 // строки с + и -, а контекст он лишь описывает — и описывает неточно, если по
 // дороге у него срезали хвостовые пробелы. Раньше диапазон пересобирался целиком
 // из «новой стороны», и такие расхождения уехали бы в файл.
-function buildReplacement(hunk: Hunk, lines: string[], at: number, reverse: boolean): string[] {
+function buildReplacement(
+  hunk: Hunk,
+  lines: string[],
+  at: number,
+  reverse: boolean,
+  // Приводить ли строки, взятые из патча, к переводу строки файла. Нужно только
+  // откату: там патч — единственный источник восстанавливаемых строк.
+  matchFileEndings = false,
+): string[] {
   const removePrefix = reverse ? '+' : '-';
   const insertPrefix = reverse ? '-' : '+';
   const out: string[] = [];
   let index = at;
 
+  // Стиль спрашиваем у строк контекста: они пришли из файла и патч их не писал.
+  // Строки, которые патч заменяет, для этого не годятся — их писал он же, и на
+  // хунке, где заменяется весь кусок, они дали бы ответ патча, а не файла.
+  // Если контекста в хунке нет вовсе, спрашиваем файл целиком.
+  const ending = matchFileEndings ? endingOf(contextLines()) ?? endingOf(lines) : null;
+
+  function contextLines(): string[] {
+    const context: string[] = [];
+    let probe = at;
+
+    for (const line of hunk.lines) {
+      const prefix = line.charAt(0);
+      if (prefix === insertPrefix) continue;
+      if (prefix !== removePrefix && lines[probe] !== undefined) context.push(lines[probe]);
+      probe++;
+    }
+
+    return context;
+  }
+
   for (const line of hunk.lines) {
     const prefix = line.charAt(0);
     if (prefix === insertPrefix) {
-      out.push(line.slice(1));
+      out.push(withEnding(line.slice(1), ending));
       continue;
     }
     if (prefix === removePrefix) {
       index++;
       continue;
     }
-    out.push(lines[index] ?? line.slice(1));
+    out.push(lines[index] ?? withEnding(line.slice(1), ending));
     index++;
   }
 
@@ -74,6 +120,17 @@ export function applyHunks(
   // Расходящийся поиск нужен при применении: файл мог сдвинуться. Выключается
   // он только там, где место обязано совпасть точно.
   search = true,
+  // Приводить ли строки, взятые из патча, к переводу строки самого файла.
+  //
+  // Включает это только откат. Там патч — единственный источник удалённых строк,
+  // а его переводы строк нормализуют по дороге и git, и веб-интерфейс GitHub: на
+  // корпусе из 288 откатов четыре возвращали файл не байт в байт — три теряли
+  // `\r` (у pixi-tilemap сразу 162 штуки), а один, наоборот, приносил `\r` в
+  // файл, где их не было вовсе, потому что сам патч был в CRLF.
+  //
+  // Прямое применение так делать не должно: patch-package кладёт строку из
+  // патча как есть, и на этом держится побайтовое совпадение деревьев.
+  matchFileEndings = false,
 ): AppliedFile | {error: string} {
   let lines = original;
   let offset = 0;
@@ -97,7 +154,7 @@ export function applyHunks(
     displacement += Math.abs(at - preferred);
 
     const reachedEnd = at + from.length === lines.length;
-    const replacement = buildReplacement(hunk, lines, at, reverse);
+    const replacement = buildReplacement(hunk, lines, at, reverse, matchFileEndings);
     lines = [...lines.slice(0, at), ...replacement, ...lines.slice(at + from.length)];
     offset += replacement.length - from.length;
 
