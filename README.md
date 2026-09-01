@@ -67,6 +67,7 @@ Now whenever someone runs `bun install`, patches are automatically applied!
 | Command | What it does |
 |---|---|
 | `edit <package>` | Give it a private copy in `node_modules`, so editing it stays yours |
+| `create <package> --why <text>` | Record in the patch file what the patch is for |
 | `create <package>` | Create or update a patch for a package |
 | `apply` | Apply every patch in `patches/` |
 | `status` | Show which patches are in the tree right now |
@@ -130,6 +131,43 @@ every single run when the copy was fetched from scratch.
 If the resulting diff would be larger than 50 MB, `create` refuses instead of
 writing a truncated patch. That size nearly always means generated or build output
 is being compared rather than source.
+
+### Why a patch exists
+
+```bash
+bunx bunch-package create some-package --why "breaks SSR hydration" \
+  --upstream https://github.com/owner/repo/issues/123
+```
+
+The file name says which package and which version. It does not say what the
+patch is for, and six months later nobody can tell whether it is still needed.
+`--why` and `--upstream` put that in the patch file itself, above the diff:
+
+```
+Why: breaks SSR hydration
+Upstream: https://github.com/owner/repo/issues/123
+
+diff --git a/node_modules/some-package/index.js b/node_modules/some-package/index.js
+```
+
+Everything above the first line of the diff is the header, and both tools skip
+it: measured on 73 real patches from public repositories, a patch with a header
+and the same patch without one produce byte-identical trees, and `patch-package`
+8.0.1 reads it exactly as this tool does.
+
+The header travels on its own. `create` rewrites the whole patch file, and
+`retarget` writes a new one for the new version — both carry it over, including
+lines you wrote by hand. `--why` given again replaces the reason and leaves the
+rest alone. A reason that would be read as part of a diff, or one spanning two
+lines, is refused when you type it rather than breaking the patch later.
+
+`status` prints the reason under each patch, and knows the difference between
+the header changing and the patch changing:
+
+```
+  ✅ some-package+1.2.3.patch — in the tree, only its header changed since it was applied on 2026-08-21T17:46:38.613Z
+     breaks SSR hydration
+```
 
 ### Multiple patches for one package
 
@@ -363,6 +401,8 @@ it.
 --case-sensitive-path-filtering    Match those two case-sensitively
 --error-on-warn                    Make `apply` exit 1 after a warning as well
 --dev                              Mark a new patch as needed only in development
+--why <text>                       Why the patch exists, kept in the patch file
+--upstream <url>                   Where it was reported upstream, kept with it
 ```
 
 `--patch-dir` applies to every command, and the directory has to be inside the
@@ -562,6 +602,7 @@ the same. Everything below was measured by running both, not assumed:
 | Record of what was applied | `node_modules/.bunch-package-state.json` | `.patch-package.json`, written inside the patched package |
 | Bun's shared install cache | handled | not addressed — its README does not mention bun |
 | Taking the package off that cache before you edit it | `edit` | — |
+| Recording why a patch exists | `--why` / `--upstream`, carried through rewrites | — |
 | npm, yarn, pnpm, workspaces | not attempted | documented |
 | Moving a patch to a newer version of the package | `retarget` | — |
 | Converting patches from the other tool | `import`, for the ones bun writes | — |
