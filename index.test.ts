@@ -3,6 +3,7 @@ import {execSync, spawn, spawnSync} from 'child_process';
 import {createHash} from 'crypto';
 import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree} from './src/create';
+import {parseOptions} from './src/options';
 import {withApplyLock} from './src/lock';
 import {ensureDir} from './src/paths';
 import {invertTarget, parsePatch} from './src/patch-file';
@@ -3298,9 +3299,11 @@ describe('why a patch exists', () => {
     expect(structural.exitCode).not.toBe(0);
     expect(structural.stdout).toContain('must not start like a line of a diff');
 
-    const multiline = run(`create is-number --why "$(printf 'one\ntwo')"`, TEST_DIR);
-    expect(multiline.exitCode).not.toBe(0);
-    expect(multiline.stdout).toContain('must be a single line');
+    // Многострочную причину через CLI не передать переносимо: подстановка
+    // `$(printf …)` — это POSIX-шелл, а на Windows тест запускается в cmd и
+    // строка приезжает литералом. Проверка та же, но без шелла в середине.
+    expect(() => parseOptions(['--why', 'one\ntwo'])).toThrow('must be a single line');
+    expect(() => parseOptions(['--why', 'one\rtwo'])).toThrow('must be a single line');
 
     const notAUrl = run('create is-number --upstream github.com/x/y', TEST_DIR);
     expect(notAUrl.exitCode).not.toBe(0);
