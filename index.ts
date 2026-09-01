@@ -2,6 +2,7 @@
 
 import {applyPatches} from './src/apply';
 import {createPatch} from './src/create';
+import {editPackage} from './src/edit';
 import {importPatches} from './src/import';
 import {filtersOf, parseOptions} from './src/options';
 import {usePatchesDirectory} from './src/paths';
@@ -55,6 +56,10 @@ try {
       break;
     }
 
+    case 'edit':
+      editPackage(requirePackages('bunch-package edit <package-name>')[0]);
+      break;
+
     case 'apply':
       applyPatches(options.errorOnWarn);
       break;
@@ -93,6 +98,7 @@ try {
 🎯 bunch-package - Patch management for Bun
 
 Commands:
+  bunch-package edit <package>                    Detach it from bun's shared cache before you edit it
   bunch-package create <package>...               Create or update a patch
   bunch-package create <package> --append <name>  Add another patch to the package
   bunch-package create <package> --dev             Mark it as needed only in development

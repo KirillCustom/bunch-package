@@ -3002,3 +3002,159 @@ describe('ensureDir', () => {
     expect(() => ensureDir(join(file, 'child'))).toThrow();
   });
 });
+
+describe('edit before you patch', () => {
+  // Как bun раскладывает пакеты при --backend=hardlink, то есть по умолчанию на
+  // Linux: файл в node_modules и запись в кеше — один инод.
+  function shareWithCache(file: string, cacheEntry: string) {
+    linkSync(file, cacheEntry);
+    expect(statSync(cacheEntry).ino).toBe(statSync(file).ino);
+  }
+
+  test('editing in place reaches the cache entry when nothing detached it', () => {
+    // Предпосылка всей команды. Перестанет быть правдой — узнать об этом лучше
+    // отсюда, а не из молчаливо бесполезной команды.
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    const file = join(TEST_DIR, 'node_modules', 'test-lib', 'index.js');
+    const cacheEntry = join(TEST_DIR, 'cache-entry.js');
+    shareWithCache(file, cacheEntry);
+
+    writeFileSync(file, 'const a = 2;\n'); // так пишет редактор: в тот же инод
+
+    expect(readFileSync(cacheEntry, 'utf-8')).toBe('const a = 2;\n');
+  });
+
+  test('detaches the package so editing it no longer changes the cache', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    const file = join(TEST_DIR, 'node_modules', 'test-lib', 'index.js');
+    const cacheEntry = join(TEST_DIR, 'cache-entry.js');
+    shareWithCache(file, cacheEntry);
+
+    const result = run('edit test-lib', TEST_DIR);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Detached');
+
+    expect(statSync(file).ino).not.toBe(statSync(cacheEntry).ino);
+    expect(readFileSync(file, 'utf-8')).toBe('const a = 1;\n');
+
+    writeFileSync(file, 'const a = 2;\n');
+    expect(readFileSync(cacheEntry, 'utf-8')).toBe('const a = 1;\n');
+  });
+
+  test('detaches nested files too', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'lib/deep/inner.js': 'deep\n'});
+    const file = join(TEST_DIR, 'node_modules', 'test-lib', 'lib', 'deep', 'inner.js');
+    const cacheEntry = join(TEST_DIR, 'cache-inner.js');
+    shareWithCache(file, cacheEntry);
+
+    expect(run('edit test-lib', TEST_DIR).exitCode).toBe(0);
+
+    writeFileSync(file, 'changed\n');
+    expect(readFileSync(cacheEntry, 'utf-8')).toBe('deep\n');
+  });
+
+  test('carries binary content through byte for byte', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    const blob = join(TEST_DIR, 'node_modules', 'test-lib', 'native.node');
+    const bytes = Buffer.from([0x00, 0x01, 0xff, 0xfe, 0x00, 0x80, 0x0a]);
+    writeFileSync(blob, bytes);
+    shareWithCache(blob, join(TEST_DIR, 'cache-native.node'));
+
+    expect(run('edit test-lib', TEST_DIR).exitCode).toBe(0);
+
+    expect(readFileSync(blob).equals(bytes)).toBe(true);
+  });
+
+  test.skipIf(isWindows)('keeps the executable bit', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'bin/run.sh': '#!/bin/sh\necho hi\n'});
+    const script = join(TEST_DIR, 'node_modules', 'test-lib', 'bin', 'run.sh');
+    chmodSync(script, 0o755);
+    shareWithCache(script, join(TEST_DIR, 'cache-run.sh'));
+
+    expect(run('edit test-lib', TEST_DIR).exitCode).toBe(0);
+
+    expect(isExecutable(script)).toBe(true);
+  });
+
+  test.skipIf(isWindows)('leaves symbolic links as links', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    const pkg = join(TEST_DIR, 'node_modules', 'test-lib');
+
+    // Ссылка ведёт наружу пакета, на файл, который сам делит инод с кешем и
+    // мимо обхода проходит. Так «пошли по ссылке» отличимо от «пропустили»:
+    // цель остаётся разделённой, и пройди мы по ссылке — на месте alias.js
+    // оказался бы обычный файл.
+    const shared = join(TEST_DIR, 'shared.js');
+    writeFileSync(shared, 'shared\n');
+    shareWithCache(shared, join(TEST_DIR, 'cache-shared.js'));
+    symlinkSync('../../shared.js', join(pkg, 'alias.js'));
+
+    shareWithCache(join(pkg, 'index.js'), join(TEST_DIR, 'cache-index.js'));
+
+    expect(run('edit test-lib', TEST_DIR).exitCode).toBe(0);
+
+    expect(lstatSync(join(pkg, 'alias.js')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(pkg, 'alias.js'), 'utf-8')).toBe('shared\n');
+  });
+
+  test('leaves files that are nobody else’s alone', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    const file = join(TEST_DIR, 'node_modules', 'test-lib', 'index.js');
+    const inodeBefore = statSync(file).ino;
+
+    const result = run('edit test-lib', TEST_DIR);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Nothing to detach');
+    expect(statSync(file).ino).toBe(inodeBefore);
+  });
+
+  test('refuses a package bun patches itself', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({
+        name: 'test-project',
+        version: '1.0.0',
+        patchedDependencies: {'test-lib@1.0.0': 'patches/test-lib@1.0.0.patch'},
+      }),
+    );
+
+    const result = run('edit test-lib', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('already patched by bun');
+  });
+
+  test.skipIf(isWindows)('refuses to detach through a link that leaves the project', () => {
+    // Изолированная раскладка ведёт node_modules/<pkg> симлинком в стор, и у
+    // bun бывает вариант, где этот стор лежит в общем кеше. Разрывать хардлинки
+    // там нельзя: писали бы прямо в то, от чего команда защищает.
+    const store = `${TEST_DIR}-store`;
+    rmSync(store, {force: true, recursive: true});
+    mkdirSync(join(store, 'test-lib'), {recursive: true});
+    writeFileSync(join(store, 'test-lib', 'package.json'), JSON.stringify({name: 'test-lib', version: '1.0.0'}));
+    writeFileSync(join(store, 'test-lib', 'index.js'), 'const a = 1;\n');
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    symlinkSync(join(store, 'test-lib'), join(TEST_DIR, 'node_modules', 'test-lib'));
+
+    try {
+      const result = run('edit test-lib', TEST_DIR);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toContain('outside the project');
+      expect(readFileSync(join(store, 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 1;\n');
+    } finally {
+      rmSync(store, {force: true, recursive: true});
+    }
+  });
+
+  test('says which package is missing, and asks for one when none is given', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+
+    const missing = run('edit no-such-package', TEST_DIR);
+    expect(missing.exitCode).not.toBe(0);
+    expect(missing.stdout).toContain('not found in node_modules');
+
+    const nameless = run('edit', TEST_DIR);
+    expect(nameless.exitCode).not.toBe(0);
+    expect(nameless.stdout).toContain('Usage');
+  });
+});

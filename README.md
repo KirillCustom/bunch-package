@@ -9,7 +9,7 @@
 - **Built for bun's install cache.** Bun links installed packages to a shared cache,
   so editing a file in `node_modules` edits the cache too. Every command here knows
   that; a tool written for npm does not.
-- **Five commands:** create, apply, status, rebase and retarget.
+- **Eight commands:** edit, create, apply, status, rebase, retarget, reverse and import.
 - **It tells you when it cannot do something.** Binary files, symbolic links, a hunk
   that no longer fits — all of them are named out loud rather than dropped, because
   a patch that silently carries less than you think is worse than no patch.
@@ -24,9 +24,13 @@ bun add -d bunch-package
 
 ## Usage
 
-### 1. Fix a bug in node_modules
+### 1. Take the package off bun's shared cache
 
-Make changes directly in `node_modules/some-package`
+```bash
+bunx bunch-package edit some-package
+```
+
+Then make your changes in `node_modules/some-package`.
 
 ### 2. Create a patch
 
@@ -61,11 +65,36 @@ Now whenever someone runs `bun install`, patches are automatically applied!
 
 | Command | What it does |
 |---|---|
+| `edit <package>` | Give it a private copy in `node_modules`, so editing it stays yours |
 | `create <package>` | Create or update a patch for a package |
 | `apply` | Apply every patch in `patches/` |
 | `status` | Show which patches are in the tree right now |
 | `rebase <package> <patch>` | Un-apply the patches sitting on top of one, to edit it |
 | `retarget <package>` | Move its patches to the version now installed |
+
+### Before you edit
+
+```bash
+bunx bunch-package edit <package-name>
+```
+
+bun links installed packages out of its shared cache, so a file in
+`node_modules` and the entry in `~/.bun/install/cache` are often **the same
+inode**. Editing that file in place edits the cache with it, and the next clean
+install in any other project on the machine arrives already carrying your
+change. Measured on bun 1.4.0: with `--backend=hardlink`, which is the default
+on Linux, a line appended to `node_modules/ms/index.js` was in the cache
+immediately and travelled into a third project that knew nothing about it. On
+macOS the default is `clonefile` and the copy is already private, so there the
+command has nothing to do and says so.
+
+`edit` replaces every shared file of the package with a copy of itself — same
+bytes, same permissions, its own inode — leaving symbolic links alone. After
+that the package is yours to edit, and `create` diffs it as usual.
+
+Patches are unaffected either way: `apply` has always written past a hardlink
+rather than through it. What `edit` protects is the hand-editing step before
+the patch exists.
 
 ### Create a patch
 

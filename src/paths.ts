@@ -106,7 +106,7 @@ export function withExecutable(mode: number, executable: boolean): number {
 // снаружи файл виден либо старым целиком, либо новым целиком, и убитый посреди
 // работы процесс не оставляет ни обрезка, ни дыры на его месте. Заодно это
 // разрывает hardlink на общий кеш bun — у временного файла свой инод.
-export function atomicWrite(file: string, content: string, mode: number | null = null): void {
+export function atomicWrite(file: string, content: string | Uint8Array, mode: number | null = null): void {
   const temp = `${file}${TEMP_WRITE_SUFFIX}${process.pid}`;
 
   try {
