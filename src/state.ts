@@ -1,7 +1,7 @@
 import {createHash} from 'crypto';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
-import {parsePatchName} from './patch-file';
+import {parsePatchName, splitPatchHeader} from './patch-file';
 import {patchesDirectory, atomicWrite} from './paths';
 
 // Запись о том, что и когда легло в дерево. Нужна затем, чтобы на вопрос «что
@@ -20,6 +20,11 @@ export interface RecordedPatch {
   packageDir: string; // каталог в node_modules, со слэшем для скоупа
   version: string;
   sha256: string; // хеш файла патча на момент применения
+  // Хеш одного лишь тела, без заголовка. Заголовок — это «зачем этот патч
+  // существует»; на дерево он не влияет, и правка одной его строки не должна
+  // выглядеть как «патч переписали после того, как он лёг». Поля может не быть:
+  // записи, сделанные до появления заголовков, читаются как прежде.
+  bodySha256?: string;
   appliedAt: string; // ISO-8601
 }
 
@@ -30,6 +35,11 @@ export interface State {
 
 export function hashPatchFile(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+export function hashPatchBody(path: string): string {
+  const body = splitPatchHeader(readFileSync(path, 'utf-8')).body;
+  return createHash('sha256').update(body).digest('hex');
 }
 
 // Запись — это только запись. Считать по ней, что патч на месте, нельзя:
@@ -66,7 +76,8 @@ export function recordPatches(inTree: string[]): void {
 
   const patches: RecordedPatch[] = inTree.map(file => {
     const parsed = parsePatchName(file);
-    const sha256 = hashPatchFile(join(patchesDirectory(), file));
+    const path = join(patchesDirectory(), file);
+    const sha256 = hashPatchFile(path);
     const before = previous.get(file);
 
     return {
@@ -74,7 +85,10 @@ export function recordPatches(inTree: string[]): void {
       packageDir: parsed?.packageDir ?? '',
       version: parsed?.version ?? '',
       sha256,
-      appliedAt: before?.sha256 === sha256 ? before.appliedAt : now,
+      bodySha256: hashPatchBody(path),
+      // Время первого попадания в дерево переживает правку заголовка: дерево от
+      // неё не изменилось, значит и «применён тогда-то» остаётся верным.
+      appliedAt: before !== undefined && sameChange(before, sha256, path) ? before.appliedAt : now,
     };
   });
 
@@ -85,6 +99,13 @@ export function recordPatches(inTree: string[]): void {
     // чтения, патчи всё равно на месте, и врать про сбой не надо.
     console.log(`  ⚠️  could not write ${STATE_FILE}: ${error.message}`);
   }
+}
+
+// Одна и та же правка дерева: либо файл патча тот же побайтово, либо изменился
+// только заголовок — тело осталось прежним.
+function sameChange(before: RecordedPatch, sha256: string, path: string): boolean {
+  if (before.sha256 === sha256) return true;
+  return before.bodySha256 !== undefined && before.bodySha256 === hashPatchBody(path);
 }
 
 function writeState(patches: RecordedPatch[]): void {

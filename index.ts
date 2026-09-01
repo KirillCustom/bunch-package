@@ -45,7 +45,10 @@ try {
 
       for (const name of names) {
         try {
-          createPatch(name, options.append, filters, options.dev);
+          createPatch(name, options.append, filters, options.dev, {
+            why: options.why ?? undefined,
+            upstream: options.upstream ?? undefined,
+          });
         } catch (error: any) {
           console.error(`❌ ${error?.message ?? error}`);
           failed++;
@@ -102,6 +105,7 @@ Commands:
   bunch-package create <package>...               Create or update a patch
   bunch-package create <package> --append <name>  Add another patch to the package
   bunch-package create <package> --dev             Mark it as needed only in development
+  bunch-package create <package> --why <text>     Record why the patch exists, in the patch file
   bunch-package apply                             Apply all patches
   bunch-package reverse                           Un-apply all of them
   bunch-package status                            Show which patches are in the tree
@@ -114,6 +118,7 @@ Options:
   --include <regexp>, --exclude <regexp>          Which paths go into a patch, from the package root
   --case-sensitive-path-filtering                 Match those two case-sensitively
   --error-on-warn                                 Make \`apply\` exit 1 after a warning too
+  --why <text>, --upstream <url>                  What a new patch is for, kept in the patch file
     `);
   }
 } catch (error: any) {

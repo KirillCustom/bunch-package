@@ -1,3 +1,5 @@
+import {looksStructural} from './patch-file';
+
 // Разбор аргументов у нас свой и строгий: неизвестный флаг — отказ, а не
 // молчаливое «не понял». Молчание тут особенно дорого: `--exclude` с опечаткой
 // в имени флага означал бы патч, в который уехало лишнее, и заметили бы это
@@ -11,9 +13,11 @@ export interface Options {
   caseSensitive: boolean;
   errorOnWarn: boolean;
   dev: boolean;
+  why: string | null;
+  upstream: string | null;
 }
 
-const WITH_VALUE = new Set(['--append', '--patch-dir', '--include', '--exclude']);
+const WITH_VALUE = new Set(['--append', '--patch-dir', '--include', '--exclude', '--why', '--upstream']);
 const WITHOUT_VALUE = new Set(['--case-sensitive-path-filtering', '--error-on-warn', '--dev']);
 
 export function parseOptions(argv: string[]): Options {
@@ -26,6 +30,8 @@ export function parseOptions(argv: string[]): Options {
     caseSensitive: false,
     errorOnWarn: false,
     dev: false,
+    why: null,
+    upstream: null,
   };
 
   for (let at = 0; at < argv.length; at++) {
@@ -57,10 +63,32 @@ export function parseOptions(argv: string[]): Options {
     if (flag === '--append') options.append = validLabel(value);
     else if (flag === '--patch-dir') options.patchDir = value;
     else if (flag === '--include') options.include = validRegExp(flag, value);
+    else if (flag === '--why') options.why = validHeaderText(flag, value);
+    else if (flag === '--upstream') options.upstream = validUpstream(value);
     else options.exclude = validRegExp(flag, value);
   }
 
   return options;
+}
+
+// Текст заголовка попадает в файл патча перед первой секцией. Перевод строки
+// в нём разъехался бы на две строки, а строка, похожая на начало секции, была
+// бы прочитана разборщиком как секция — то есть патч ломался бы не здесь, а
+// через неделю на чужом `apply`.
+function validHeaderText(flag: string, value: string): string {
+  if (/[\r\n]/.test(value)) throw new Error(`${flag} must be a single line`);
+  if (looksStructural(value)) throw new Error(`${flag} must not start like a line of a diff`);
+  return value.trim();
+}
+
+// Ссылка на апстрим — это ссылка, и проверить это дешевле, чем потом гадать,
+// почему её никто не открывает.
+function validUpstream(value: string): string {
+  const text = validHeaderText('--upstream', value);
+  if (!/^https?:\/\/\S+$/.test(text)) {
+    throw new Error('--upstream needs an http(s) URL');
+  }
+  return text;
 }
 
 // Метка попадает в имя файла, поэтому в ней только то, что имя выдержит.

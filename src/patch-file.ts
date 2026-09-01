@@ -327,3 +327,83 @@ export function orderPatchFiles(files: string[]): string[] {
 // защита от выхода за корень проекта. Плюс patch применяет файлы по одному,
 // поэтому провал на середине оставлял дерево наполовину пропатченным и сыпал
 // .rej/.orig. Здесь ничего не пишется на диск, пока не сойдётся весь патч.
+
+// Всё, что стоит перед первой структурной строкой, — заголовок патча: место,
+// где написано, зачем он существует. Имя файла говорит только про пакет и
+// версию, а причина живёт в голове того, кто патч сделал, — и через полгода
+// никто не скажет, можно ли его выбрасывать.
+//
+// Формат это терпит, и терпит доказанно: тот же патч с четырьмя видами
+// заголовка (свободный текст, строки с `#`, git-стиль `From:`/`Subject:`)
+// применяется patch-package 8.0.1 и нами в побайтово одинаковые деревья.
+// Разборщик заголовок и так не замечает — здесь он нужен затем, чтобы `create`
+// и `retarget` не выбрасывали его при перезаписи файла.
+const STRUCTURAL =
+  /^(diff --git |--- |\+\+\+ |@@ |Index: |index |old mode |new mode |new file mode |deleted file mode |rename from |rename to |similarity index |Binary files )/;
+
+// Строка заголовка, начинающаяся так, была бы прочитана как начало секции.
+// Спрашивает разбор аргументов: `--why "--- сломано"` иначе превратил бы патч
+// в нечитаемый, и узнали бы об этом на `apply`, а не на `create`.
+export function looksStructural(line: string): boolean {
+  return STRUCTURAL.test(line);
+}
+
+export function splitPatchHeader(content: string): {header: string; body: string} {
+  const lines = content.split('\n');
+  let at = 0;
+  while (at < lines.length && !STRUCTURAL.test(lines[at])) at++;
+
+  // Ни одной структурной строки — значит это не патч, а что-то другое. Считать
+  // его целиком заголовком нельзя: склейка header + body потеряла бы содержимое.
+  if (at === 0 || at === lines.length) return {header: '', body: content};
+
+  return {header: lines.slice(0, at).join('\n') + '\n', body: lines.slice(at).join('\n')};
+}
+
+export interface PatchHeaderFields {
+  why?: string;
+  upstream?: string;
+}
+
+const FIELD = /^(Why|Upstream):\s*(.*)$/i;
+
+export function patchHeaderField(header: string, key: 'Why' | 'Upstream'): string | null {
+  for (const line of header.split('\n')) {
+    const match = FIELD.exec(line);
+    if (match !== null && match[1].toLowerCase() === key.toLowerCase()) return match[2].trim();
+  }
+  return null;
+}
+
+// Первая содержательная строка заголовка — то, что показывает `status`.
+export function patchHeaderSummary(header: string): string | null {
+  const why = patchHeaderField(header, 'Why');
+  if (why !== null && why !== '') return why;
+
+  const first = header.split('\n').find(line => line.trim() !== '');
+  return first === undefined ? null : first.trim();
+}
+
+// Известные поля переписываются, всё остальное остаётся как было и в прежнем
+// порядке: заголовок мог быть написан руками, и терять чужие строки при
+// обновлении патча — то же самое, что терять сам заголовок.
+export function updatePatchHeader(header: string, fields: PatchHeaderFields): string {
+  const why = fields.why ?? patchHeaderField(header, 'Why') ?? undefined;
+  const upstream = fields.upstream ?? patchHeaderField(header, 'Upstream') ?? undefined;
+
+  const rest = header
+    .split('\n')
+    .filter(line => FIELD.exec(line) === null);
+  while (rest.length > 0 && rest[0].trim() === '') rest.shift();
+  while (rest.length > 0 && rest[rest.length - 1].trim() === '') rest.pop();
+
+  const lines = [
+    ...(why === undefined ? [] : [`Why: ${why}`]),
+    ...(upstream === undefined ? [] : [`Upstream: ${upstream}`]),
+    ...rest,
+  ];
+
+  // Пустая строка отделяет заголовок от первой секции — и она же делает
+  // повторный `create` с тем же заголовком побайтово тем же файлом.
+  return lines.length === 0 ? '' : lines.join('\n') + '\n\n';
+}
