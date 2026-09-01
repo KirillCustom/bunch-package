@@ -46,7 +46,7 @@ jobs:
   # на 1.1 `apply` падал с EEXIST на mkdir существующего node_modules. Сюиту на
   # старых bun не прогнать (текстовый локфайл и test runner появились в 1.2),
   # поэтому здесь — короткий прогон самого инструмента, без установки
-  # зависимостей: apply, повторный apply, status и откат.
+  # зависимостей: apply, повторный apply, status, откат и edit.
   old-bun:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -62,7 +62,7 @@ jobs:
         with:
           bun-version: ${{ matrix.bun }}
 
-      - name: apply, re-apply, status and rebase a patch
+      - name: apply, re-apply, status, rebase and edit
         run: |
           set -e
           bun --version
@@ -80,4 +80,12 @@ jobs:
           bun ../index.ts status | grep -q '1 of 1 in the tree'
 
           bun ../index.ts rebase fakepkg 0
+          grep -q '^line one$' node_modules/fakepkg/index.js
+
+          # edit разрывает hardlink на общий кеш — то, ради чего команда и есть.
+          # На старых bun проверяется не логика, а что readdir/stat/realpath
+          # ведут себя там так же: обещание engines касается и этой команды.
+          ln node_modules/fakepkg/index.js cache-entry.js
+          bun ../index.ts edit fakepkg | grep -q 'Detached'
+          test "$(stat -c %i node_modules/fakepkg/index.js)" != "$(stat -c %i cache-entry.js)"
           grep -q '^line one$' node_modules/fakepkg/index.js
