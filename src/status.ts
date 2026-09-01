@@ -1,12 +1,12 @@
-import {existsSync} from 'fs';
+import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 import {missingPackages, skipsMissingPackage} from './dev';
 import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
-import {listPatchFiles} from './patch-file';
+import {listPatchFiles, patchHeaderSummary, splitPatchHeader} from './patch-file';
 import {patchesDirectory} from './paths';
 import {Presence, presenceOf, readTargets} from './presence';
 import {appliedSequences} from './sequence';
-import {RecordedPatch, STATE_FILE, hashPatchFile, readState, recordedPatches} from './state';
+import {RecordedPatch, STATE_FILE, hashPatchBody, hashPatchFile, readState, recordedPatches} from './state';
 
 // Что с патчем прямо сейчас. Определяется по дереву, а не по записи: запись
 // говорит, что было, а спрашивают — что есть. Сам расчёт — общий с apply.
@@ -39,9 +39,28 @@ function describeRecord(record: RecordedPatch | undefined, patchFile: string): s
 
   const path = join(patchesDirectory(), patchFile);
   if (existsSync(path) && hashPatchFile(path) !== record.sha256) {
+    // Заголовок дерева не касается. Сказать про него «патч переписали» значило
+    // бы звать человека разбираться туда, где менялось одно объяснение.
+    if (record.bodySha256 !== undefined && record.bodySha256 === hashPatchBody(path)) {
+      return `only its header changed since it was applied on ${record.appliedAt}`;
+    }
     return `the patch file changed since it was applied on ${record.appliedAt}`;
   }
   return `applied ${record.appliedAt}`;
+}
+
+// Зачем этот патч существует — если в файле написано. Без этого имя файла
+// говорит только про пакет и версию, и `status` отвечает на «что в дереве», но
+// не на «что это вообще такое».
+function headerLine(patchFile: string): string | null {
+  const path = join(patchesDirectory(), patchFile);
+  if (!existsSync(path)) return null;
+
+  try {
+    return patchHeaderSummary(splitPatchHeader(readFileSync(path, 'utf-8')).header);
+  } catch {
+    return null; // нечитаемый файл — забота presenceOf, а не этой строки
+  }
 }
 
 export function showStatus(): void {
@@ -79,24 +98,30 @@ export function showStatus(): void {
   for (const patchFile of ours) {
     const presence = shownPresence(patchFile, wholeSequenceApplied);
     const record = describeRecord(recorded.get(patchFile), patchFile);
+    const why = headerLine(patchFile);
+    const say = (line: string) => {
+      console.log(line);
+      if (why !== null) console.log(`     ${why}`);
+    };
 
     if (presence.kind === 'in-tree') {
-      console.log(`  ✅ ${patchFile} — in the tree, ${record}`);
+      say(`  ✅ ${patchFile} — in the tree, ${record}`);
       continue;
     }
 
     if (presence.kind === 'dev-only') {
       skipped++;
-      console.log(`  ⏭  ${patchFile} — dev-only, and ${presence.missing} is not installed`);
+      say(`  ⏭  ${patchFile} — dev-only, and ${presence.missing} is not installed`);
       continue;
     }
 
     missing++;
     if (presence.kind === 'not-in-tree') {
-      console.log(`  ⬜ ${patchFile} — not in the tree, ${record}`);
+      say(`  ⬜ ${patchFile} — not in the tree, ${record}`);
     } else {
       console.log(`  ❌ ${patchFile} — does not fit the tree, ${record}`);
       console.log(`     ${presence.reason}`);
+      if (why !== null) console.log(`     ${why}`);
     }
   }
 

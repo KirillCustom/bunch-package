@@ -6,6 +6,7 @@ import {join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
 import {PathFilters, pathAllowed} from './options';
 import {patchesDirectory, TEMP_WRITE_SUFFIX, ensureDir, isExecutable} from './paths';
+import {PatchHeaderFields, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
@@ -616,7 +617,7 @@ function countLines(text: string): number {
   return lines;
 }
 
-function writePatch(plan: SequencePlan, patchContent: string): void {
+function writePatch(plan: SequencePlan, patchContent: string, header: PatchHeaderFields): void {
   const patchLines = countLines(patchContent);
   const patchSizeKB = Buffer.byteLength(patchContent, 'utf-8') / 1024;
 
@@ -648,9 +649,17 @@ function writePatch(plan: SequencePlan, patchContent: string): void {
     throw new Error(`Refusing to write ${plan.outputName} outside ${patchesDirectory()}/`);
   }
 
-  writeFileSync(patchFilePath, patchContent);
+  // Заголовок переезжает сам. `create` перезаписывает файл патча целиком, и
+  // без этого «зачем этот патч» жило бы ровно до следующей правки пакета —
+  // то есть до первого раза, когда оно понадобится.
+  const existing = existsSync(patchFilePath)
+    ? splitPatchHeader(readFileSync(patchFilePath, 'utf-8')).header
+    : '';
+  const content = updatePatchHeader(existing, header) + patchContent;
 
-  const hash = createHash('sha256').update(patchContent).digest('hex');
+  writeFileSync(patchFilePath, content);
+
+  const hash = createHash('sha256').update(content).digest('hex');
 
   console.log(`✅ Patch created: ${patchFilePath}`);
   console.log(`📊 Stats:`);
@@ -724,6 +733,7 @@ export function createPatch(
   appendLabel: string | null = null,
   filters: PathFilters = {include: null, exclude: null},
   dev = false,
+  header: PatchHeaderFields = {},
 ): void {
   validatePackageName(packageName);
   requireDiff();
@@ -795,6 +805,6 @@ export function createPatch(
       console.log(`🔑 ${diff.modeOnly.length} file(s) changed only their executable bit`);
     }
 
-    writePatch(plan, diff.content);
+    writePatch(plan, diff.content, header);
   });
 }

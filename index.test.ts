@@ -3158,3 +3158,154 @@ describe('edit before you patch', () => {
     expect(nameless.stdout).toContain('Usage');
   });
 });
+
+describe('why a patch exists', () => {
+  function fakePatch(body: string, header = '') {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), header + body);
+  }
+
+  const BODY = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+
+  test('create writes the header, and the body is what it would have been', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// fixed\n');
+
+    expect(run('create is-number --why "breaks SSR" --upstream https://example.com/issues/7', TEST_DIR).exitCode).toBe(0);
+
+    const written = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(written.startsWith('Why: breaks SSR\nUpstream: https://example.com/issues/7\n\ndiff --git ')).toBe(true);
+
+    // Тело — ровно то же, что без заголовка: заголовок ничего не сдвигает.
+    rmSync(join(TEST_DIR, 'patches'), {force: true, recursive: true});
+    run('create is-number', TEST_DIR);
+    const plain = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(written.slice(written.indexOf('diff --git '))).toBe(plain);
+  });
+
+  test('the header survives create rewriting the patch', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    const original = readFileSync(indexPath, 'utf-8');
+    overwriteFile(indexPath, original + '\n// one\n');
+    run('create is-number --why "it breaks" --upstream https://example.com/1', TEST_DIR);
+
+    overwriteFile(indexPath, original + '\n// one\n// two\n');
+    expect(run('create is-number', TEST_DIR).exitCode).toBe(0);
+
+    const patch = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patch).toContain('Why: it breaks');
+    expect(patch).toContain('Upstream: https://example.com/1');
+    expect(patch).toContain('+// two');
+  });
+
+  test('--why replaces the old reason and keeps lines written by hand', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    const original = readFileSync(indexPath, 'utf-8');
+    overwriteFile(indexPath, original + '\n// one\n');
+    run('create is-number --why "first guess"', TEST_DIR);
+
+    const patchPath = join(TEST_DIR, 'patches', 'is-number+7.0.0.patch');
+    const handwritten = readFileSync(patchPath, 'utf-8').replace('Why: first guess\n', 'Why: first guess\n# see also the thread in chat\n');
+    writeFileSync(patchPath, handwritten);
+
+    overwriteFile(indexPath, original + '\n// two\n');
+    run('create is-number --why "the real reason"', TEST_DIR);
+
+    const patch = readFileSync(patchPath, 'utf-8');
+    expect(patch).toContain('Why: the real reason');
+    expect(patch).not.toContain('first guess');
+    expect(patch).toContain('# see also the thread in chat');
+  });
+
+  test('apply reads a patch with a header exactly like one without', () => {
+    fakePatch(BODY, 'Why: because\nUpstream: https://example.com/2\n\n');
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 2;\n');
+
+    // И повторный apply по-прежнему ничего не делает.
+    expect(run('apply', TEST_DIR).stdout).toContain('already applied');
+  });
+
+  test('apply reads a git-style header too', () => {
+    fakePatch(BODY, 'From: someone\nSubject: [PATCH] make a work\n\n');
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 2;\n');
+  });
+
+  test('status shows the reason, and separates a header edit from a real one', () => {
+    fakePatch(BODY, 'Why: because\n\n');
+    run('apply', TEST_DIR);
+
+    const shown = run('status', TEST_DIR);
+    expect(shown.stdout).toContain('in the tree');
+    expect(shown.stdout).toContain('because');
+
+    const patchPath = join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch');
+    writeFileSync(patchPath, 'Why: a better explanation\n\n' + BODY);
+    const afterHeaderEdit = run('status', TEST_DIR);
+    expect(afterHeaderEdit.stdout).toContain('only its header changed');
+    expect(afterHeaderEdit.stdout).toContain('a better explanation');
+
+    writeFileSync(patchPath, 'Why: a better explanation\n\n' + BODY.replace('+const a = 2;', '+const a = 3;'));
+    expect(run('status', TEST_DIR).stdout).toContain('the patch file changed');
+  });
+
+  test('retarget carries the header to the new version', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    const file = join(TEST_DIR, 'node_modules', 'ms', 'index.js');
+    overwriteFile(file, `// MY FIX\n${readFileSync(file, 'utf-8')}`);
+    run('create ms --why "upstream lost the fix" --upstream https://example.com/ms/1', TEST_DIR);
+
+    execSync('bun add ms@2.1.3', {cwd: TEST_DIR, stdio: 'pipe'});
+    expect(run('retarget ms', TEST_DIR).exitCode).toBe(0);
+
+    const moved = readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.3.patch'), 'utf-8');
+    expect(moved.startsWith('Why: upstream lost the fix\nUpstream: https://example.com/ms/1\n\n')).toBe(true);
+    expect(moved).toContain('+// MY FIX');
+  });
+
+  test('a patch appended to a sequence starts without a reason of its own', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    const original = readFileSync(indexPath, 'utf-8');
+    overwriteFile(indexPath, original + '\n// one\n');
+    run('create is-number --why "the first one"', TEST_DIR);
+    run('apply', TEST_DIR);
+
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '// two\n');
+    expect(run('create is-number --append second', TEST_DIR).exitCode).toBe(0);
+
+    const appended = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0+002+second.patch'), 'utf-8');
+    expect(appended.startsWith('diff --git ')).toBe(true);
+    expect(appended).not.toContain('the first one');
+  });
+
+  test('refuses a reason that would be read as a diff', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// fixed\n');
+
+    const structural = run('create is-number --why "--- a/x"', TEST_DIR);
+    expect(structural.exitCode).not.toBe(0);
+    expect(structural.stdout).toContain('must not start like a line of a diff');
+
+    const multiline = run(`create is-number --why "$(printf 'one\ntwo')"`, TEST_DIR);
+    expect(multiline.exitCode).not.toBe(0);
+    expect(multiline.stdout).toContain('must be a single line');
+
+    const notAUrl = run('create is-number --upstream github.com/x/y', TEST_DIR);
+    expect(notAUrl.exitCode).not.toBe(0);
+    expect(notAUrl.stdout).toContain('needs an http(s) URL');
+
+    expect(existsSync(join(TEST_DIR, 'patches'))).toBe(false);
+  });
+});

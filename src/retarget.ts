@@ -1,7 +1,7 @@
-import {cpSync, existsSync, renameSync, rmSync, writeFileSync} from 'fs';
+import {cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 import {diffTrees, readManifest, requireDiff, validatePackageName, withPristine} from './create';
-import {formatPatchName, listPatchFiles, parsePatchName} from './patch-file';
+import {formatPatchName, listPatchFiles, parsePatchName, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {patchesDirectory} from './paths';
 import {replayPatches} from './sequence';
 
@@ -98,10 +98,16 @@ function replayOnto(
 
     const diff = diffTrees(previous, current, packageName, name, version);
 
+    // Заголовок переезжает вместе с патчем: от смены версии пакета причина, по
+    // которой патч существует, не меняется. У патча, от которого на новой
+    // версии ничего не осталось, содержимое обязано остаться пустым — иначе
+    // один заголовок и был бы «перенесённым патчем».
+    const header = splitPatchHeader(readFileSync(join(patchesDirectory(), file), 'utf-8')).header;
+
     moved.push({
       from: file,
       to: formatPatchName({...parsePatchName(file)!, version}),
-      content: diff.content,
+      content: diff.content === '' ? '' : updatePatchHeader(header, {}) + diff.content,
     });
 
     // Снимок отработал своё: он был левой стороной диффа, и больше его никто не
