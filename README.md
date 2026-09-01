@@ -7,8 +7,9 @@
 ## Why bunch-package?
 
 - **Built for bun's install cache.** Bun links installed packages to a shared cache,
-  so editing a file in `node_modules` edits the cache too. Every command here knows
-  that; a tool written for npm does not.
+  so editing a file in `node_modules` edits the cache too — and every other project
+  on the machine with it. `edit` gives the package a private copy first; every other
+  command knows about the cache as well. A tool written for npm does not.
 - **Eight commands:** edit, create, apply, status, rebase, retarget, reverse and import.
 - **It tells you when it cannot do something.** Binary files, symbolic links, a hunk
   that no longer fits — all of them are named out loud rather than dropped, because
@@ -560,6 +561,7 @@ the same. Everything below was measured by running both, not assumed:
 | Patch section describing a symlink (`mode 120000`) | refused, and named as a symlink | refused as "could not be parsed" |
 | Record of what was applied | `node_modules/.bunch-package-state.json` | `.patch-package.json`, written inside the patched package |
 | Bun's shared install cache | handled | not addressed — its README does not mention bun |
+| Taking the package off that cache before you edit it | `edit` | — |
 | npm, yarn, pnpm, workspaces | not attempted | documented |
 | Moving a patch to a newer version of the package | `retarget` | — |
 | Converting patches from the other tool | `import`, for the ones bun writes | — |
