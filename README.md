@@ -10,7 +10,7 @@
   so editing a file in `node_modules` edits the cache too — and every other project
   on the machine with it. `edit` gives the package a private copy first; every other
   command knows about the cache as well. A tool written for npm does not.
-- **Eight commands:** edit, create, apply, status, rebase, retarget, reverse and import.
+- **Nine commands:** edit, create, apply, status, rebase, retarget, reverse, import and upstream.
 - **It tells you when it cannot do something.** Binary files, symbolic links, a hunk
   that no longer fits — all of them are named out loud rather than dropped, because
   a patch that silently carries less than you think is worse than no patch.
@@ -73,6 +73,7 @@ Now whenever someone runs `bun install`, patches are automatically applied!
 | `status` | Show which patches are in the tree right now |
 | `rebase <package> <patch>` | Un-apply the patches sitting on top of one, to edit it |
 | `retarget <package>` | Move its patches to the version now installed |
+| `upstream <package>` | Print a GitHub draft-issue URL with the patch diff |
 
 ### Before you edit
 
@@ -391,6 +392,49 @@ Un-applies all of them, top down, and empties the record. Patches bun owns are l
 alone. This is `rebase <package> 0` for the whole project, and it is what to reach
 for when `node_modules` needs to be what the installer produced without reinstalling
 it.
+
+### Filing a patch upstream
+
+A patch is a temporary fork, and the goal is for it to go away. Of 289 patches from
+public repositories, 5% (11 of 289) became unnecessary when the packages they
+targeted released the next version — the fix had already gone upstream. The faster
+you report it, the sooner the patch is gone.
+
+`upstream` builds a GitHub new-issue URL with the patch diff in the body, so you
+can open it, add context, and submit:
+
+```bash
+bunx bunch-package upstream ms
+```
+
+```
+https://github.com/vercel/ms/issues/new?title=Patch%20for%20ms%402.1.2&body=…
+```
+
+If the patch header carries `Why:` or `Upstream:` (written there by `create
+--why`/`--upstream`), those go into the body too — so the issue arrives with the
+reason already written.
+
+Open the URL in the browser automatically with `--open`:
+
+```bash
+bunx bunch-package upstream ms --open
+```
+
+On macOS this calls `open`, on Linux `xdg-open`, on Windows `explorer.exe` —
+directly, without going through `cmd.exe` (the URL contains `&`, which `cmd.exe`
+treats as a command separator).
+
+When the patch is too large to fit in a URL (limit: 8192 characters), `upstream`
+says so and prints a shorter URL instead, with a placeholder in the body prompting
+you to paste the diff manually. It never silently sends a truncated URL.
+
+If the package's `repository` field points to a non-GitHub host, `upstream` prints
+the repository address and tells you to file manually — it understands GitHub only.
+
+This is the equivalent of `patch-package --create-issue`, but without the `open`
+dependency: the project has no runtime dependencies beyond `diff` on PATH for
+`create`.
 
 ## Options
 
