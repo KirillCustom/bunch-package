@@ -3870,3 +3870,148 @@ describe('bunch-package upstream', () => {
     expect(result.stdout).toContain('https://github.com/acme/bigpkg/issues/new');
   });
 });
+
+describe('fold', () => {
+  const file = () => join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+
+  function sequenceOfThree() {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const original = readFileSync(file(), 'utf-8');
+
+    overwriteFile(file(), `${original}\n// ONE\n`);
+    run('create is-number --why "the first reason"', TEST_DIR);
+    run('apply', TEST_DIR);
+
+    overwriteFile(file(), `${readFileSync(file(), 'utf-8')}// TWO\n`);
+    run('create is-number --append two --why "the second reason"', TEST_DIR);
+
+    overwriteFile(file(), `${readFileSync(file(), 'utf-8')}// THREE\n`);
+    run('create is-number --append three', TEST_DIR);
+
+    return original;
+  }
+
+  test('collapses a sequence into one patch that produces the same tree', () => {
+    sequenceOfThree();
+    const patched = readFileSync(file(), 'utf-8');
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toHaveLength(3);
+
+    const result = run('fold is-number', TEST_DIR);
+    expect(result.exitCode).toBe(0);
+
+    // Один файл, без номера и метки.
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['is-number+7.0.0.patch']);
+    // Дерево не тронуто самим схлопыванием.
+    expect(readFileSync(file(), 'utf-8')).toBe(patched);
+
+    // И то же дерево получается, если применить сложенный патч с нуля.
+    expect(run('reverse', TEST_DIR).exitCode).toBe(0);
+    expect(readFileSync(file(), 'utf-8')).not.toContain('// ONE');
+    expect(run('apply', TEST_DIR).stdout).toContain('1 applied, 0 failed');
+    expect(readFileSync(file(), 'utf-8')).toBe(patched);
+  });
+
+  test('names the files it is about to delete', () => {
+    sequenceOfThree();
+
+    const result = run('fold is-number', TEST_DIR);
+
+    for (const name of ['001+initial', '002+two', '003+three']) {
+      expect(result.stdout).toContain(name);
+    }
+  });
+
+  test('carries the reasons of every patch into the folded one', () => {
+    sequenceOfThree();
+
+    run('fold is-number', TEST_DIR);
+
+    const folded = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(folded.startsWith('Why: the first reason; the second reason\n\n')).toBe(true);
+  });
+
+  test('refuses when a patch of the sequence is not in the tree, and touches nothing', () => {
+    sequenceOfThree();
+    const before = readdirSync(join(TEST_DIR, 'patches')).sort();
+    run('rebase is-number 001+initial', TEST_DIR); // снимаем верхние два
+
+    const result = run('fold is-number', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not in node_modules right now');
+    expect(result.stdout).toContain('002+two');
+    expect(readdirSync(join(TEST_DIR, 'patches')).sort()).toEqual(before);
+  });
+
+  test('keeps the dev mark of the sequence', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const original = readFileSync(file(), 'utf-8');
+    overwriteFile(file(), `${original}\n// ONE\n`);
+    run('create is-number --dev', TEST_DIR);
+    run('apply', TEST_DIR);
+    overwriteFile(file(), `${readFileSync(file(), 'utf-8')}// TWO\n`);
+    run('create is-number --append two', TEST_DIR);
+
+    expect(run('fold is-number', TEST_DIR).exitCode).toBe(0);
+
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['is-number+7.0.0.dev.patch']);
+  });
+
+  test('records the folded patch once, and only it', () => {
+    sequenceOfThree();
+    // Без этого `apply` в записи стоит имя одиночного патча — то самое, каким
+    // будет назван схлопнутый. Тогда запись верна и без нашей правки, и тест
+    // проходит, ничего не проверяя: проверено мутацией.
+    run('apply', TEST_DIR);
+    const before = JSON.parse(readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8'));
+    expect(before.patches.map((patch: {file: string}) => patch.file)).toHaveLength(3);
+
+    run('fold is-number', TEST_DIR);
+
+    // Смотрим саму запись, а не вывод status: `recordedPatches` раскладывает её
+    // в Map по имени файла, и дубль в ней виден только здесь.
+    const state = JSON.parse(readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8'));
+    expect(state.patches.map((patch: {file: string}) => patch.file)).toEqual(['is-number+7.0.0.patch']);
+
+    const shown = run('status', TEST_DIR);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).toContain('1 of 1 in the tree');
+    expect(shown.stdout).not.toContain('no longer exist');
+  });
+
+  test('does not record the same file twice when the sequence began as a single patch', () => {
+    // Последовательность начинается с одиночного патча, и `create --append`
+    // переименовывает его в `001+…`, а запись о применённом продолжает хранить
+    // прежнее имя — то самое, каким будет назван схлопнутый патч. Здесь и
+    // появлялся второй элемент с тем же именем.
+    sequenceOfThree();
+
+    run('fold is-number', TEST_DIR);
+
+    const state = JSON.parse(readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8'));
+    expect(state.patches.map((patch: {file: string}) => patch.file)).toEqual(['is-number+7.0.0.patch']);
+  });
+
+  test('says there is nothing to fold for a single patch, and for none', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const original = readFileSync(file(), 'utf-8');
+
+    const none = run('fold is-number', TEST_DIR);
+    expect(none.exitCode).not.toBe(0);
+    expect(none.stdout).toContain('nothing to fold');
+
+    overwriteFile(file(), `${original}\n// ONE\n`);
+    run('create is-number', TEST_DIR);
+    const single = run('fold is-number', TEST_DIR);
+    expect(single.exitCode).not.toBe(0);
+    expect(single.stdout).toContain('nothing to fold');
+    expect(existsSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'))).toBe(true);
+  });
+
+  test('reports a package that is not installed', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    const result = run('fold no-such-package', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+  });
+});

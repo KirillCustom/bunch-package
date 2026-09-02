@@ -93,6 +93,9 @@ jobs:
           # upstream: без repository — внятный отказ, не стек.
           bun ../index.ts upstream fakepkg 2>&1 | grep -q 'repository'
 
+          # fold: без последовательности схлопывать нечего — отказ, а не стек.
+          bun ../index.ts fold fakepkg 2>&1 | grep -q 'nothing to fold'
+
           # export: патч переименовывается в формат bun и записывается patchedDependencies.
           bun ../index.ts export
           test -f patches/fakepkg@1.0.0.patch
