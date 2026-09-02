@@ -4418,6 +4418,21 @@ describe('monorepo workspaces', () => {
     expect(result.stdout).toContain('already patched by bun through patchedDependencies');
   });
 
+  test('export writes the patch path the way bun resolves it — from the root', () => {
+    // Измерено на bun 1.4.0: ключ bun чтит и в манифесте воркспейса, а путь к
+    // файлу разрешает от корня. `patches/…` оттуда не находится, и установка
+    // либо ругается «Couldn't find patch file», либо молча ничего не применяет —
+    // а `export` при этом печатал «bun install will now apply them».
+    monorepo();
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    putPatch(workspace('a'), 'const a = 2;');
+
+    expect(run('export', workspace('a')).exitCode).toBe(0);
+
+    const manifest = JSON.parse(readFileSync(join(workspace('a'), 'package.json'), 'utf-8'));
+    expect(manifest.patchedDependencies).toEqual({[`${LIB}@1.0.0`]: `packages/a/patches/${LIB}@1.0.0.patch`});
+  });
+
   test('create finds a hoisted package and writes the patch path unchanged', () => {
     // Формат патча от монорепо не меняется: путь в нём как стоял
     // `node_modules/<pkg>/…`, так и стоит, иначе патчи перестали бы ходить

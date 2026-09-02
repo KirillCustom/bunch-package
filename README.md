@@ -860,7 +860,8 @@ as your own. Measured on bun 1.4.0: bun honours the key in both, and resolves th
 patch file's path from the root either way — a workspace `patches/ms@2.1.2.patch`
 gave `Couldn't find patch file`, the same file at the root applied. Reading only
 the manifest we run in would mean `create` in a workspace never noticed that bun
-already patches the package.
+already patches the package. For the same reason `export` from a workspace writes
+the path the way bun reads it, `packages/a/patches/ms@2.1.2.patch`.
 
 If you would rather this tool owned them, `bunch-package import` converts them:
 it renames `ms@2.1.2.patch` to `ms+2.1.2.patch` (`@vercel%2Fog@0.4.1.patch` to
