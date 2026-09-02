@@ -3517,6 +3517,22 @@ describe('parseRepository', () => {
 });
 
 describe('bunch-package upstream', () => {
+  test('rejects path traversal with ../..', () => {
+    // create уже проверяет имя — upstream обязан делать то же самое,
+    // иначе join('node_modules', '../..') читает файлы снаружи проекта.
+    const result = run('upstream ../..', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Invalid package name');
+    // Имя и версия чужого пакета не должны утекать в вывод
+    expect(result.stdout).not.toContain('secret');
+  });
+
+  test('rejects path traversal with dot .', () => {
+    const result = run('upstream .', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Invalid package name');
+  });
+
   test('fails clearly when package is not installed', () => {
     const result = run('upstream no-such-pkg', TEST_DIR);
     expect(result.exitCode).not.toBe(0);

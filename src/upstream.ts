@@ -1,7 +1,7 @@
 import {execFileSync} from 'child_process';
 import {readFileSync} from 'fs';
 import {join} from 'path';
-import {readManifest} from './create';
+import {readManifest, validatePackageName} from './create';
 import {listPatchFiles, parsePatchName, splitPatchHeader, patchHeaderField} from './patch-file';
 import {patchesDirectory} from './paths';
 
@@ -98,14 +98,25 @@ function patchContentFor(packageName: string, version: string): string | null {
 }
 
 // Открывает браузер через нативную команду платформы — без зависимостей.
-// execFileSync без shell: аргументы не интерпретируются шеллом, shell injection невозможна.
+// execFileSync без shell: аргументы не интерпретируются шеллом.
+//
+// На Windows URL содержит `&` между параметрами (`?title=…&body=…`). Для
+// cmd.exe `&` — разделитель команд, и `start "" url` передаёт его через
+// разбор аргументов cmd, где экранирование зависит от реализации рантайма.
+// После CVE-2024-27980 Node.js добавил защиту, поведение bun неизвестно.
+// explorer.exe принимает URL напрямую, без шелла-посредника, — так `&` не
+// интерпретируется вовсе.
 function openBrowser(url: string): void {
   if (process.platform === 'darwin') execFileSync('open', [url]);
-  else if (process.platform === 'win32') execFileSync('cmd', ['/c', 'start', '', url]);
+  else if (process.platform === 'win32') execFileSync('explorer.exe', [url]);
   else execFileSync('xdg-open', [url]);
 }
 
 export function upstreamIssue(packageName: string, open: boolean): void {
+  // `create` проверяет имя по той же причине: без этого `../..` попадает прямо
+  // в join('node_modules', ...) и читает файлы за пределами проекта.
+  validatePackageName(packageName);
+
   const packagePath = join('node_modules', packageName);
 
   // Пакет установлен?
