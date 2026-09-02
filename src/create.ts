@@ -8,6 +8,7 @@ import {PathFilters, pathAllowed} from './options';
 import {patchesDirectory, TEMP_WRITE_SUFFIX, ensureDir, isExecutable, realPathOutsideProject} from './paths';
 import {PatchHeaderFields, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
+import {renameRecordedPatch} from './state';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
 // что артефактно на любой глубине. Каталоги сборки сюда не входят: `build` у
@@ -631,6 +632,9 @@ function writePatch(plan: SequencePlan, patchContent: string, header: PatchHeade
   if (plan.renameFrom !== null) {
     // Одиночный патч становится первым в последовательности.
     renameSync(join(patchesDirectory(), plan.renameFrom), join(patchesDirectory(), plan.renameTo!));
+    // Запись о применённом переезжает следом — иначе она указывает на файл,
+    // которого больше нет, и `status` объявляет патч пропавшим.
+    renameRecordedPatch(plan.renameFrom, plan.renameTo!);
     console.log(`🔢 ${plan.renameFrom} → ${plan.renameTo}`);
   }
 
