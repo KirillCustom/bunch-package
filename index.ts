@@ -3,6 +3,7 @@
 import {applyPatches} from './src/apply';
 import {createPatch} from './src/create';
 import {editPackage} from './src/edit';
+import {exportPatches} from './src/export';
 import {importPatches} from './src/import';
 import {filtersOf, parseOptions} from './src/options';
 import {usePatchesDirectory} from './src/paths';
@@ -76,6 +77,10 @@ try {
       importPatches();
       break;
 
+    case 'export':
+      exportPatches(options.packages);
+      break;
+
     case 'retarget':
       retargetPatches(requirePackages('bunch-package retarget <package-name>')[0]);
       break;
@@ -122,6 +127,7 @@ Commands:
   bunch-package rebase <package> <patch|0>        Un-apply the patches that sit on top of one
   bunch-package retarget <package>                Move its patches to the installed version
   bunch-package import                            Convert patches written by \`bun patch\` to this format
+  bunch-package export [package]                  Convert patches back to \`bun patch\` format, for use with bun install
   bunch-package upstream <package>                Print a GitHub draft-issue URL with the patch diff
 
 Options:

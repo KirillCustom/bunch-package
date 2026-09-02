@@ -1149,6 +1149,228 @@ index 1111111111111111111111111111111111111111..22222222222222222222222222222222
   });
 });
 
+// export — обратная команда к import: переводит наш формат обратно в формат
+// bun patch, чтобы bun install применял патч сам, без postinstall.
+describe('export', () => {
+  // Простой патч в нашем формате (пути от корня проекта): именно он живёт в
+  // patches/ после import или create.
+  const BUNCH_PATCH = `diff --git a/node_modules/@scope/pkg/index.js b/node_modules/@scope/pkg/index.js
+index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644
+--- a/node_modules/@scope/pkg/index.js
++++ b/node_modules/@scope/pkg/index.js
+@@ -1,1 +1,1 @@
+-const a = 1;
++const a = 2;
+`;
+
+  // Тот же патч, но в формате bun: имя с %2F, пути от корня пакета.
+  const BUN_PATCH = `diff --git a/index.js b/index.js
+index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644
+--- a/index.js
++++ b/index.js
+@@ -1,1 +1,1 @@
+-const a = 1;
++const a = 2;
+`;
+
+  function setupBunchPatch() {
+    setupFakePackage(TEST_DIR, '@scope/pkg', '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({name: 'test-project', version: '1.0.0'}, null, 2),
+    );
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', '@scope+pkg+1.0.0.patch'), BUNCH_PATCH);
+  }
+
+  test('converts a bunch-package patch to bun format: renames and rewrites paths', () => {
+    setupBunchPatch();
+
+    const result = run('export', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['@scope%2Fpkg@1.0.0.patch']);
+
+    const converted = readFileSync(join(TEST_DIR, 'patches', '@scope%2Fpkg@1.0.0.patch'), 'utf-8');
+    expect(converted).toBe(BUN_PATCH);
+  });
+
+  test('adds the patch to patchedDependencies so bun installs it', () => {
+    setupBunchPatch();
+
+    run('export', TEST_DIR);
+
+    const manifest = JSON.parse(readFileSync(join(TEST_DIR, 'package.json'), 'utf-8'));
+    expect(manifest.patchedDependencies?.['@scope/pkg@1.0.0']).toBe('patches/@scope%2Fpkg@1.0.0.patch');
+    // Остальное в манифесте не тронуто.
+    expect(manifest.name).toBe('test-project');
+  });
+
+  test('says so when there is nothing to export', () => {
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+
+    const result = run('export', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('No patches to export');
+  });
+
+  test('refuses a dev-only patch — bun does not support them', () => {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.dev.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`);
+
+    const result = run('export', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    // Отказ внятный: пользователь понимает, почему файл не переехал.
+    expect(result.stdout).toContain('bun does not support dev-only patches');
+    // Файл не тронут.
+    expect(existsSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.dev.patch'))).toBe(true);
+  });
+
+  test('refuses a nested dependency — bun does not support them', () => {
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'outer++inner+1.0.0.patch'), `--- a/node_modules/outer/node_modules/inner/index.js
++++ b/node_modules/outer/node_modules/inner/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`);
+
+    const result = run('export', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('bun does not support nested dependencies');
+    expect(existsSync(join(TEST_DIR, 'patches', 'outer++inner+1.0.0.patch'))).toBe(true);
+  });
+
+  test('refuses a patch sequence — bun supports only one patch per package', () => {
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0+001+first.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`);
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0+002+second.patch'), `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 2;
++const a = 3;
+`);
+
+    const result = run('export', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('bun supports only one patch per package');
+    // Ни один из файлов последовательности не тронут.
+    expect(existsSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0+001+first.patch'))).toBe(true);
+    expect(existsSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0+002+second.patch'))).toBe(true);
+  });
+
+  test('exports only the named package when one is given', () => {
+    setupFakePackage(TEST_DIR, 'pkg-a', '1.0.0', {'index.js': 'const a = 1;\n'});
+    setupFakePackage(TEST_DIR, 'pkg-b', '2.0.0', {'index.js': 'const b = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const patchContent = (name: string) => `--- a/node_modules/${name}/index.js
++++ b/node_modules/${name}/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+    writeFileSync(join(TEST_DIR, 'patches', 'pkg-a+1.0.0.patch'), patchContent('pkg-a'));
+    writeFileSync(join(TEST_DIR, 'patches', 'pkg-b+2.0.0.patch'), patchContent('pkg-b'));
+
+    const result = run('export pkg-a', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(TEST_DIR, 'patches', 'pkg-a@1.0.0.patch'))).toBe(true);
+    // pkg-b не тронут.
+    expect(existsSync(join(TEST_DIR, 'patches', 'pkg-b+2.0.0.patch'))).toBe(true);
+    expect(existsSync(join(TEST_DIR, 'patches', 'pkg-b@2.0.0.patch'))).toBe(false);
+  });
+
+  // Тест-инверсия: import → export возвращает исходный файл побайтово.
+  // Обратная операция — лучший тест для прямой (INS-8).
+  test('import followed by export returns the original bun patch byte-for-byte', () => {
+    // Патч без .bun-tag- секции: import её дропает, поэтому инверсия
+    // не включает её в зачёт.
+    const bunPatch = BUN_PATCH;
+    setupFakePackage(TEST_DIR, '@scope/pkg', '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify(
+        {
+          name: 'test-project',
+          version: '1.0.0',
+          patchedDependencies: {'@scope/pkg@1.0.0': 'patches/@scope%2Fpkg@1.0.0.patch'},
+        },
+        null,
+        2,
+      ),
+    );
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', '@scope%2Fpkg@1.0.0.patch'), bunPatch);
+
+    expect(run('import', TEST_DIR).exitCode).toBe(0);
+    expect(run('export', TEST_DIR).exitCode).toBe(0);
+
+    const result = readFileSync(join(TEST_DIR, 'patches', '@scope%2Fpkg@1.0.0.patch'), 'utf-8');
+    expect(result).toBe(bunPatch);
+  });
+
+  // Тест-инверсия: export → import возвращает исходный файл побайтово.
+  test('export followed by import returns the original bunch-package patch byte-for-byte', () => {
+    setupBunchPatch();
+
+    expect(run('export', TEST_DIR).exitCode).toBe(0);
+    // После export: patchedDependencies есть, файл в bun-формате.
+    expect(run('import', TEST_DIR).exitCode).toBe(0);
+
+    const result = readFileSync(join(TEST_DIR, 'patches', '@scope+pkg+1.0.0.patch'), 'utf-8');
+    expect(result).toBe(BUNCH_PATCH);
+  });
+
+  // Контрольный тест с настоящим bun: патч, экспортированный нами и применённый
+  // bun install, даёт то же дерево, что наш apply. Зеркало аналогичного теста
+  // для import.
+  test('a patch exported by us ends up applying the same bytes when bun installs', () => {
+    execSync('bun add ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    execSync('bun patch ms@2.1.2', {cwd: TEST_DIR, stdio: 'pipe'});
+    const file = join(TEST_DIR, 'node_modules', 'ms', 'index.js');
+    overwriteFile(file, readFileSync(file, 'utf-8').replace('var s = 1000;', 'var s = 1000; // MY FIX'));
+    execSync('bun patch --commit node_modules/ms', {cwd: TEST_DIR, stdio: 'pipe'});
+
+    // Переводим в наш формат.
+    expect(run('import', TEST_DIR).exitCode).toBe(0);
+    expect(existsSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'))).toBe(true);
+
+    // Что дает наш apply?
+    rmSync(join(TEST_DIR, 'node_modules'), {force: true, recursive: true});
+    execSync('bun install', {cwd: TEST_DIR, stdio: 'pipe'}); // patchedDependencies нет → patch не применяется
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    const byUs = readFileSync(file, 'utf-8');
+    expect(byUs).toContain('MY FIX');
+
+    // Экспортируем обратно в формат bun.
+    expect(run('export', TEST_DIR).exitCode).toBe(0);
+    expect(existsSync(join(TEST_DIR, 'patches', 'ms@2.1.2.patch'))).toBe(true);
+    expect(existsSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'))).toBe(false);
+
+    // Что даёт bun install с нашим экспортированным патчем?
+    rmSync(join(TEST_DIR, 'node_modules'), {force: true, recursive: true});
+    execSync('bun install', {cwd: TEST_DIR, stdio: 'pipe'}); // bun применяет экспортированный патч
+
+    expect(readFileSync(file, 'utf-8')).toBe(byUs);
+  });
+});
+
 // Вложенная зависимость — `node_modules/outer/node_modules/inner` — появляется,
 // когда версии конфликтуют, и bun разводит их именно так. patch-package пишет
 // такие патчи через двойной плюс: `outer++inner+1.0.0.patch`.
