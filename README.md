@@ -395,10 +395,10 @@ it.
 
 ### Filing a patch upstream
 
-A patch is a temporary fork, and the goal is for it to go away. Of 289 patches from
-public repositories, 5% (11 of 289) became unnecessary when the packages they
-targeted released the next version — the fix had already gone upstream. The faster
-you report it, the sooner the patch is gone.
+A patch is a temporary fork, and the goal is for it to go away. It does happen:
+of a corpus of 292 real patches, 220 had a newer version of their package to move
+to, and **11 of those 220 (5%) were no longer needed** — the fix had gone upstream
+between the two versions. The faster it is reported, the sooner the patch is gone.
 
 `upstream` builds a GitHub new-issue URL with the patch diff in the body, so you
 can open it, add context, and submit:
