@@ -10,7 +10,7 @@
   so editing a file in `node_modules` edits the cache too — and every other project
   on the machine with it. `edit` gives the package a private copy first; every other
   command knows about the cache as well. A tool written for npm does not.
-- **Eleven commands:** edit, create, apply, status, rebase, fold, retarget, reverse, import, export and upstream.
+- **Twelve commands:** edit, create, apply, status, rebase, fold, annotate, retarget, reverse, import, export and upstream.
 - **It tells you when it cannot do something.** Binary files, symbolic links, a hunk
   that no longer fits — all of them are named out loud rather than dropped, because
   a patch that silently carries less than you think is worse than no patch.
@@ -74,6 +74,7 @@ Now whenever someone runs `bun install`, patches are automatically applied!
 | `rebase <package> <patch>` | Un-apply the patches sitting on top of one, to edit it |
 | `retarget <package>` | Move its patches to the version now installed |
 | `fold <package>` | Collapse its patch sequence into a single patch |
+| `annotate <package> <file>` | Show which patch brought each line of a file |
 | `import` | Convert patches written by `bun patch` to this format |
 | `export [package]` | Convert patches back to `bun patch` format, for use with `bun install` |
 | `upstream <package>` | Print a GitHub draft-issue URL with the patch diff |
@@ -326,6 +327,48 @@ so it would silently vanish from the result.
 The dev mark is inherited. The files that are about to be deleted are printed
 before they are deleted — folding cannot be undone, and only git can bring them
 back, and only if they were committed.
+
+### Which patch brought this line
+
+```bash
+bunx bunch-package annotate ms index.js
+```
+
+```
+📖 node_modules/ms/index.js
+
+  001  ms+2.1.2+001+initial.patch
+  002  ms+2.1.2+002+two.patch
+  003  ms+2.1.2+003+three.patch
+
+    1  001  // FROM THE FIRST PATCH
+    2  002  // FROM THE SECOND
+    3       /**
+    4        * Helpers.
+    5        */
+
+📊 3 line(s) from 3 patch(es).
+```
+
+With a sequence of three or four patches, nothing tells you where a given line
+came from except reading every patch and adding them up in your head. `annotate`
+does the adding: it replays the patches one by one onto a pristine copy and
+carries line authorship from each version to the next. Lines that came with the
+package are left unmarked.
+
+It never touches `node_modules`. The replay happens on the pristine copy in a
+temporary directory, so a command you run to *read* something cannot damage the
+tree — and the tree is compared against the result afterwards. If the file is not
+what the patches produce, nothing is annotated:
+
+```
+❌ node_modules/ms/index.js is not what the patches produce.
+   Either a patch is missing from the tree (run `bunch-package apply`), or the file was edited by hand.
+   Nothing is annotated, because the lines could not be attributed honestly.
+```
+
+That refusal is the point of the command: an annotation that quietly attributes
+hand-written lines to a patch is worse than no annotation.
 
 ### After upgrading the package
 

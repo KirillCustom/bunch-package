@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import {annotateFile} from './src/annotate';
 import {applyPatches} from './src/apply';
 import {createPatch} from './src/create';
 import {editPackage} from './src/edit';
@@ -82,6 +83,18 @@ try {
       exportPatches(options.packages);
       break;
 
+    case 'annotate': {
+      const usage = 'bunch-package annotate <package-name> <file>';
+      const [packageName, file] = requirePackages(usage);
+      if (file === undefined) {
+        console.error(`❌ Usage: ${usage}`);
+        process.exit(1);
+      }
+
+      annotateFile(packageName, file);
+      break;
+    }
+
     case 'fold':
       foldPatches(requirePackages('bunch-package fold <package-name>')[0]);
       break;
@@ -132,6 +145,7 @@ Commands:
   bunch-package rebase <package> <patch|0>        Un-apply the patches that sit on top of one
   bunch-package retarget <package>                Move its patches to the installed version
   bunch-package fold <package>                    Collapse its patch sequence into a single patch
+  bunch-package annotate <package> <file>         Show which patch brought each line of a file
   bunch-package import                            Convert patches written by \`bun patch\` to this format
   bunch-package export [package]                  Convert patches back to \`bun patch\` format, for use with bun install
   bunch-package upstream <package>                Print a GitHub draft-issue URL with the patch diff

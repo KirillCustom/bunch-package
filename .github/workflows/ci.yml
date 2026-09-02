@@ -93,6 +93,9 @@ jobs:
           # upstream: без repository — внятный отказ, не стек.
           bun ../index.ts upstream fakepkg 2>&1 | grep -q 'repository'
 
+          # annotate: отсутствующий файл — отказ до всякой сети, а не стек.
+          bun ../index.ts annotate fakepkg nope.js 2>&1 | grep -q 'does not exist'
+
           # fold: без последовательности схлопывать нечего — отказ, а не стек.
           bun ../index.ts fold fakepkg 2>&1 | grep -q 'nothing to fold'
 
