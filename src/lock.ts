@@ -1,6 +1,7 @@
 import {closeSync, openSync, readFileSync, renameSync, rmSync, writeSync} from 'fs';
 import {join} from 'path';
 import {ensureDir} from './paths';
+import {projectRoot} from './workspace';
 
 // Два apply одновременно — не выдумка: postinstall срабатывает на каждый
 // `bun install`, а в монорепозитории воркспейсы ставятся параллельно.
@@ -13,7 +14,14 @@ import {ensureDir} from './paths';
 //
 // Патч применяется целиком или не применяется вовсе — это верно внутри одного
 // процесса и должно быть верно между процессами. Отсюда замок.
-export const LOCK_FILE = join('node_modules', '.bunch-package.lock');
+//
+// Замок — один на дерево, а не на каталог запуска. В монорепо это разные вещи:
+// пакет, который патчат два воркспейса, лежит у корня одним каталогом, а cwd у
+// них свои. Пока замок брался от cwd, воркспейсы запирали каждый свой файл и
+// друг друга не видели — то есть не было защиты ровно там, где измерена гонка.
+export function lockFile(): string {
+  return join(projectRoot(), 'node_modules', '.bunch-package.lock');
+}
 const LOCK_WAIT_MS = 30_000;
 
 const POLL_MS = 50;

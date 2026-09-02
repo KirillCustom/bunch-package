@@ -1,9 +1,9 @@
 import {existsSync, readFileSync, readdirSync, realpathSync, statSync} from 'fs';
-import {join} from 'path';
+import {join, relative, sep} from 'path';
 import {readManifest, validatePackageName} from './create';
 import {bunAlsoPatches} from './foreign';
-import {LOCK_FILE, withApplyLock} from './lock';
-import {TEMP_WRITE_SUFFIX, atomicWrite, realPathOutsideProject} from './paths';
+import {lockFile, withApplyLock} from './lock';
+import {atomicWrite, installedPackagePath, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
 
 // Правка файла в node_modules меняет запись общего кеша bun. Измерено на 1.4.0:
 // при `--backend=hardlink` (умолчание Linux) у файла в node_modules и у файла в
@@ -57,7 +57,7 @@ function detachTree(root: string): {detached: number; scanned: number} {
 export function editPackage(packageName: string): void {
   validatePackageName(packageName);
 
-  const packagePath = join(process.cwd(), 'node_modules', packageName);
+  const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
     throw new Error(`Package ${packageName} not found in node_modules`);
   }
@@ -77,7 +77,7 @@ export function editPackage(packageName: string): void {
   // симлинк на node_modules/.bun/…; у bun бывает и вариант, где эта цепочка
   // уходит в общий стор внутри кеша. Разрывать хардлинки там нельзя — писать мы
   // будем уже в сам стор, то есть ровно в то, от чего команда защищает.
-  const shared = realPathOutsideProject(join('node_modules', packageName));
+  const shared = realPathOutsideProject(`node_modules/${packageName}`);
   if (shared !== null) {
     throw new Error(
       `node_modules/${packageName} resolves to ${shared}, which is outside the project.\n` +
@@ -95,7 +95,7 @@ export function editPackage(packageName: string): void {
   // перестановку, и если он положит новую версию файла между нашим чтением и
   // нашей перестановкой, мы вернём на место старую — то есть снимем только что
   // применённый патч, ничего об этом не сказав.
-  const {detached, scanned} = withApplyLock(LOCK_FILE, () => detachTree(real));
+  const {detached, scanned} = withApplyLock(lockFile(), () => detachTree(real));
 
   if (detached === 0) {
     console.log(`✅ Nothing to detach — all ${scanned} file(s) are already private copies`);
@@ -104,6 +104,9 @@ export function editPackage(packageName: string): void {
     console.log(`✅ Detached ${detached} of ${scanned} file(s) from bun's cache`);
   }
 
-  console.log(`\nNow edit node_modules/${packageName}, then run:`);
+  // В монорепо пакет может быть поднят к корню, и своего node_modules у
+  // воркспейса тогда нет вовсе: советовать «правь node_modules/<pkg>» значило бы
+  // называть путь, которого здесь не существует.
+  console.log(`\nNow edit ${relative(process.cwd(), packagePath).split(sep).join('/')}, then run:`);
   console.log(`  bunch-package create ${packageName}`);
 }

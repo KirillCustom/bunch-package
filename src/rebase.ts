@@ -1,6 +1,6 @@
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
-import {LOCK_FILE, withApplyLock} from './lock';
+import {lockFile, withApplyLock} from './lock';
 import {applyHunks} from './hunks';
 import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch-file';
 import {patchesAppliedByBun} from './foreign';
@@ -32,7 +32,7 @@ export function rebasePatches(packageName: string, target: string): void {
 
   console.log(`🔧 Rebasing ${packageName} onto ${keep === 0 ? 'nothing' : mine[keep - 1]}...`);
 
-  const removed = withApplyLock(LOCK_FILE, () => unApply(undo));
+  const removed = withApplyLock(lockFile(), () => unApply(undo));
 
   if (removed < undo.length) {
     // Часть патчей снять не удалось. Те, что выше сорвавшегося, уже сняты, сам
@@ -84,7 +84,7 @@ export function reverseAll(): void {
 
   // Сверху вниз: патчи последовательности лежат друг на друге.
   const undo = [...all].reverse();
-  const removed = withApplyLock(LOCK_FILE, () => unApply(undo));
+  const removed = withApplyLock(lockFile(), () => unApply(undo));
 
   recordPatches([...recordedPatches().keys()].filter(file => !undo.slice(0, removed).includes(file)));
 

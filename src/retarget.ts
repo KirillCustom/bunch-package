@@ -2,7 +2,7 @@ import {cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync} fro
 import {join} from 'path';
 import {diffTrees, readManifest, requireDiff, validatePackageName, withPristine} from './create';
 import {formatPatchName, listPatchFiles, parsePatchName, splitPatchHeader, updatePatchHeader} from './patch-file';
-import {patchesDirectory} from './paths';
+import {installedPackagePath, patchesDirectory} from './paths';
 import {replayPatches} from './sequence';
 
 // Пакет обновили — патчи остались от старой версии. `apply` о таком только
@@ -20,7 +20,7 @@ export function retargetPatches(packageName: string): void {
   validatePackageName(packageName);
   requireDiff();
 
-  const packagePath = join(process.cwd(), 'node_modules', packageName);
+  const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
     throw new Error(`Package ${packageName} not found in node_modules`);
   }

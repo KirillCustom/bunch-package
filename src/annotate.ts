@@ -4,7 +4,7 @@ import {join} from 'path';
 import {readManifest, requireDiff, validatePackageName, withPristine} from './create';
 import {bunAlsoPatches} from './foreign';
 import {listPatchFiles, orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
-import {realPathOutsideProject} from './paths';
+import {installedPackagePath, realPathOutsideProject} from './paths';
 import {replayPatches} from './sequence';
 
 // Метка строки — индекс патча, который её принёс, или null: строку никто не
@@ -81,12 +81,12 @@ export function annotateFile(packageName: string, relativePath: string): void {
   validatePackageName(packageName);
   requireDiff();
 
-  const packagePath = join(process.cwd(), 'node_modules', packageName);
+  const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
     throw new Error(`Package ${packageName} not found in node_modules`);
   }
 
-  const shared = realPathOutsideProject(join('node_modules', packageName));
+  const shared = realPathOutsideProject(`node_modules/${packageName}`);
   if (shared !== null) {
     throw new Error(
       `node_modules/${packageName} resolves to ${shared}, outside the project — that is bun's shared store.\n` +

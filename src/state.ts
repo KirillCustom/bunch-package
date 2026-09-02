@@ -2,7 +2,7 @@ import {createHash} from 'crypto';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 import {parsePatchName, splitPatchHeader} from './patch-file';
-import {patchesDirectory, atomicWrite} from './paths';
+import {patchesDirectory, atomicWrite, ensureDir} from './paths';
 
 // Запись о том, что и когда легло в дерево. Нужна затем, чтобы на вопрос «что
 // сейчас в node_modules» был ответ, не требующий разбирать патчи глазами.
@@ -136,5 +136,9 @@ export function renameRecordedPatch(from: string, to: string): void {
 
 function writeState(patches: RecordedPatch[]): void {
   const state: State = {version: VERSION, patches};
+  // В монорепо с поднятыми зависимостями своего node_modules у воркспейса может
+  // не быть вовсе — измерено на bun 1.4.0 с `--linker hoisted`. Запись всё равно
+  // принадлежит воркспейсу: она описывает его каталог patches/, а не дерево.
+  ensureDir(join(STATE_FILE, '..'));
   atomicWrite(STATE_FILE, JSON.stringify(state, null, 2) + '\n');
 }

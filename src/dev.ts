@@ -1,6 +1,6 @@
 import {existsSync, readFileSync} from 'fs';
 import {PatchTarget, parsePatchName} from './patch-file';
-import {packageDirectoryOf, stripPathPrefix} from './paths';
+import {packageDirectoryOf, packageInstalled, stripPathPrefix} from './paths';
 
 // Патч с суффиксом `.dev.patch` относится к пакету, которого в production нет:
 // его ставят только с devDependencies. Отказывать из-за такого патча на
@@ -51,7 +51,7 @@ export function missingPackages(targets: PatchTarget[]): string[] {
       if (raw === null || raw === undefined) continue;
 
       const directory = packageDirectoryOf(stripPathPrefix(raw));
-      if (directory === null || existsSync(directory) || missing.includes(directory)) continue;
+      if (directory === null || packageInstalled(directory) || missing.includes(directory)) continue;
       missing.push(directory);
     }
   }

@@ -1,7 +1,8 @@
 import {existsSync, readFileSync, renameSync, rmSync, writeFileSync} from 'fs';
-import {join} from 'path';
+import {join, relative, resolve, sep} from 'path';
 import {listPatchFiles, parsePatchName} from './patch-file';
 import {patchesDirectory} from './paths';
+import {workspaceRoot} from './workspace';
 
 // Переписывает пути от корня проекта обратно к корню пакета — точно обратно
 // тому, что делает toProjectPaths в import.ts.
@@ -59,6 +60,20 @@ function toBunFileName(name: string, version: string): string {
   return `${encoded}@${version}.patch`;
 }
 
+// Путь к файлу патча bun разрешает **от корня воркспейсов**, даже когда сам
+// ключ стоит в манифесте воркспейса. Измерено на bun 1.4.0: с воркспейсным
+// `patches/ms@2.1.2.patch` установка либо падает «Couldn't find patch file»,
+// либо молча ничего не применяет, а тот же ключ с `packages/a/patches/…`
+// применяется. То есть `export` из воркспейса писал конфигурацию, которая не
+// работает, и печатал «bun install will now apply them».
+//
+// Вне монорепо ответ прежний, байт в байт: relative от cwd до cwd — пусто.
+function manifestPath(patchFile: string): string {
+  const root = workspaceRoot() ?? process.cwd();
+  const file = resolve(process.cwd(), patchesDirectory(), patchFile);
+  return relative(root, file).split(sep).join('/');
+}
+
 function readManifestJson(): any {
   if (!existsSync('package.json')) return {};
   try {
@@ -75,7 +90,7 @@ function addToManifest(name: string, version: string, patchFile: string): void {
   if (typeof manifest.patchedDependencies !== 'object' || manifest.patchedDependencies === null) {
     manifest.patchedDependencies = {};
   }
-  manifest.patchedDependencies[`${name}@${version}`] = `${patchesDirectory()}/${patchFile}`;
+  manifest.patchedDependencies[`${name}@${version}`] = manifestPath(patchFile);
 
   const temp = `package.json.bunch-export-${process.pid}`;
   try {

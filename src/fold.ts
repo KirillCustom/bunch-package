@@ -16,7 +16,7 @@ import {
   splitPatchHeader,
   updatePatchHeader,
 } from './patch-file';
-import {patchesDirectory, realPathOutsideProject} from './paths';
+import {installedPackagePath, patchesDirectory, realPathOutsideProject} from './paths';
 import {isInTree} from './presence';
 import {recordPatches, recordedPatches} from './state';
 
@@ -54,7 +54,7 @@ export function foldPatches(packageName: string): void {
   validatePackageName(packageName);
   requireDiff();
 
-  const packagePath = join(process.cwd(), 'node_modules', packageName);
+  const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
     throw new Error(`Package ${packageName} not found in node_modules`);
   }
@@ -65,7 +65,7 @@ export function foldPatches(packageName: string): void {
     throw new Error(`${name} is patched by bun through patchedDependencies — its patches are not ours to fold.`);
   }
 
-  const shared = realPathOutsideProject(join('node_modules', packageName));
+  const shared = realPathOutsideProject(`node_modules/${packageName}`);
   if (shared !== null) {
     throw new Error(
       `node_modules/${packageName} resolves to ${shared}, outside the project — that is bun's shared store.\n` +

@@ -2,7 +2,7 @@ import {chmodSync, existsSync, lstatSync, readFileSync, renameSync, rmSync, type
 import {join} from 'path';
 import {AppliedFile, applyHunks} from './hunks';
 import {Hunk, PatchTarget, sideIsEmpty} from './patch-file';
-import {MODES_SUPPORTED, atomicWrite, ensureDir, isExecutable, packageDirectoryOf, resolveInsideProject, stripPathPrefix, withExecutable} from './paths';
+import {MODES_SUPPORTED, atomicWrite, ensureDir, isExecutable, packageDirectoryOf, packageInstalled, resolvePackagePath, stripPathPrefix, withExecutable} from './paths';
 
 // Режим симлинка в git-заголовках. У обычных файлов — 100644 и 100755.
 const SYMLINK_MODE = '120000';
@@ -179,7 +179,7 @@ export function planTarget(
   // доводке эталона его молча не происходило, и весь переименованный файл уезжал
   // в следующий патч последовательности — см. тест ниже по этому же файлу.
   const locate = (projectRelative: string): string => {
-    if (context === undefined) return resolveInsideProject(projectRelative);
+    if (context === undefined) return resolvePackagePath(projectRelative);
     if (!projectRelative.startsWith(context.prefix)) {
       throw new Error(`${projectRelative} does not belong to ${context.prefix}`);
     }
@@ -190,7 +190,7 @@ export function planTarget(
 
   if (context === undefined) {
     const packageDir = packageDirectoryOf(relativePath);
-    if (packageDir !== null && !existsSync(packageDir)) {
+    if (packageDir !== null && !packageInstalled(packageDir)) {
       throw new Error(`${packageDir} is not installed`);
     }
   }

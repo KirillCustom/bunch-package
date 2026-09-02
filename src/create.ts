@@ -5,7 +5,7 @@ import {homedir} from 'os';
 import {join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
 import {PathFilters, pathAllowed} from './options';
-import {patchesDirectory, TEMP_WRITE_SUFFIX, ensureDir, isExecutable, realPathOutsideProject} from './paths';
+import {ensureDir, installedPackagePath, isExecutable, patchesDirectory, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
 import {PatchHeaderFields, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 import {renameRecordedPatch} from './state';
@@ -743,7 +743,7 @@ export function createPatch(
   requireDiff();
   console.log(`📦 Creating patch for ${packageName}...`);
 
-  const packagePath = join(process.cwd(), 'node_modules', packageName);
+  const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
     throw new Error(`Package ${packageName} not found in node_modules`);
   }
@@ -762,7 +762,7 @@ export function createPatch(
   // Патч отсюда собрать можно — читать общий стор не вредно. Но сказать надо:
   // его содержимое мог изменить другой проект, и `apply` в такое дерево писать
   // откажется, так что патч рискует оказаться и неверным, и неприменимым.
-  const shared = realPathOutsideProject(join('node_modules', packageName));
+  const shared = realPathOutsideProject(`node_modules/${packageName}`);
   if (shared !== null) {
     console.log(`⚠️  node_modules/${packageName} is a link into bun's shared store (${shared})`);
     console.log(`   Another project on this machine may have changed it, and \`apply\` will refuse to patch through it.`);

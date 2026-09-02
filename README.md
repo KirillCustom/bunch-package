@@ -218,7 +218,8 @@ leave a truncated file that no later `apply` could ever patch, because a hunk do
 not fit against emptiness.
 
 Only one `apply` runs at a time. It holds `node_modules/.bunch-package.lock` for the
-length of the run; a second `apply` waits up to 30 seconds for the first to finish,
+length of the run — in a monorepo, the one at the workspace root, since that is the
+tree the workspaces share; a second `apply` waits up to 30 seconds for the first to finish,
 then reports who is holding the lock. Two runs a moment apart are ordinary —
 `postinstall` firing twice, workspaces installing in parallel — and without the lock
 they can interleave into a tree that is neither the patched nor the unpatched one. A
@@ -533,7 +534,9 @@ dependency: the project has no runtime dependencies beyond `diff` on PATH for
 ```
 
 `--patch-dir` applies to every command, and the directory has to be inside the
-project. A monorepo is the reason it exists: each workspace can keep its own.
+directory you run in. A monorepo does not need it — a workspace runs in its own
+directory and so already has its own `patches/`, see [Monorepos](#monorepos); it
+is for keeping two sets of patches side by side in one project.
 
 `--include` and `--exclude` are matched against paths relative to the root of the
 package being patched, and only affect `create`. Case is ignored unless you say
@@ -667,12 +670,67 @@ package it is about to diff may have been changed by somebody else's project.
 The way out is in the message, and it works: with the store back inside the
 project, everything runs as usual.
 
-**In a monorepo** the isolated layout gives every workspace a link to the *same*
-directory — measured: `packages/a/node_modules/ms` and `packages/b/node_modules/ms`
-resolve to one inode under `node_modules/.bun/`. A patch applied from one
-workspace therefore changes the package for all of them. That store belongs to
-the project, so nothing is refused; it is worth knowing before you patch a
-package two workspaces share.
+**In a monorepo** the project is the workspace root, not the directory you run in,
+so the store under `<root>/node_modules/.bun/` is not somebody else's store and
+nothing is refused there. A link that leaves the monorepo still is. See
+[Monorepos](#monorepos).
+
+## Monorepos
+
+Measured on bun 1.4.0. `bun install` at the root runs the `postinstall` of every
+workspace **and** of the root, each with its own directory as the working
+directory, and the workspaces start in parallel — two starts matched to the
+microsecond. So one `patches/` directory per workspace works on its own: each
+workspace patches what it depends on, and `--patch-dir` is not needed for it.
+
+Where the package physically is depends on the linker:
+
+| layout | `packages/a/node_modules/ms` |
+|---|---|
+| default for workspaces | symlink to `<root>/node_modules/.bun/ms@2.1.2/node_modules/ms` |
+| `--linker hoisted` | not there at all — `ms` sits in `<root>/node_modules/ms` |
+| `--linker hoisted`, two versions wanted | the workspace that lost the hoist keeps its own copy |
+
+Both are handled. A package is looked for in the workspace first and then
+upwards, as far as the workspace root — the parent `node_modules` that
+patch-package #356 asks for. The patch file does not change: the paths inside it
+stay `node_modules/<pkg>/…`, so the same patch works in a plain project and still
+travels to and from `patch-package`.
+
+The lock lives at the workspace root, `<root>/node_modules/.bunch-package.lock`.
+A lock per workspace would exclude nothing: the workspaces run at the same moment
+and write into the same directory.
+
+The upward search happens only when a parent `package.json` declares `workspaces`
+**and** names the directory you are in among them. A forgotten manifest higher up
+the tree does not turn your home directory into the project.
+
+### Two workspaces, one directory
+
+Two workspaces that depend on the same version of a package get one directory —
+measured: `packages/a/node_modules/is-number` and `packages/b/node_modules/is-number`
+came back with the same inode. If they patch it differently there is no tree that
+satisfies both, and whichever ran last would win. We refuse, in whichever
+workspace runs, and name the other one:
+
+```
+❌ is-number+7.0.0.patch
+   node_modules/is-number is shared with workspace packages/b, which patches it differently.
+   Both resolve to /repo/node_modules/.bun/is-number@7.0.0/node_modules/is-number — one directory, two different patches
+   (is-number+7.0.0.patch here, is-number+7.0.0.patch there), so whichever ran last would win.
+   Give the two workspaces different versions of the package, or make the patches identical.
+```
+
+Identical patches are not a conflict: both workspaces want the same thing from
+the shared directory, and one of them putting it there suits the other.
+
+What `patch-package` 8.0.1 does in that situation was measured on the same tree:
+it applies the patch and says nothing. Workspace `a`'s change appears in `b`'s
+tree, and since it writes files in place, with `--backend=hardlink` the change
+also reaches bun's cache entry — that is, the next clean install of any project on
+the machine. `apply` here writes through a temporary file and a rename, which
+gives the file its own inode: checked on the same tree, the cache entry was
+unchanged afterwards.
 
 ## Platforms
 
@@ -767,7 +825,9 @@ the same. Everything below was measured by running both, not assumed:
 | Bun's shared install cache | handled | not addressed — its README does not mention bun |
 | Taking the package off that cache before you edit it | `edit` | — |
 | Recording why a patch exists | `--why` / `--upstream`, carried through rewrites | — |
-| npm, yarn, pnpm, workspaces | not attempted | documented |
+| npm, yarn, pnpm | not attempted | documented |
+| A package hoisted to the monorepo root | found by searching upwards | `Cannot find module …/package.json`, a Node stack trace |
+| Two workspaces patching one shared directory differently | refused in both, and the other workspace named | applied silently, last one wins |
 | Moving a patch to a newer version of the package | `retarget` | — |
 | Converting patches from the other tool | `import`, for the ones bun writes | — |
 | Dev-only patches (`*.dev.patch`) | skipped when the package is absent, `--dev` to create one | skipped when the package is absent |
@@ -794,6 +854,14 @@ and a patch whose paths are not under `node_modules/` is refused out loud, becau
 applying it as if the paths were ours would write into the project's own files.
 `create` refuses a package bun already patches, since bun's patch is in
 `node_modules` but not in the pristine copy and would end up inside the new patch.
+
+In a monorepo the list is read from the workspace root's `package.json` as well
+as your own. Measured on bun 1.4.0: bun honours the key in both, and resolves the
+patch file's path from the root either way — a workspace `patches/ms@2.1.2.patch`
+gave `Couldn't find patch file`, the same file at the root applied. Reading only
+the manifest we run in would mean `create` in a workspace never noticed that bun
+already patches the package. For the same reason `export` from a workspace writes
+the path the way bun reads it, `packages/a/patches/ms@2.1.2.patch`.
 
 If you would rather this tool owned them, `bunch-package import` converts them:
 it renames `ms@2.1.2.patch` to `ms+2.1.2.patch` (`@vercel%2Fog@0.4.1.patch` to
