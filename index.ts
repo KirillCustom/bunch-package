@@ -3,6 +3,7 @@
 import {applyPatches} from './src/apply';
 import {createPatch} from './src/create';
 import {editPackage} from './src/edit';
+import {foldPatches} from './src/fold';
 import {exportPatches} from './src/export';
 import {importPatches} from './src/import';
 import {filtersOf, parseOptions} from './src/options';
@@ -81,6 +82,10 @@ try {
       exportPatches(options.packages);
       break;
 
+    case 'fold':
+      foldPatches(requirePackages('bunch-package fold <package-name>')[0]);
+      break;
+
     case 'retarget':
       retargetPatches(requirePackages('bunch-package retarget <package-name>')[0]);
       break;
@@ -126,6 +131,7 @@ Commands:
   bunch-package status                            Show which patches are in the tree
   bunch-package rebase <package> <patch|0>        Un-apply the patches that sit on top of one
   bunch-package retarget <package>                Move its patches to the installed version
+  bunch-package fold <package>                    Collapse its patch sequence into a single patch
   bunch-package import                            Convert patches written by \`bun patch\` to this format
   bunch-package export [package]                  Convert patches back to \`bun patch\` format, for use with bun install
   bunch-package upstream <package>                Print a GitHub draft-issue URL with the patch diff

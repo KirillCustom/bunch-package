@@ -1,6 +1,6 @@
 # bunch-package
 
-Управление патчами `node_modules` для bun: альтернатива patch-package, опубликована в npm. Команды: `edit`, `create`, `apply`, `status`, `rebase`, `reverse`, `retarget`, `import`, `export`, `upstream`.
+Управление патчами `node_modules` для bun: альтернатива patch-package, опубликована в npm. Команды: `edit`, `create`, `apply`, `status`, `rebase`, `fold`, `reverse`, `retarget`, `import`, `upstream`, `export`.
 
 TypeScript без сборки, запускается bun'ом напрямую; `dist/index.js` собирается только для публикации. Никаких зависимостей во время работы, кроме `diff` на PATH для `create`.
 

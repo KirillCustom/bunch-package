@@ -10,7 +10,7 @@
   so editing a file in `node_modules` edits the cache too — and every other project
   on the machine with it. `edit` gives the package a private copy first; every other
   command knows about the cache as well. A tool written for npm does not.
-- **Ten commands:** edit, create, apply, status, rebase, retarget, reverse, import, export and upstream.
+- **Eleven commands:** edit, create, apply, status, rebase, fold, retarget, reverse, import, export and upstream.
 - **It tells you when it cannot do something.** Binary files, symbolic links, a hunk
   that no longer fits — all of them are named out loud rather than dropped, because
   a patch that silently carries less than you think is worse than no patch.
@@ -73,6 +73,7 @@ Now whenever someone runs `bun install`, patches are automatically applied!
 | `status` | Show which patches are in the tree right now |
 | `rebase <package> <patch>` | Un-apply the patches sitting on top of one, to edit it |
 | `retarget <package>` | Move its patches to the version now installed |
+| `fold <package>` | Collapse its patch sequence into a single patch |
 | `import` | Convert patches written by `bun patch` to this format |
 | `export [package]` | Convert patches back to `bun patch` format, for use with `bun install` |
 | `upstream <package>` | Print a GitHub draft-issue URL with the patch diff |
@@ -288,6 +289,43 @@ one in the sequence. It knows which that is from the record `apply` and `rebase`
 keep — checked against the tree, since a record can go stale: the patches above the
 target must really be absent, or their changes would be swallowed into the patch
 being rewritten.
+
+### Folding a sequence back into one patch
+
+```bash
+bunx bunch-package fold react-native
+```
+
+```
+🗜  Folding 3 patches for react-native@0.81.4...
+   These files will be replaced by react-native+0.81.4.patch:
+     react-native+0.81.4+001+initial.patch
+     react-native+0.81.4+002+fix-touchable.patch
+     react-native+0.81.4+003+another.patch
+
+✅ react-native+0.81.4.patch
+   3 patches folded into one; node_modules is unchanged.
+```
+
+A sequence is useful while the changes are still being made — each patch carries
+only its own change, and `rebase` lets you edit one in the middle. Once they have
+settled, the intermediate patches have no separate meaning left, and every
+`retarget` has to move all of them. `fold` collapses the sequence into a single
+patch describing the same tree.
+
+Nothing is invented for the collapse: the diff is taken between a pristine copy
+and `node_modules`, the same way `create` takes it. So the folded patch produces
+byte for byte the tree the sequence produced — un-apply it and apply it again to
+see that.
+
+The whole sequence has to be in the tree. If any of it is missing, `fold` refuses
+and names the files: the missing patch's change is not in `node_modules` either,
+so it would silently vanish from the result.
+
+`Why:` lines of all the patches are carried into the folded one, joined in order.
+The dev mark is inherited. The files that are about to be deleted are printed
+before they are deleted — folding cannot be undone, and only git can bring them
+back, and only if they were committed.
 
 ### After upgrading the package
 
