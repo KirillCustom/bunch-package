@@ -1,6 +1,6 @@
 import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
-import {existsSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
+import {existsSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
 import {homedir} from 'os';
 import {join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
@@ -744,6 +744,15 @@ export function createPatch(
     throw new Error(`Package ${packageName} not found in node_modules`);
   }
 
+  // При изолированной раскладке (`bun install --linker isolated`) это симлинк на
+  // node_modules/.bun/…, и GNU diff, получив симлинк вторым аргументом, ищет
+  // файл с таким именем в первом каталоге: `diff: <эталон>/ms: No such file or
+  // directory`. Измерено на GNU diffutils 3.12; Apple diff ссылку разыменовывает,
+  // поэтому на macOS этого не видно, а на Linux и Windows `create` не работал
+  // в такой раскладке вовсе. Сравниваем настоящий каталог — пути в патче
+  // по-прежнему строятся из имени пакета, а не из этого пути.
+  const realPackagePath = realpathSync(packagePath);
+
   const {name, version} = readManifest(packagePath);
 
   // Патч отсюда собрать можно — читать общий стор не вредно. Но сказать надо:
@@ -787,8 +796,8 @@ export function createPatch(
     }
 
     console.log(`🔍 Generating diff...`);
-    const diff = diffTrees(cleanPackagePath, packagePath, packageName, name, version, filters);
-    reportBinaryFiles(diff.rawPatch, packagePath);
+    const diff = diffTrees(cleanPackagePath, realPackagePath, packageName, name, version, filters);
+    reportBinaryFiles(diff.rawPatch, realPackagePath);
     reportLinkDifferences(diff.linkDifferences);
     reportSkipped(diff.skipped);
     reportFiltered(diff.filtered);
