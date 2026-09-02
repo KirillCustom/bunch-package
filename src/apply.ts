@@ -6,7 +6,7 @@ import {LOCK_FILE, withApplyLock} from './lock';
 import {PatchTarget, formatPatchName, listPatchFiles, parsePatchName} from './patch-file';
 import {patchesDirectory, packageDirectoryOf, stripPathPrefix} from './paths';
 import {executeOps} from './plan';
-import {presenceOf, readTargets} from './presence';
+import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
 import {appliedSequences} from './sequence';
 import {recordPatches} from './state';
 
@@ -155,6 +155,16 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
       if (inProduction() && parsed !== null && !parsed.devOnly) {
         console.log(`     If it is a dev dependency, rename this patch to ${formatPatchName({...parsed, devOnly: true})}`);
       }
+      continue;
+    }
+
+    // Пакет лежит не там, где написано: node_modules/<pkg> — симлинк в общий
+    // стор bun. Писать туда — менять пакет всем проектам на машине; проверено,
+    // соседний проект приезжает с чужой заплатой. Отказываемся, как отказывается
+    // сам bun, когда видит путь сквозь общий стор.
+    const outsideProject = packagesOutsideProject(targets);
+    if (outsideProject.length > 0) {
+      fail(outsideProjectReason(outsideProject[0]));
       continue;
     }
 

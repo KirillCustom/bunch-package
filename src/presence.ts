@@ -1,7 +1,7 @@
 import {readFileSync} from 'fs';
 import {join} from 'path';
 import {PatchTarget, parsePatch} from './patch-file';
-import {patchesDirectory} from './paths';
+import {packageDirectoryOf, patchesDirectory, realPathOutsideProject, stripPathPrefix} from './paths';
 import {PlannedOp, planTarget} from './plan';
 
 // Один вопрос — «что сейчас с этим патчем относительно дерева» — и один ответ на
@@ -59,4 +59,39 @@ export function isInTree(patchFile: string): boolean {
   } catch {
     return false; // не ложится и не узнаётся — значит его в дереве нет
   }
+}
+
+// Пакеты патча, которые лежат не там, где написано. Спрашивают все, кто пишет в
+// дерево: apply, rebase и reverse, — и status, чтобы не отвечать «в дереве» про
+// дерево, которое проекту не принадлежит.
+export interface OutsidePackage {
+  directory: string; // как записано в патче: node_modules/<pkg>
+  real: string; // куда ведёт на диске
+}
+
+export function packagesOutsideProject(targets: PatchTarget[]): OutsidePackage[] {
+  const found: OutsidePackage[] = [];
+
+  for (const target of targets) {
+    const raw = target.newPath ?? target.oldPath;
+    if (raw === null) continue;
+
+    const directory = packageDirectoryOf(stripPathPrefix(raw));
+    if (directory === null || found.some(other => other.directory === directory)) continue;
+
+    const real = realPathOutsideProject(directory);
+    if (real !== null) found.push({directory, real});
+  }
+
+  return found;
+}
+
+// Один и тот же текст у apply, rebase и status: расходиться в объяснении одного
+// и того же отказа — значит трижды объяснять его по-разному.
+export function outsideProjectReason({directory, real}: OutsidePackage): string {
+  return (
+    `${directory} resolves to ${real}, outside the project — that is bun's shared store.\n` +
+    `     Patching there would change the package for every project on this machine.\n` +
+    `     Reinstall with the store inside the project: BUN_INSTALL_GLOBAL_STORE=0 bun install`
+  );
 }

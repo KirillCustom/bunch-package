@@ -4,7 +4,7 @@ import {missingPackages, skipsMissingPackage} from './dev';
 import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
 import {listPatchFiles, patchHeaderSummary, splitPatchHeader} from './patch-file';
 import {patchesDirectory} from './paths';
-import {Presence, presenceOf, readTargets} from './presence';
+import {Presence, outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
 import {appliedSequences} from './sequence';
 import {RecordedPatch, STATE_FILE, hashPatchBody, hashPatchFile, readState, recordedPatches} from './state';
 
@@ -21,6 +21,11 @@ function shownPresence(patchFile: string, wholeSequenceApplied: Set<string>): Sh
   const outside = firstPathOutsideNodeModules(targets);
   if (outside !== undefined) {
     return {kind: 'does-not-fit', reason: `${outside} is not inside node_modules/ — this patch is not ours`};
+  }
+
+  const outsideProject = packagesOutsideProject(targets);
+  if (outsideProject.length > 0) {
+    return {kind: 'does-not-fit', reason: outsideProjectReason(outsideProject[0])};
   }
 
   // На production-установке пакета дев-патча нет и не должно быть — это не

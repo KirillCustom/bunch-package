@@ -1,4 +1,4 @@
-import {chmodSync, mkdirSync, renameSync, rmSync, writeFileSync} from 'fs';
+import {chmodSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {resolve, sep} from 'path';
 
 // Каталог патчей по умолчанию тот же, что у patch-package, — патчи ходят между
@@ -58,6 +58,33 @@ export function resolveInsideProject(relativePath: string): string {
     throw new Error(`refusing to touch ${relativePath} — it resolves outside the project`);
   }
   return resolved;
+}
+
+// Путь бывает внутри проекта по написанию и снаружи — на диске. `bun install
+// --linker isolated` с включённым глобальным стором (`BUN_INSTALL_GLOBAL_STORE=1`
+// или `install.globalStore` в bunfig) кладёт в node_modules симлинк, ведущий в
+// `<кеш>/links/…` — каталог, общий для всех проектов машины.
+//
+// Измерено на bun 1.4.0: наш `apply` писал туда молча, и второй проект, ничего
+// не знавший о патче, приезжал с чужой заплатой уже при обычной установке. Сам
+// bun в этом месте отцепляет каталог от общего стора и отказывается патчить
+// сквозь него — «refusing to patch through it».
+//
+// resolveInsideProject здесь бессилен: путь `node_modules/ms/index.js` внутри
+// проекта по написанию, и только разыменование показывает, куда он ведёт.
+export function realPathOutsideProject(relativePath: string): string | null {
+  const root = realpathSync(process.cwd());
+
+  let real: string;
+  try {
+    real = realpathSync(resolve(root, relativePath));
+  } catch {
+    // Пути нет на диске — это другой разговор, и его ведёт проверка «пакет не
+    // установлен»: у неё и диагноз точнее.
+    return null;
+  }
+
+  return real === root || real.startsWith(root + sep) ? null : real;
 }
 
 // Каталог пакета, которому принадлежит путь. Идём до самого внутреннего:

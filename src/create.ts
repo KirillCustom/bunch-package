@@ -5,7 +5,7 @@ import {homedir} from 'os';
 import {join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
 import {PathFilters, pathAllowed} from './options';
-import {patchesDirectory, TEMP_WRITE_SUFFIX, ensureDir, isExecutable} from './paths';
+import {patchesDirectory, TEMP_WRITE_SUFFIX, ensureDir, isExecutable, realPathOutsideProject} from './paths';
 import {PatchHeaderFields, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 
@@ -745,6 +745,15 @@ export function createPatch(
   }
 
   const {name, version} = readManifest(packagePath);
+
+  // Патч отсюда собрать можно — читать общий стор не вредно. Но сказать надо:
+  // его содержимое мог изменить другой проект, и `apply` в такое дерево писать
+  // откажется, так что патч рискует оказаться и неверным, и неприменимым.
+  const shared = realPathOutsideProject(join('node_modules', packageName));
+  if (shared !== null) {
+    console.log(`⚠️  node_modules/${packageName} is a link into bun's shared store (${shared})`);
+    console.log(`   Another project on this machine may have changed it, and \`apply\` will refuse to patch through it.`);
+  }
 
   // Два механизма на один пакет дерутся, и проигрывает пользователь: патч bun
   // уже в дереве, а в эталоне его нет — значит он целиком уехал бы в наш патч,
