@@ -1,9 +1,9 @@
 import {existsSync, readFileSync, readdirSync, realpathSync, statSync} from 'fs';
-import {join, sep} from 'path';
+import {join} from 'path';
 import {readManifest, validatePackageName} from './create';
 import {bunAlsoPatches} from './foreign';
 import {LOCK_FILE, withApplyLock} from './lock';
-import {TEMP_WRITE_SUFFIX, atomicWrite} from './paths';
+import {TEMP_WRITE_SUFFIX, atomicWrite, realPathOutsideProject} from './paths';
 
 // Правка файла в node_modules меняет запись общего кеша bun. Измерено на 1.4.0:
 // при `--backend=hardlink` (умолчание Linux) у файла в node_modules и у файла в
@@ -77,15 +77,17 @@ export function editPackage(packageName: string): void {
   // симлинк на node_modules/.bun/…; у bun бывает и вариант, где эта цепочка
   // уходит в общий стор внутри кеша. Разрывать хардлинки там нельзя — писать мы
   // будем уже в сам стор, то есть ровно в то, от чего команда защищает.
-  const root = process.cwd();
-  const real = realpathSync(packagePath);
-  if (real !== root && !real.startsWith(root + sep)) {
+  const shared = realPathOutsideProject(join('node_modules', packageName));
+  if (shared !== null) {
     throw new Error(
-      `node_modules/${packageName} resolves to ${real}, which is outside the project.\n` +
+      `node_modules/${packageName} resolves to ${shared}, which is outside the project.\n` +
         `   That is bun's shared store: editing there changes ${name} for every project on this machine.\n` +
-        `   Get a private copy with \`bun patch ${name}\` first.`,
+        `   Reinstall with the store inside the project (BUN_INSTALL_GLOBAL_STORE=0 bun install),\n` +
+        `   or get a private copy with \`bun patch ${name}\`.`,
     );
   }
+
+  const real = realpathSync(packagePath);
 
   console.log(`✂️  Detaching ${name}@${version} from the shared cache...`);
 

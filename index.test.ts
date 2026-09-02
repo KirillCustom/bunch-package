@@ -1,7 +1,7 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
 import {execSync, spawn, spawnSync} from 'child_process';
 import {createHash} from 'crypto';
-import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
+import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree} from './src/create';
 import {parseOptions} from './src/options';
 import {withApplyLock} from './src/lock';
@@ -3310,5 +3310,142 @@ describe('why a patch exists', () => {
     expect(notAUrl.stdout).toContain('needs an http(s) URL');
 
     expect(existsSync(join(TEST_DIR, 'patches'))).toBe(false);
+  });
+});
+
+describe('isolated layout and the shared store', () => {
+  // Каталог вне проекта, куда ведёт симлинк, — то же, что общий стор bun при
+  // `--linker isolated` с `BUN_INSTALL_GLOBAL_STORE=1`: измерено на 1.4.0, там
+  // node_modules/<pkg> ведёт в <кеш>/links/… Ставить bun с таким стором внутри
+  // сюиты незачем — важно, куда ведёт путь, а не кто его создал.
+  const STORE = () => `${TEST_DIR}-store`;
+
+  function packageInStore(patch: string) {
+    const store = STORE();
+    rmSync(store, {force: true, recursive: true});
+    mkdirSync(join(store, 'test-lib'), {recursive: true});
+    writeFileSync(join(store, 'test-lib', 'package.json'), JSON.stringify({name: 'test-lib', version: '1.0.0'}));
+    writeFileSync(join(store, 'test-lib', 'index.js'), 'const a = 1;\n');
+
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    symlinkSync(join(store, 'test-lib'), join(TEST_DIR, 'node_modules', 'test-lib'));
+
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patch);
+  }
+
+  const PATCH = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+
+  afterEach(() => {
+    rmSync(STORE(), {force: true, recursive: true});
+  });
+
+  test.skipIf(isWindows)('apply refuses to write through a link that leaves the project', () => {
+    packageInStore(PATCH);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain("outside the project — that is bun's shared store");
+    expect(result.stdout).toContain('BUN_INSTALL_GLOBAL_STORE=0');
+    // Главное: в общем сторе ничего не изменилось.
+    expect(readFileSync(join(STORE(), 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 1;\n');
+  });
+
+  test.skipIf(isWindows)('reverse refuses too — un-applying writes to the tree just the same', () => {
+    // Дерево уже содержит изменение патча: снятие было бы записью в общий стор.
+    packageInStore(PATCH);
+    writeFileSync(join(STORE(), 'test-lib', 'index.js'), 'const a = 2;\n');
+
+    const result = run('reverse', TEST_DIR);
+
+    expect(result.stdout).toContain("outside the project — that is bun's shared store");
+    expect(readFileSync(join(STORE(), 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 2;\n');
+  });
+
+  test.skipIf(isWindows)('status says so instead of answering about a tree that is not the project’s', () => {
+    packageInStore(PATCH);
+
+    const result = run('status', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain("outside the project — that is bun's shared store");
+  });
+
+  test.skipIf(isWindows)('create warns that the package is shared', () => {
+    packageInStore(PATCH);
+    rmSync(join(TEST_DIR, 'patches'), {force: true, recursive: true});
+
+    // Пакета нет в реестре, `create` дойдёт до скачивания эталона и там
+    // остановится — предупреждение печатается раньше, и проверяется именно оно.
+    const result = run('create test-lib', TEST_DIR);
+
+    expect(result.stdout).toContain("is a link into bun's shared store");
+  });
+
+  test('apply refuses bun’s real global store, not just a link we made ourselves', () => {
+    // Настоящая раскладка: bun 1.4 с `BUN_INSTALL_GLOBAL_STORE=1` и изолированным
+    // линкером уводит node_modules/<pkg> в <кеш>/links/… Кеш кладём рядом с
+    // проектом, а не внутрь: внутри он был бы частью проекта, и проверять было
+    // бы нечего.
+    const cache = `${TEST_DIR}-cache`;
+    rmSync(cache, {force: true, recursive: true});
+    const env = {...process.env, BUN_INSTALL_CACHE_DIR: cache, BUN_INSTALL_GLOBAL_STORE: '1'};
+
+    try {
+      execSync('bun add ms@2.1.2 --linker isolated', {cwd: TEST_DIR, stdio: 'pipe', env});
+
+      const real = realpathSync(join(TEST_DIR, 'node_modules', 'ms'));
+      expect(real.startsWith(cache)).toBe(true); // иначе проверять нечего
+
+      mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+      writeFileSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'), `--- a/node_modules/ms/index.js
++++ b/node_modules/ms/index.js
+@@ -1,3 +1,4 @@
++// ЗАПЛАТА
+ /**
+  * Helpers.
+  */
+`);
+      const before = readFileSync(join(real, 'index.js'), 'utf-8');
+
+      const result = run('apply', TEST_DIR);
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toContain("outside the project — that is bun's shared store");
+      expect(readFileSync(join(real, 'index.js'), 'utf-8')).toBe(before);
+    } finally {
+      rmSync(cache, {force: true, recursive: true});
+    }
+  });
+
+  test('the whole cycle works in an isolated layout', () => {
+    execSync('bun add ms@2.1.2 --linker isolated', {cwd: TEST_DIR, stdio: 'pipe'});
+
+    // Раскладка обязана быть изолированной, иначе тест зелен не по той причине.
+    const link = join(TEST_DIR, 'node_modules', 'ms');
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link).replace(/\\/g, '/')).toContain('.bun/');
+
+    const indexPath = join(link, 'index.js');
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// ISOLATED FIX\n');
+
+    expect(run('create ms', TEST_DIR).exitCode).toBe(0);
+    execSync('bun install --linker isolated --force', {cwd: TEST_DIR, stdio: 'pipe'});
+    expect(readFileSync(indexPath, 'utf-8')).not.toContain('// ISOLATED FIX');
+
+    expect(run('apply', TEST_DIR).stdout).toContain('1 applied, 0 failed');
+    expect(readFileSync(indexPath, 'utf-8')).toContain('// ISOLATED FIX');
+
+    expect(run('apply', TEST_DIR).stdout).toContain('already applied');
+    expect(run('status', TEST_DIR).stdout).toContain('1 of 1 in the tree');
+
+    expect(run('reverse', TEST_DIR).stdout).toContain('1 of 1 un-applied');
+    expect(readFileSync(indexPath, 'utf-8')).not.toContain('// ISOLATED FIX');
   });
 });

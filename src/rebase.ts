@@ -6,7 +6,7 @@ import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch
 import {patchesAppliedByBun} from './foreign';
 import {patchesDirectory} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
-import {presenceOf, readTargets} from './presence';
+import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
 import {recordPatches, recordedPatches} from './state';
 
 // Патчи одного пакета — как коммиты: чтобы переделать не последний, надо сперва
@@ -134,6 +134,15 @@ function unApply(files: string[]): number {
     if ('error' in targets) {
       console.log(`  ❌ ${file}`);
       console.log(`     ${targets.error}`);
+      break;
+    }
+
+    // Снятие патча — такая же запись в дерево, как и его применение, и через
+    // общий стор оно точно так же уехало бы в чужие проекты.
+    const outsideProject = packagesOutsideProject(targets);
+    if (outsideProject.length > 0) {
+      console.log(`  ❌ ${file}`);
+      console.log(`     ${outsideProjectReason(outsideProject[0])}`);
       break;
     }
 

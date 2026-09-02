@@ -510,6 +510,43 @@ On Windows there is no executable bit to track. A patch carrying a mode change s
 applies there — the mode part is skipped rather than attempted, so the patch counts
 as applied once and stays that way instead of being reported as work on every run.
 
+## How bun lays the package out
+
+`bun install` has more than one layout, and where a patch actually lands depends
+on it. All of it below was measured on bun 1.4.0, not read off documentation.
+
+| layout | `node_modules/<pkg>` really is | this tool |
+|---|---|---|
+| default (hoisted) | a real directory in the project | works |
+| `--linker isolated` | a link to `node_modules/.bun/<pkg>@<ver>/…`, still in the project | works — the whole cycle is covered by a test |
+| `--linker isolated` **and** a global store (`BUN_INSTALL_GLOBAL_STORE=1`, or `install.globalStore` in bunfig) | a link into `<bun cache>/links/…`, **shared by every project on the machine** | refused, out loud |
+
+That last row is why the check exists. Writing a patch through such a link
+changes the package for every project on the machine: measured, a second project
+that knew nothing about the patch came out of a plain `bun install` already
+carrying it. bun itself refuses to patch through that link — "refusing to patch
+through it" — and so do we:
+
+```
+❌ ms+2.1.2.patch
+   node_modules/ms resolves to /Users/you/.bun/install/cache/links/ms@2.1.2-5c61e1838930853a/node_modules/ms, outside the project — that is bun's shared store.
+   Patching there would change the package for every project on this machine.
+   Reinstall with the store inside the project: BUN_INSTALL_GLOBAL_STORE=0 bun install
+```
+
+`apply`, `reverse`, `rebase` and `edit` refuse; `status` says the same instead of
+answering about a tree that is not the project's; `create` warns, since the
+package it is about to diff may have been changed by somebody else's project.
+The way out is in the message, and it works: with the store back inside the
+project, everything runs as usual.
+
+**In a monorepo** the isolated layout gives every workspace a link to the *same*
+directory — measured: `packages/a/node_modules/ms` and `packages/b/node_modules/ms`
+resolve to one inode under `node_modules/.bun/`. A patch applied from one
+workspace therefore changes the package for all of them. That store belongs to
+the project, so nothing is refused; it is worth knowing before you patch a
+package two workspaces share.
+
 ## Platforms
 
 Checked against 290 patches taken from public repositories, applied with both this
