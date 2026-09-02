@@ -10,7 +10,7 @@
   so editing a file in `node_modules` edits the cache too — and every other project
   on the machine with it. `edit` gives the package a private copy first; every other
   command knows about the cache as well. A tool written for npm does not.
-- **Nine commands:** edit, create, apply, status, rebase, retarget, reverse, import and upstream.
+- **Ten commands:** edit, create, apply, status, rebase, retarget, reverse, import, export and upstream.
 - **It tells you when it cannot do something.** Binary files, symbolic links, a hunk
   that no longer fits — all of them are named out loud rather than dropped, because
   a patch that silently carries less than you think is worse than no patch.
@@ -73,6 +73,8 @@ Now whenever someone runs `bun install`, patches are automatically applied!
 | `status` | Show which patches are in the tree right now |
 | `rebase <package> <patch>` | Un-apply the patches sitting on top of one, to edit it |
 | `retarget <package>` | Move its patches to the version now installed |
+| `import` | Convert patches written by `bun patch` to this format |
+| `export [package]` | Convert patches back to `bun patch` format, for use with `bun install` |
 | `upstream <package>` | Print a GitHub draft-issue URL with the patch diff |
 
 ### Before you edit
@@ -726,6 +728,27 @@ bunx bunch-package import
 The conversion is checked against bun itself: a patch made with `bun patch --commit`
 and then imported produces, through `bunch-package apply`, the same bytes bun's own
 installer produced.
+
+The other direction is also available. If you have patches in this tool's format and
+would like `bun install` to apply them instead of a `postinstall` script:
+
+```bash
+bunx bunch-package export
+```
+
+`export` renames `ms+2.1.2.patch` to `ms@2.1.2.patch` (`@vercel+og+0.4.1.patch` to
+`@vercel%2Fog@0.4.1.patch`), rewrites the paths inside to be relative to the package
+root, and adds the entry to `patchedDependencies` so bun picks it up at the next
+`bun install`. Pass a package name to export only that package's patches.
+
+`export` refuses patches that bun cannot handle: dev-only patches (`*.dev.patch`),
+nested dependencies, and sequences of multiple patches on the same package — bun
+supports one patch per package, regenerated whole.
+
+What this tool does that bun patch does not (stated as fact, not as a reason to stay):
+it verifies the lines being removed rather than applying by position, warns when the
+installed version drifts from the patch target, and supports `status`, `retarget`, and
+patch sequences. Leaving is your choice; this command makes it easy.
 
 What the two tools do is not the same job. Measured on bun 1.4.0: `bun install`
 applies a patch by line number without checking the lines it claims to remove — a

@@ -92,3 +92,8 @@ jobs:
 
           # upstream: без repository — внятный отказ, не стек.
           bun ../index.ts upstream fakepkg 2>&1 | grep -q 'repository'
+
+          # export: патч переименовывается в формат bun и записывается patchedDependencies.
+          bun ../index.ts export
+          test -f patches/fakepkg@1.0.0.patch
+          grep -q 'fakepkg@1.0.0' package.json
