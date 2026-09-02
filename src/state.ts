@@ -108,6 +108,32 @@ function sameChange(before: RecordedPatch, sha256: string, path: string): boolea
   return before.bodySha256 !== undefined && before.bodySha256 === hashPatchBody(path);
 }
 
+// Переименование патча дерева не касается: файл тот же, содержимое то же, и
+// «применён тогда-то» остаётся верным ([[DEC-11]]). Поэтому запись переезжает
+// вместе с именем, а не заводится заново и не остаётся под старым.
+//
+// Без этого `create --append`, превращающий одиночный патч в первый член
+// последовательности, оставлял в записи имя, которого в patches/ уже нет:
+// `status` называл его осиротевшим («no longer exist») и выходил с кодом 1 —
+// то есть проверка в CI краснела после обычной работы.
+export function renameRecordedPatch(from: string, to: string): void {
+  const state = readState();
+  if (state === null) return;
+
+  // Запись под новым именем могла уже существовать: имя одиночного патча — это
+  // и есть имя, которое получит схлопнутый. Оставляем одну, переехавшую.
+  const patches = state.patches
+    .map(patch => (patch.file === from ? {...patch, file: to} : patch))
+    .filter((patch, at, all) => all.findIndex(other => other.file === patch.file) === at);
+
+  try {
+    writeState(patches);
+  } catch (error: any) {
+    // Как и в recordPatches: запись — удобство, а не условие работы.
+    console.log(`  ⚠️  could not update ${STATE_FILE}: ${error.message}`);
+  }
+}
+
 function writeState(patches: RecordedPatch[]): void {
   const state: State = {version: VERSION, patches};
   atomicWrite(STATE_FILE, JSON.stringify(state, null, 2) + '\n');

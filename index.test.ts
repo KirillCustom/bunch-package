@@ -3871,6 +3871,72 @@ describe('bunch-package upstream', () => {
   });
 });
 
+describe('renaming a patch into a sequence', () => {
+  const file = () => join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+  const state = () =>
+    JSON.parse(readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8'));
+
+  function singleThenAppend() {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    overwriteFile(file(), `${readFileSync(file(), 'utf-8')}\n// ONE\n`);
+    run('create is-number', TEST_DIR);
+    run('apply', TEST_DIR);
+
+    const before = state().patches[0];
+
+    overwriteFile(file(), `${readFileSync(file(), 'utf-8')}// TWO\n`);
+    run('create is-number --append two', TEST_DIR);
+
+    return before;
+  }
+
+  test('the record follows the file, so status does not call the patch missing', () => {
+    singleThenAppend();
+
+    expect(state().patches.map((patch: {file: string}) => patch.file)).toEqual([
+      'is-number+7.0.0+001+initial.patch',
+    ]);
+
+    const shown = run('status', TEST_DIR);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).not.toContain('no longer exist');
+  });
+
+  test('a record already standing under the new name is not duplicated', () => {
+    // Рассинхрон записи с patches/ возможен: файлы правят руками, а запись
+    // переживает удаление патча. Тогда при переименовании старое и новое имя
+    // оказываются в ней одновременно, и запись получала два элемента с одним
+    // именем — `recordedPatches` схлопывает их в Map, поэтому увидеть это можно
+    // только в самом файле.
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    overwriteFile(file(), `${readFileSync(file(), 'utf-8')}\n// ONE\n`);
+    run('create is-number', TEST_DIR);
+    run('apply', TEST_DIR);
+
+    const written = state();
+    const stale = {...written.patches[0], file: 'is-number+7.0.0+001+initial.patch'};
+    writeFileSync(
+      join(TEST_DIR, 'node_modules', '.bunch-package-state.json'),
+      JSON.stringify({...written, patches: [...written.patches, stale]}, null, 2),
+    );
+
+    overwriteFile(file(), `${readFileSync(file(), 'utf-8')}// TWO\n`);
+    run('create is-number --append two', TEST_DIR);
+
+    expect(state().patches.map((patch: {file: string}) => patch.file)).toEqual([
+      'is-number+7.0.0+001+initial.patch',
+    ]);
+  });
+
+  test('the time it first landed survives the rename', () => {
+    const before = singleThenAppend();
+
+    const after = state().patches.find((patch: {file: string}) => patch.file.includes('001+initial'));
+    expect(after.appliedAt).toBe(before.appliedAt);
+    expect(after.sha256).toBe(before.sha256);
+  });
+});
+
 describe('fold', () => {
   const file = () => join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
 
