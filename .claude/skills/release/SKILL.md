@@ -41,10 +41,33 @@ gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <файл>
 # 6. Проверить, что вышло
 until [ "$(gh run list --limit 3 | grep -c 'in_progress\|queued')" = "0" ]; do sleep 15; done
 gh run list --limit 3      # ожидание: Publish to npm и Publish to GitHub Packages — success
-curl -s https://registry.npmjs.org/bunch-package | python3 -c "
-import json,sys; d=json.load(sys.stdin); v=d['dist-tags']['latest']
-print('latest:', v, '|', d['time'][v])"
+
+# 7. Дождаться реестра — он отвечает не сразу
+until [ "$(npm view bunch-package version 2>/dev/null)" = "X.Y.Z" ]; do sleep 20; done
+
+# 8. Поставить опубликованное и позвать
+cd <песочница> && echo '{"name":"s","version":"1.0.0"}' > package.json
+bun add -d bunch-package@X.Y.Z
+bunx bunch-package | head -20    # команды этой версии на месте?
 ```
+
+**`success` у workflow не значит «уже в реестре».** npm отвечает `Your package is
+being processed and may take a few minutes to become available`, и первые минуты
+`dist-tags.latest` показывает **предыдущую** версию. Признак того, что публикация
+действительно состоялась, — строка `+ bunch-package@X.Y.Z` в конце лога задания:
+
+```bash
+gh run view <id> --log | grep -E '^\+ bunch-package@|npm error'
+```
+
+Проверять реестр сразу после workflow и делать вывод по одному ответу — значит
+получить ложную тревогу; так уже было дважды.
+
+**Дымовая установка обязательна.** Публикуется не репозиторий, а тарбол, который
+собирает `prepublishOnly`; в нём лежит `dist/index.js`, которого в git нет вовсе.
+Единственная проверка, что уехало именно то, что нужно, — поставить пакет из
+реестра и позвать его. Место известно ненадёжное: `--provenance` и способ
+аутентификации чинились здесь четырьмя коммитами подряд.
 
 ## Заметки к релизу
 
