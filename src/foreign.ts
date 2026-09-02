@@ -1,7 +1,8 @@
 import {existsSync, readFileSync} from 'fs';
-import {basename} from 'path';
+import {basename, join, resolve} from 'path';
 import {PatchTarget} from './patch-file';
 import {packageDirectoryOf, stripPathPrefix} from './paths';
+import {workspaceRoot} from './workspace';
 
 // bun с 1.2 патчит пакеты сам: `bun patch --commit` кладёт файл в тот же
 // patches/ и записывает его в `patchedDependencies` package.json. Применяет его
@@ -12,11 +13,29 @@ import {packageDirectoryOf, stripPathPrefix} from './paths';
 // срезаем `a/` и решаем путь от корня проекта, то есть били бы по файлам самого
 // проекта. Проверено на bun 1.4.0: `apply` переписывал ./index.js проекта и
 // печатал `✅ 1 applied`.
+//
+// В монорепо список читается из двух манифестов. Измерено на bun 1.4.0: ключ
+// `patchedDependencies` bun берёт и у корня, и у воркспейса, а путь к файлу
+// патча разрешает всегда от корня — воркспейсный `patches/ms@2.1.2.patch` дал
+// «Couldn't find patch file», тот же файл у корня применился. Читай мы только
+// cwd, из воркспейса корневой список был бы не виден: `create` собрал бы патч
+// поверх дерева, куда патч bun уже лёг, и унёс бы его изменения в себя — ровно
+// тот отказ, ради которого эта проверка написана.
 function patchedDependencies(): Record<string, string> {
-  if (!existsSync('package.json')) return {};
+  const root = workspaceRoot();
+  const manifests = ['package.json'];
+  if (root !== null && resolve(root) !== resolve(process.cwd())) {
+    manifests.push(join(root, 'package.json'));
+  }
+
+  return Object.assign({}, ...manifests.map(declaredIn));
+}
+
+function declaredIn(manifest: string): Record<string, string> {
+  if (!existsSync(manifest)) return {};
 
   try {
-    const value = JSON.parse(readFileSync('package.json', 'utf-8')).patchedDependencies;
+    const value = JSON.parse(readFileSync(manifest, 'utf-8')).patchedDependencies;
     if (value === null || typeof value !== 'object') return {};
 
     return Object.fromEntries(

@@ -4182,3 +4182,255 @@ describe('annotate', () => {
     expect(result.stdout).toContain('Usage');
   });
 });
+
+// Монорепо: `apply` работает из воркспейса, а пакет, который он патчит, лежит у
+// корня. Измерено на bun 1.4.0: при умолчании `packages/*/node_modules/<pkg>` —
+// симлинк в `<корень>/node_modules/.bun/…`, при `--linker hoisted` пакет поднят
+// в корень и своего node_modules у воркспейса нет вовсе. Раскладку здесь
+// строим руками: тест не должен зависеть от того, какой линкер bun выберет
+// умолчанием в следующей версии.
+describe('monorepo workspaces', () => {
+  const LIB = 'shared-lib';
+
+  function monorepo(globs: string[] = ['packages/*'], workspaces: string[] = ['a', 'b']) {
+    writeFileSync(join(TEST_DIR, 'package.json'), JSON.stringify({name: 'mono', private: true, workspaces: globs}));
+    for (const name of workspaces) {
+      mkdirSync(join(TEST_DIR, 'packages', name), {recursive: true});
+      writeFileSync(
+        join(TEST_DIR, 'packages', name, 'package.json'),
+        JSON.stringify({name: `@mono/${name}`, version: '1.0.0'}),
+      );
+    }
+  }
+
+  const workspace = (name: string) => join(TEST_DIR, 'packages', name);
+
+  function patchFor(mark: string): string {
+    return `--- a/node_modules/${LIB}/index.js
++++ b/node_modules/${LIB}/index.js
+@@ -1 +1 @@
+-const a = 1;
++${mark}
+`;
+  }
+
+  function putPatch(dir: string, mark: string, file = `${LIB}+1.0.0.patch`) {
+    mkdirSync(join(dir, 'patches'), {recursive: true});
+    writeFileSync(join(dir, 'patches', file), patchFor(mark));
+  }
+
+  const libIndex = () => join(TEST_DIR, 'node_modules', LIB, 'index.js');
+
+  test('applies a patch to a package hoisted to the monorepo root', () => {
+    // patch-package #356, самое повторяемое в самом популярном issue соседа:
+    // «искать в node_modules родителя». Своего node_modules у воркспейса нет.
+    monorepo();
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    putPatch(workspace('a'), 'const a = 2;');
+
+    const result = run('apply', workspace('a'));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(readFileSync(libIndex(), 'utf-8')).toBe('const a = 2;\n');
+  });
+
+  test('does not search upwards outside a monorepo', () => {
+    // Граница поднимается только внутри монорепо. Обычный проект, лежащий
+    // внутри чужого дерева, обязан отвечать как прежде — иначе `apply` начал бы
+    // патчить чужие пакеты у соседа по каталогу.
+    monorepo();
+    writeFileSync(join(TEST_DIR, 'package.json'), JSON.stringify({name: 'not-a-mono', version: '1.0.0'}));
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    putPatch(workspace('a'), 'const a = 2;');
+
+    const result = run('apply', workspace('a'));
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain(`node_modules/${LIB} is not installed`);
+    expect(readFileSync(libIndex(), 'utf-8')).toBe('const a = 1;\n');
+  });
+
+  test('a stray package.json with workspaces above us is not our root', () => {
+    // Забытый манифест с `workspaces` в домашнем каталоге — вещь обычная.
+    // Поверив ему на слово, мы сделали бы «проектом» весь `~`.
+    monorepo(['apps/*']);
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    putPatch(workspace('a'), 'const a = 2;');
+
+    const result = run('apply', workspace('a'));
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain(`node_modules/${LIB} is not installed`);
+  });
+
+  test.skipIf(isWindows)('the store at the monorepo root is not somebody else’s store', () => {
+    // Ровно то, на чём инструмент в монорепо не работал вовсе: `.bun` лежит
+    // выше cwd воркспейса, и проверка «за пределами проекта» отказывала на
+    // каждом патче. DEC-13 объявляет такой стор законным.
+    monorepo();
+    const store = join(TEST_DIR, 'node_modules', '.bun', `${LIB}@1.0.0`, 'node_modules', LIB);
+    mkdirSync(store, {recursive: true});
+    writeFileSync(join(store, 'package.json'), JSON.stringify({name: LIB, version: '1.0.0'}));
+    writeFileSync(join(store, 'index.js'), 'const a = 1;\n');
+    mkdirSync(join(workspace('a'), 'node_modules'), {recursive: true});
+    symlinkSync(store, join(workspace('a'), 'node_modules', LIB));
+    putPatch(workspace('a'), 'const a = 2;');
+
+    const result = run('apply', workspace('a'));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(readFileSync(join(store, 'index.js'), 'utf-8')).toBe('const a = 2;\n');
+  });
+
+  test.skipIf(isWindows)('a link out of the monorepo is still refused', () => {
+    const outside = `${TEST_DIR}-outside`;
+    rmSync(outside, {force: true, recursive: true});
+    mkdirSync(join(outside, LIB), {recursive: true});
+    writeFileSync(join(outside, LIB, 'package.json'), JSON.stringify({name: LIB, version: '1.0.0'}));
+    writeFileSync(join(outside, LIB, 'index.js'), 'const a = 1;\n');
+
+    try {
+      monorepo();
+      mkdirSync(join(workspace('a'), 'node_modules'), {recursive: true});
+      symlinkSync(join(outside, LIB), join(workspace('a'), 'node_modules', LIB));
+      putPatch(workspace('a'), 'const a = 2;');
+
+      const result = run('apply', workspace('a'));
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toContain("outside the project — that is bun's shared store");
+      expect(readFileSync(join(outside, LIB, 'index.js'), 'utf-8')).toBe('const a = 1;\n');
+    } finally {
+      rmSync(outside, {force: true, recursive: true});
+    }
+  });
+
+  test('refuses when a sibling workspace patches the same directory differently', () => {
+    // Измерено на patch-package 8.0.1: он применяет и молчит, заплата первого
+    // оказывается в дереве второго. Отказываем в обоих — исход не должен
+    // зависеть от того, кто успел, а bun запускает воркспейсы параллельно.
+    monorepo();
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    putPatch(workspace('a'), 'const a = 2;');
+    putPatch(workspace('b'), 'const a = 3;');
+
+    for (const name of ['a', 'b']) {
+      const result = run('apply', workspace(name));
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toContain('is shared with workspace');
+      expect(result.stdout).toContain(`packages/${name === 'a' ? 'b' : 'a'}`);
+      expect(result.stdout).toContain('whichever ran last would win');
+    }
+
+    expect(readFileSync(libIndex(), 'utf-8')).toBe('const a = 1;\n');
+  });
+
+  test('identical patches in two workspaces are not a conflict', () => {
+    // Оба воркспейса хотят от общего каталога одного и того же — мешать нечему.
+    monorepo();
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    putPatch(workspace('a'), 'const a = 2;');
+    putPatch(workspace('b'), 'const a = 2;');
+
+    expect(run('apply', workspace('a')).stdout).toContain('1 applied, 0 failed');
+    expect(run('apply', workspace('b')).stdout).toContain('1 applied, 0 failed');
+    expect(readFileSync(libIndex(), 'utf-8')).toBe('const a = 2;\n');
+  });
+
+  test('a longer sequence next door is a conflict too', () => {
+    // Наборы патчей разной длины дают разные деревья, даже когда первые
+    // патчи совпадают побайтово.
+    monorepo();
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    putPatch(workspace('a'), 'const a = 2;', `${LIB}+1.0.0+001+first.patch`);
+    putPatch(workspace('b'), 'const a = 2;', `${LIB}+1.0.0+001+first.patch`);
+    putPatch(workspace('b'), 'const a = 3;', `${LIB}+1.0.0+002+second.patch`);
+
+    const result = run('apply', workspace('a'));
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('is shared with workspace packages/b');
+    expect(readFileSync(libIndex(), 'utf-8')).toBe('const a = 1;\n');
+  });
+
+  test('the lock is taken at the monorepo root, not in the workspace', () => {
+    // bun запускает postinstall воркспейсов одновременно — измерено, два старта
+    // совпали до микросекунды. Пока замок брался от cwd, каждый воркспейс запирал
+    // свой файл, и защиты от гонки на общем дереве не было никакой.
+    monorepo();
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    putPatch(workspace('a'), 'const a = 2;');
+
+    const gonePid = spawnSync(process.execPath, ['-e', ''], {stdio: 'ignore'}).pid;
+    const rootLock = join(TEST_DIR, 'node_modules', '.bunch-package.lock');
+    writeFileSync(rootLock, `${gonePid}\n`);
+    const workspaceLock = join(workspace('a'), 'node_modules', '.bunch-package.lock');
+    mkdirSync(join(workspace('a'), 'node_modules'), {recursive: true});
+    writeFileSync(workspaceLock, `${gonePid}\n`);
+
+    const result = run('apply', workspace('a'));
+
+    expect(result.stdout).toContain('removed a stale lock');
+    expect(existsSync(rootLock)).toBe(false);
+    // Замок воркспейса не наш: его никто не трогал.
+    expect(existsSync(workspaceLock)).toBe(true);
+  });
+
+  test('records the applied patch even when the workspace has no node_modules', () => {
+    // При поднятых зависимостях каталога node_modules у воркспейса нет, а
+    // запись принадлежит ему: она описывает его patches/, а не дерево.
+    monorepo();
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    putPatch(workspace('a'), 'const a = 2;');
+    expect(existsSync(join(workspace('a'), 'node_modules'))).toBe(false);
+
+    const result = run('apply', workspace('a'));
+
+    expect(result.stdout).not.toContain('could not write');
+    const state = JSON.parse(
+      readFileSync(join(workspace('a'), 'node_modules', '.bunch-package-state.json'), 'utf-8'),
+    );
+    expect(state.patches.map((patch: any) => patch.file)).toEqual([`${LIB}+1.0.0.patch`]);
+  });
+
+  test('sees patchedDependencies declared at the monorepo root', () => {
+    // Измерено на bun 1.4.0: `patchedDependencies` bun читает и у корня, и у
+    // воркспейса, а путь к файлу патча разрешает от корня. Пока мы читали один
+    // cwd, из воркспейса корневой список был не виден — и `create` собрал бы
+    // патч поверх дерева, куда патч bun уже лёг.
+    monorepo();
+    setupFakePackage(TEST_DIR, LIB, '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({
+        name: 'mono',
+        private: true,
+        workspaces: ['packages/*'],
+        patchedDependencies: {[`${LIB}@1.0.0`]: `patches/${LIB}@1.0.0.patch`},
+      }),
+    );
+
+    const result = run(`create ${LIB}`, workspace('a'));
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('already patched by bun through patchedDependencies');
+  });
+
+  test('create finds a hoisted package and writes the patch path unchanged', () => {
+    // Формат патча от монорепо не меняется: путь в нём как стоял
+    // `node_modules/<pkg>/…`, так и стоит, иначе патчи перестали бы ходить
+    // между нами и patch-package.
+    monorepo();
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    overwriteFile(join(TEST_DIR, 'node_modules', 'is-number', 'index.js'), 'module.exports = "hoisted";\n');
+
+    const result = run('create is-number', workspace('a'));
+
+    expect(result.exitCode).toBe(0);
+    const patch = readFileSync(join(workspace('a'), 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patch).toContain('--- a/node_modules/is-number/index.js');
+    expect(patch).toContain('+++ b/node_modules/is-number/index.js');
+  });
+});

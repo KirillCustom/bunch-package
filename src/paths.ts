@@ -1,5 +1,6 @@
-import {chmodSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync} from 'fs';
+import {chmodSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {resolve, sep} from 'path';
+import {hostOfPatchPath, projectRoot} from './workspace';
 
 // Каталог патчей по умолчанию тот же, что у patch-package, — патчи ходят между
 // инструментами. Монорепозиторию этого мало: воркспейсам нужен свой каталог на
@@ -51,13 +52,46 @@ export function stripPathPrefix(path: string): string {
 
 // Единственная защита от выхода за корень проекта. Полагаться здесь на patch(1)
 // было нельзя: GNU такие пути отвергает, Apple спокойно пишет файл наружу.
-export function resolveInsideProject(relativePath: string): string {
-  const root = process.cwd();
+export function resolveInside(root: string, relativePath: string): string {
   const resolved = resolve(root, relativePath);
   if (resolved !== root && !resolved.startsWith(root + sep)) {
     throw new Error(`refusing to touch ${relativePath} — it resolves outside the project`);
   }
   return resolved;
+}
+
+// Для путей, которые принадлежат самому каталогу запуска: --patch-dir и всё,
+// что пишется рядом с патчами. Корень воркспейсов тут ни при чём — патчи
+// воркспейса лежат в воркспейсе.
+export function resolveInsideProject(relativePath: string): string {
+  return resolveInside(process.cwd(), relativePath);
+}
+
+// Путь из патча (`node_modules/<pkg>/<файл>`) — на место, где пакет установлен.
+// Вне монорепо это по-прежнему cwd; внутри пакет может быть поднят к корню, и
+// тогда путь ложится туда. Формат патча от этого не меняется ни на байт: в нём
+// как стояло `node_modules/<pkg>/…`, так и стоит, — иначе патчи перестали бы
+// ходить между нами и patch-package.
+export function resolvePackagePath(relativePath: string): string {
+  return resolveInside(hostOfPatchPath(relativePath), relativePath);
+}
+
+// Каталог установленного пакета по его имени: `ms`, `@scope/pkg` или путь
+// вложенной зависимости `foo/node_modules/bar`. Разделитель здесь всегда `/` —
+// путь строится в том же виде, в каком он стоит в патче, и только
+// resolvePackagePath превращает его в путь файловой системы.
+export function installedPackagePath(packageName: string): string {
+  return resolvePackagePath(`node_modules/${packageName}`);
+}
+
+// Есть ли пакет на диске: спрашивается путём из патча, а отвечать надо про то
+// место, где он на самом деле установлен.
+export function packageInstalled(packageDir: string): boolean {
+  try {
+    return existsSync(resolvePackagePath(packageDir));
+  } catch {
+    return false; // путь наружу — про это скажет resolvePackagePath у вызывающего
+  }
 }
 
 // Путь бывает внутри проекта по написанию и снаружи — на диске. `bun install
@@ -73,11 +107,14 @@ export function resolveInsideProject(relativePath: string): string {
 // resolveInsideProject здесь бессилен: путь `node_modules/ms/index.js` внутри
 // проекта по написанию, и только разыменование показывает, куда он ведёт.
 export function realPathOutsideProject(relativePath: string): string | null {
-  const root = realpathSync(process.cwd());
+  // Граница — корень воркспейсов, если мы внутри монорепо. Иначе `.bun` у корня
+  // читался бы как чужой стор: он лежит выше cwd воркспейса, и до этой правки
+  // `apply` отказывал там на каждом патче. DEC-13 объявляет такой стор законным.
+  const root = realpathSync(projectRoot());
 
   let real: string;
   try {
-    real = realpathSync(resolve(root, relativePath));
+    real = realpathSync(resolve(hostOfPatchPath(relativePath), relativePath));
   } catch {
     // Пути нет на диске — это другой разговор, и его ведёт проверка «пакет не
     // установлен»: у неё и диагноз точнее.

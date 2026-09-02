@@ -90,6 +90,32 @@ jobs:
           test "$(stat -c %i node_modules/fakepkg/index.js)" != "$(stat -c %i cache-entry.js)"
           grep -q '^line one$' node_modules/fakepkg/index.js
 
+          # Монорепо: пакет поднят к корню, своего node_modules у воркспейса нет.
+          # Здесь проверяется не логика, а что чтение `workspaces`, обход
+          # каталогов и поиск вверх ведут себя на старых bun так же: обещание
+          # engines касается и этого пути.
+          cd ..
+          mkdir -p mono/node_modules/fakepkg mono/packages/a/patches mono/packages/b/patches
+          cd mono
+          echo '{"name":"mono","private":true,"workspaces":["packages/*"]}' > package.json
+          echo '{"name":"@mono/a","version":"1.0.0"}' > packages/a/package.json
+          echo '{"name":"@mono/b","version":"1.0.0"}' > packages/b/package.json
+          echo '{"name":"fakepkg","version":"1.0.0"}' > node_modules/fakepkg/package.json
+          printf 'line one\nline two\n' > node_modules/fakepkg/index.js
+          printf -- '--- a/node_modules/fakepkg/index.js\n+++ b/node_modules/fakepkg/index.js\n@@ -1,2 +1,2 @@\n-line one\n+FROM A\n line two\n' > packages/a/patches/fakepkg+1.0.0.patch
+
+          (cd packages/a && bun ../../../index.ts apply)
+          grep -q '^FROM A$' node_modules/fakepkg/index.js
+          # Запись принадлежит воркспейсу, а не корню: у них разные patches/.
+          test ! -f node_modules/.bunch-package-state.json
+          test -f packages/a/node_modules/.bunch-package-state.json
+
+          # Сосед патчит тот же каталог иначе — отказ обоим, дерево не меняется.
+          printf -- '--- a/node_modules/fakepkg/index.js\n+++ b/node_modules/fakepkg/index.js\n@@ -1,2 +1,2 @@\n-line one\n+FROM B\n line two\n' > packages/b/patches/fakepkg+1.0.0.patch
+          (cd packages/b && bun ../../../index.ts apply 2>&1 | grep -q 'is shared with workspace packages/a')
+          grep -q '^FROM A$' node_modules/fakepkg/index.js
+          cd ../demo
+
           # upstream: без repository — внятный отказ, не стек.
           bun ../index.ts upstream fakepkg 2>&1 | grep -q 'repository'
 

@@ -1,13 +1,13 @@
 import {existsSync, readFileSync} from 'fs';
-import {join} from 'path';
 import {inProduction, missingPackages, skipsMissingPackage} from './dev';
 import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
-import {LOCK_FILE, withApplyLock} from './lock';
+import {lockFile, withApplyLock} from './lock';
 import {PatchTarget, formatPatchName, listPatchFiles, parsePatchName} from './patch-file';
-import {patchesDirectory, packageDirectoryOf, stripPathPrefix} from './paths';
+import {patchesDirectory, packageDirectoryOf, resolvePackagePath, stripPathPrefix} from './paths';
 import {executeOps} from './plan';
 import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
 import {appliedSequences} from './sequence';
+import {conflictingWorkspacePatch, sharedConflictReason} from './shared';
 import {recordPatches} from './state';
 
 export function applyPatches(errorOnWarn = false): void {
@@ -27,7 +27,7 @@ export function applyPatches(errorOnWarn = false): void {
 
   // Замок держится ровно на время работы, а выход по коду — уже снаружи:
   // process.exit не исполняет finally, и замок пережил бы сам прогон.
-  const {failed, warned} = withApplyLock(LOCK_FILE, () => applyAll(patchFiles));
+  const {failed, warned} = withApplyLock(lockFile(), () => applyAll(patchFiles));
 
   // Предупреждение — это «патч лёг, но что-то не сходится»: чаще всего версия
   // пакета уехала. Для CI такое иногда должно валить сборку, но решает это
@@ -53,7 +53,9 @@ function warnVersionMismatch(patchFile: string, targets: PatchTarget[]): number 
   );
 
   for (const dir of packageDirs) {
-    const pkgJsonPath = join(dir, 'package.json');
+    // Манифест читается там, где пакет установлен: в монорепо это может быть
+    // node_modules корня, а не воркспейса.
+    const pkgJsonPath = resolvePackagePath(`${dir}/package.json`);
     if (!existsSync(pkgJsonPath)) continue;
 
     // Битый манифест не должен ронять весь прогон — проверку просто пропускаем.
@@ -165,6 +167,15 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
     const outsideProject = packagesOutsideProject(targets);
     if (outsideProject.length > 0) {
       fail(outsideProjectReason(outsideProject[0]));
+      continue;
+    }
+
+    // Каталог пакета общий с соседним воркспейсом, и патчи у них разные. Дерева,
+    // которое устроило бы обоих, не существует; молча положить своё — значит
+    // подменить пакет соседу. Так делает patch-package, и это измерено.
+    const conflict = conflictingWorkspacePatch(patchFile, targets);
+    if (conflict !== null) {
+      fail(sharedConflictReason(conflict));
       continue;
     }
 
