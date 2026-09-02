@@ -9,6 +9,7 @@ import {usePatchesDirectory} from './src/paths';
 import {rebasePatches, reverseAll} from './src/rebase';
 import {retargetPatches} from './src/retarget';
 import {showStatus} from './src/status';
+import {upstreamIssue} from './src/upstream';
 
 // Main
 const command = process.argv[2];
@@ -83,6 +84,15 @@ try {
       showStatus();
       break;
 
+    case 'upstream': {
+      const name = requirePackages('bunch-package upstream <package-name>')[0];
+      // --open не влезает в parseOptions без расширения схемы — читаем его здесь напрямую,
+      // чтобы не добавлять флаг, не нужный ни одной другой команде.
+      const openBrowser = process.argv.includes('--open');
+      upstreamIssue(name, openBrowser);
+      break;
+    }
+
     case 'rebase': {
       // Цель обязательна и без умолчания: «откатить на что-нибудь» — не команда.
       const usage = 'bunch-package rebase <package-name> <patch-file|number|0>';
@@ -112,6 +122,7 @@ Commands:
   bunch-package rebase <package> <patch|0>        Un-apply the patches that sit on top of one
   bunch-package retarget <package>                Move its patches to the installed version
   bunch-package import                            Convert patches written by \`bun patch\` to this format
+  bunch-package upstream <package>                Print a GitHub draft-issue URL with the patch diff
 
 Options:
   --patch-dir <dir>                               Where the patches live (default: patches)

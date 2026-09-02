@@ -4,6 +4,7 @@ import {createHash} from 'crypto';
 import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree} from './src/create';
 import {parseOptions} from './src/options';
+import {parseRepository} from './src/upstream';
 import {withApplyLock} from './src/lock';
 import {ensureDir} from './src/paths';
 import {invertTarget, parsePatch} from './src/patch-file';
@@ -3447,5 +3448,203 @@ describe('isolated layout and the shared store', () => {
 
     expect(run('reverse', TEST_DIR).stdout).toContain('1 of 1 un-applied');
     expect(readFileSync(indexPath, 'utf-8')).not.toContain('// ISOLATED FIX');
+  });
+});
+
+describe('parseRepository', () => {
+  // Три формы, которые должны давать правильный GitHub URL
+
+  test('parses github: shorthand', () => {
+    const result = parseRepository('github:acme/my-lib');
+    expect(result).not.toBeNull();
+    if (result === null || 'external' in result) throw new Error('expected github');
+    expect(result.github).toBe('https://github.com/acme/my-lib');
+    expect(result.owner).toBe('acme');
+    expect(result.repoName).toBe('my-lib');
+  });
+
+  test('parses https GitHub URL with .git suffix', () => {
+    const result = parseRepository('https://github.com/acme/my-lib.git');
+    expect(result).not.toBeNull();
+    if (result === null || 'external' in result) throw new Error('expected github');
+    expect(result.github).toBe('https://github.com/acme/my-lib');
+  });
+
+  test('parses git+ssh GitHub URL', () => {
+    const result = parseRepository('git+ssh://git@github.com/acme/my-lib.git');
+    expect(result).not.toBeNull();
+    if (result === null || 'external' in result) throw new Error('expected github');
+    expect(result.github).toBe('https://github.com/acme/my-lib');
+  });
+
+  test('parses git+https GitHub URL', () => {
+    const result = parseRepository('git+https://github.com/acme/my-lib.git');
+    expect(result).not.toBeNull();
+    if (result === null || 'external' in result) throw new Error('expected github');
+    expect(result.github).toBe('https://github.com/acme/my-lib');
+  });
+
+  test('parses short org/repo form', () => {
+    const result = parseRepository('acme/my-lib');
+    expect(result).not.toBeNull();
+    if (result === null || 'external' in result) throw new Error('expected github');
+    expect(result.github).toBe('https://github.com/acme/my-lib');
+  });
+
+  test('parses repository object with url field', () => {
+    const result = parseRepository({type: 'git', url: 'https://github.com/acme/my-lib.git'});
+    expect(result).not.toBeNull();
+    if (result === null || 'external' in result) throw new Error('expected github');
+    expect(result.github).toBe('https://github.com/acme/my-lib');
+  });
+
+  test('returns external for non-GitHub URL, stripping git+ prefix and .git suffix', () => {
+    // git+ и .git должны быть убраны — иначе URL неудобен для вставки в браузер.
+    // Это же разграничивает эту ветку от запасной `return {external: raw}`.
+    const result = parseRepository('git+https://gitlab.com/acme/my-lib.git');
+    expect(result).not.toBeNull();
+    if (result === null || !('external' in result)) throw new Error('expected external');
+    expect(result.external).toContain('gitlab.com');
+    expect(result.external).not.toContain('git+');
+    expect(result.external).not.toContain('.git');
+  });
+
+  test('returns null for missing repository', () => {
+    expect(parseRepository(null)).toBeNull();
+    expect(parseRepository(undefined)).toBeNull();
+    expect(parseRepository('')).toBeNull();
+  });
+});
+
+describe('bunch-package upstream', () => {
+  test('rejects path traversal with ../..', () => {
+    // create уже проверяет имя — upstream обязан делать то же самое,
+    // иначе join('node_modules', '../..') читает файлы снаружи проекта.
+    const result = run('upstream ../..', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Invalid package name');
+    // Имя и версия чужого пакета не должны утекать в вывод
+    expect(result.stdout).not.toContain('secret');
+  });
+
+  test('rejects path traversal with dot .', () => {
+    const result = run('upstream .', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Invalid package name');
+  });
+
+  test('fails clearly when package is not installed', () => {
+    const result = run('upstream no-such-pkg', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not installed');
+  });
+
+  test('fails when package has no repository field', () => {
+    setupFakePackage(TEST_DIR, 'fakepkg', '1.0.0', {'index.js': 'x'});
+    const result = run('upstream fakepkg', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('repository');
+  });
+
+  test('reports non-GitHub repository and exits cleanly', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules', 'gitlabpkg'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'node_modules', 'gitlabpkg', 'package.json'),
+      JSON.stringify({name: 'gitlabpkg', version: '1.0.0', repository: 'https://gitlab.com/acme/foo'}),
+    );
+    const result = run('upstream gitlabpkg', TEST_DIR);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('gitlab.com');
+    expect(result.stdout).toContain('non-GitHub');
+  });
+
+  test('prints GitHub issue URL for github: shorthand repository', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules', 'hubpkg'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'node_modules', 'hubpkg', 'package.json'),
+      JSON.stringify({name: 'hubpkg', version: '2.0.0', repository: 'github:acme/hubpkg'}),
+    );
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'patches', 'hubpkg+2.0.0.patch'),
+      '--- a/node_modules/hubpkg/index.js\n+++ b/node_modules/hubpkg/index.js\n@@ -1 +1 @@\n-old\n+new\n',
+    );
+    const result = run('upstream hubpkg', TEST_DIR);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('https://github.com/acme/hubpkg/issues/new');
+    expect(result.stdout).toContain('hubpkg%402.0.0');
+  });
+
+  test('prints GitHub issue URL for https repository URL', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules', 'urlpkg'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'node_modules', 'urlpkg', 'package.json'),
+      JSON.stringify({
+        name: 'urlpkg',
+        version: '3.0.0',
+        repository: {type: 'git', url: 'https://github.com/acme/urlpkg.git'},
+      }),
+    );
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'patches', 'urlpkg+3.0.0.patch'),
+      '--- a/node_modules/urlpkg/index.js\n+++ b/node_modules/urlpkg/index.js\n@@ -1 +1 @@\n-old\n+new\n',
+    );
+    const result = run('upstream urlpkg', TEST_DIR);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('https://github.com/acme/urlpkg/issues/new');
+  });
+
+  test('prints GitHub issue URL for short org/repo form', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules', 'shortpkg'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'node_modules', 'shortpkg', 'package.json'),
+      JSON.stringify({name: 'shortpkg', version: '1.0.0', repository: 'acme/shortpkg'}),
+    );
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'patches', 'shortpkg+1.0.0.patch'),
+      '--- a/node_modules/shortpkg/index.js\n+++ b/node_modules/shortpkg/index.js\n@@ -1 +1 @@\n-old\n+new\n',
+    );
+    const result = run('upstream shortpkg', TEST_DIR);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('https://github.com/acme/shortpkg/issues/new');
+  });
+
+  test('includes Why from patch header in issue URL', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules', 'whypkg'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'node_modules', 'whypkg', 'package.json'),
+      JSON.stringify({name: 'whypkg', version: '1.0.0', repository: 'github:acme/whypkg'}),
+    );
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'patches', 'whypkg+1.0.0.patch'),
+      'Why: fix a critical bug\n\n--- a/node_modules/whypkg/index.js\n+++ b/node_modules/whypkg/index.js\n@@ -1 +1 @@\n-old\n+new\n',
+    );
+    const result = run('upstream whypkg', TEST_DIR);
+    expect(result.exitCode).toBe(0);
+    // encodeURIComponent кодирует пробелы как %20, не как +
+    expect(result.stdout).toContain('fix%20a%20critical%20bug');
+  });
+
+  test('warns and prints short URL when diff is too long', () => {
+    mkdirSync(join(TEST_DIR, 'node_modules', 'bigpkg'), {recursive: true});
+    writeFileSync(
+      join(TEST_DIR, 'node_modules', 'bigpkg', 'package.json'),
+      JSON.stringify({name: 'bigpkg', version: '1.0.0', repository: 'github:acme/bigpkg'}),
+    );
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // Патч больше 8 КБ — гарантированно не влезет в URL
+    const hugeDiff =
+      '--- a/node_modules/bigpkg/index.js\n+++ b/node_modules/bigpkg/index.js\n@@ -1 +1 @@\n' +
+      '+' + 'x'.repeat(9000) + '\n';
+    writeFileSync(join(TEST_DIR, 'patches', 'bigpkg+1.0.0.patch'), hugeDiff);
+    const result = run('upstream bigpkg', TEST_DIR);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('too long');
+    expect(result.stdout).toContain('paste');
+    // Короткий URL всё равно должен присутствовать
+    expect(result.stdout).toContain('https://github.com/acme/bigpkg/issues/new');
   });
 });

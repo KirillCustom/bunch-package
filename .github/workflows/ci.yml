@@ -89,3 +89,6 @@ jobs:
           bun ../index.ts edit fakepkg | grep -q 'Detached'
           test "$(stat -c %i node_modules/fakepkg/index.js)" != "$(stat -c %i cache-entry.js)"
           grep -q '^line one$' node_modules/fakepkg/index.js
+
+          # upstream: без repository — внятный отказ, не стек.
+          bun ../index.ts upstream fakepkg 2>&1 | grep -q 'repository'
