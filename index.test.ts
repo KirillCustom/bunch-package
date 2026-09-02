@@ -4081,3 +4081,104 @@ describe('fold', () => {
     expect(result.stdout).toContain('not found in node_modules');
   });
 });
+
+describe('annotate', () => {
+  const file = () => join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+
+  function threePatches() {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+
+    overwriteFile(file(), `// FROM ONE\n${readFileSync(file(), 'utf-8')}`);
+    run('create is-number', TEST_DIR);
+    run('apply', TEST_DIR);
+
+    overwriteFile(file(), readFileSync(file(), 'utf-8').replace('// FROM ONE\n', '// FROM ONE\n// FROM TWO\n'));
+    run('create is-number --append two', TEST_DIR);
+
+    overwriteFile(file(), `${readFileSync(file(), 'utf-8')}// FROM THREE\n`);
+    run('create is-number --append three', TEST_DIR);
+  }
+
+  test('attributes each line to the patch that brought it', () => {
+    threePatches();
+
+    const result = run('annotate is-number index.js', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.split('\n');
+    expect(lines.find(line => line.includes('// FROM ONE'))).toContain('001');
+    expect(lines.find(line => line.includes('// FROM TWO'))).toContain('002');
+    expect(lines.find(line => line.includes('// FROM THREE'))).toContain('003');
+
+    // Строка самого пакета не приписана никому.
+    const own = lines.find(line => line.includes('module.exports'));
+    expect(own).toBeDefined();
+    expect(own).not.toMatch(/\b00[123]\b/);
+
+    expect(result.stdout).toContain('3 line(s) from 3 patch(es)');
+  });
+
+  test('leaves node_modules exactly as it was', () => {
+    threePatches();
+    const before = readFileSync(file(), 'utf-8');
+
+    expect(run('annotate is-number index.js', TEST_DIR).exitCode).toBe(0);
+
+    expect(readFileSync(file(), 'utf-8')).toBe(before);
+  });
+
+  test('refuses when the file was edited by hand, instead of attributing those lines', () => {
+    threePatches();
+    overwriteFile(file(), `${readFileSync(file(), 'utf-8')}// EDITED BY HAND\n`);
+
+    const result = run('annotate is-number index.js', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('is not what the patches produce');
+    expect(result.stdout).not.toContain('EDITED BY HAND');
+  });
+
+  test('refuses when a patch of the sequence is not in the tree', () => {
+    threePatches();
+    run('rebase is-number 001+initial', TEST_DIR);
+
+    const result = run('annotate is-number index.js', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('is not what the patches produce');
+  });
+
+  test('attributes every line of a file a patch created', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    writeFileSync(join(TEST_DIR, 'node_modules', 'is-number', 'extra.js'), 'const added = 1;\nconst more = 2;\n');
+    run('create is-number', TEST_DIR);
+    run('apply', TEST_DIR);
+
+    const result = run('annotate is-number extra.js', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    for (const text of ['const added = 1;', 'const more = 2;']) {
+      expect(result.stdout.split('\n').find(line => line.includes(text))).toContain('001');
+    }
+  });
+
+  test('says when the package has no patches at all, and when the file is missing', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+
+    const noPatches = run('annotate is-number index.js', TEST_DIR);
+    expect(noPatches.exitCode).not.toBe(0);
+    expect(noPatches.stdout).toContain('came with the package');
+
+    overwriteFile(file(), `// ONE\n${readFileSync(file(), 'utf-8')}`);
+    run('create is-number', TEST_DIR);
+    const noFile = run('annotate is-number nope.js', TEST_DIR);
+    expect(noFile.exitCode).not.toBe(0);
+    expect(noFile.stdout).toContain('does not exist');
+  });
+
+  test('needs both a package and a file', () => {
+    const result = run('annotate is-number', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Usage');
+  });
+});
