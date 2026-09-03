@@ -37,9 +37,16 @@ export function retargetPatches(packageName: string): void {
 
   const versions = new Set(mine.map(file => parsePatchName(file)!.version));
   if (versions.size > 1) {
+    // Раньше здесь стояло «sort that out first» — отказ, не говорящий, что
+    // именно делать, ровно там, куда `apply` и посылает человека за выходом
+    // (TSK-41). Причина отказа одна и называется прямо: перенос даёт всем
+    // патчам имя по установленной версии, и файлы столкнулись бы именами.
+    const stale = mine.filter(file => parsePatchName(file)!.version !== version);
     throw new Error(
-      `Patches for ${name} carry more than one version (${[...versions].join(', ')}).\n` +
-        `   Sort that out first: a sequence is built against one version.`,
+      `Patches for ${name} carry more than one version (${[...versions].join(', ')}), and ${version} is installed.\n` +
+        `   Moving them all onto ${version} would give two files the same name, so decide first\n` +
+        `   which changes stay. Written for a version that is not installed:\n` +
+        stale.map(file => `     ${patchesDirectory()}/${file}`).join('\n'),
     );
   }
 

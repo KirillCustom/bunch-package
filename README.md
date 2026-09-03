@@ -384,7 +384,17 @@ hand-written lines to a patch is worse than no annotation.
 
 A patch is written against one exact version. Upgrade the package and the patch
 file still says the old one — `apply` warns about the mismatch and then it is up to
-you. `retarget` moves the patches over:
+you. It usually still fits: a patch written for 2.1.2 normally applies to 2.1.3.
+
+What is worth knowing is what happens if you leave it and run `create` again. The
+new patch is named after the new version, so `patches/` now holds two files for one
+package — and **both are applied**, one after the other, leaving the tree with both
+sets of changes. `create` says so as soon as the second file appears, and tells you
+whether the old one's changes are already inside the new patch; `apply` repeats it,
+naming the file written for the version that is not installed. Neither refuses:
+patch-package applies both too, and the tree is byte for byte the same.
+
+`retarget` moves the patches over instead:
 
 ```bash
 bunx bunch-package retarget ms
@@ -413,7 +423,9 @@ Three things it will tell you rather than paper over:
 - **A patch that is no longer needed**, because the fix went upstream between the
   versions. It is dropped, and said aloud.
 - **Patches for more than one version in `patches/`**, which means the sequence is
-  not in a state anyone can move safely.
+  not in a state anyone can move safely: moving them all onto the installed version
+  would give two files the same name. The files written for a version you no longer
+  have are listed, so you can decide which changes stay.
 
 How often this works is measured, not promised. Of 289 patches taken from public
 repositories, applied to the next published version of their package: 64% still fit

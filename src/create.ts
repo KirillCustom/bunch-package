@@ -6,7 +6,8 @@ import {join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
 import {PathFilters, pathAllowed} from './options';
 import {ensureDir, installedPackagePath, isExecutable, patchesDirectory, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
-import {PatchHeaderFields, splitPatchHeader, updatePatchHeader} from './patch-file';
+import {isInTree} from './presence';
+import {PatchHeaderFields, listPatchFiles, parsePatchName, patchesOfPackage, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 import {renameRecordedPatch} from './state';
 
@@ -860,5 +861,35 @@ export function createPatch(
     }
 
     writePatch(plan, diff.content, header);
+    reportOtherVersions(plan.outputName, patchDir, version);
   });
+}
+
+// Пакет обновили, `create` назвал новый патч новой версией — а файл прежней так
+// и лежит рядом и будет применяться вместе с новым. Отсюда и берётся дерево,
+// в котором правки двух версий сразу (TSK-41). Сказать об этом здесь дешевле
+// всего: человек стоит ровно в той точке, где второй файл и появился.
+function reportOtherVersions(outputName: string, packageDir: string, version: string): void {
+  // Только что записанный файл назван установленной версией, поэтому в этот
+  // список он не попадает и без сравнения имён — проверено мутацией.
+  const stale = patchesOfPackage(listPatchFiles(), packageDir).filter(
+    file => parsePatchName(file)?.version !== version,
+  );
+  if (stale.length === 0) return;
+
+  const dir = patchesDirectory();
+  console.log('');
+  console.log(`⚠️  ${packageDir} also has ${stale.length} patch(es) written for another version;`);
+  console.log(`   they are applied next to this one, so the tree gets their changes too:`);
+
+  // Про каждый говорим не «наверное», а по дереву. Патч строится диффом всего
+  // пакета против эталона, поэтому правки, лежавшие в node_modules в эту
+  // минуту, уже внутри нового файла — а лежат они там или нет, знает дерево.
+  for (const file of stale) {
+    console.log(
+      isInTree(file)
+        ? `   ${dir}/${file} — its changes were in node_modules, so ${outputName} carries them too: safe to delete`
+        : `   ${dir}/${file} — not in node_modules, so ${outputName} does not carry its changes`,
+    );
+  }
 }

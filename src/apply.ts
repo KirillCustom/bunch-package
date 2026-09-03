@@ -3,7 +3,7 @@ import {join} from 'path';
 import {inProduction, missingPackages, skipsMissingPackage} from './dev';
 import {firstPathOutsideNodeModules, foreignPatchReason, patchesAppliedByBun} from './foreign';
 import {lockFile, withApplyLock} from './lock';
-import {PatchTarget, formatPatchName, listPatchFiles, parsePatchName} from './patch-file';
+import {PatchTarget, formatPatchName, listPatchFiles, parsePatchName, patchesOfPackage} from './patch-file';
 import {patchesDirectory, packageDirectoryOf, resolvePackagePath, stripPathPrefix} from './paths';
 import {executeOps} from './plan';
 import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
@@ -51,11 +51,28 @@ function packageDirsOf(targets: PatchTarget[]): string[] {
   ];
 }
 
+// Патч того же пакета, написанный ровно для установленной версии. Пока такого
+// файла нет, «версия уехала» — обычное дело: патч часто ложится и на соседнюю
+// версию, и patch-package с нами тут согласен. А вот когда он есть, набор
+// несогласован: два файла для одного пакета, один из них для версии, которой в
+// дереве нет. Оба всё равно применятся, и в дереве окажутся обе правки — про
+// это и надо сказать одной строкой, а не двумя разрозненными (TSK-41).
+function patchForInstalledVersion(patchFile: string, patchFiles: string[], installed: string): string | undefined {
+  const mine = parsePatchName(patchFile);
+  if (mine === null) return undefined;
+
+  // Сам себя патч тут не найдёт: сюда приходят только те, чья версия с
+  // установленной уже разошлась. Проверять имя ещё раз — второй замок на той же
+  // двери; мутация «убрать её» не покраснела ни одним тестом.
+  return patchesOfPackage(patchFiles, mine.packageDir).find(file => parsePatchName(file)?.version === installed);
+}
+
 // Версию сверяем по пакету из заголовков, а не по имени файла патча: при
 // установке через алиас каталог называется иначе, чем пакет, и разбор имени
 // файла уводил проверку к несуществующему манифесту — она молча пропадала.
-function warnVersionMismatch(patchFile: string, targets: PatchTarget[]): number {
-  const patchVersion = parsePatchName(patchFile)?.version;
+function warnVersionMismatch(patchFile: string, patchFiles: string[], targets: PatchTarget[]): number {
+  const parsed = parsePatchName(patchFile);
+  const patchVersion = parsed?.version;
   if (patchVersion === undefined) return 0;
 
   let warnings = 0;
@@ -76,7 +93,17 @@ function warnVersionMismatch(patchFile: string, targets: PatchTarget[]): number 
     }
 
     if (installedVersion !== undefined && installedVersion !== patchVersion) {
-      console.log(`  ⚠️  ${patchFile} — version mismatch (patch: ${patchVersion}, installed: ${installedVersion})`);
+      const current = patchForInstalledVersion(patchFile, patchFiles, installedVersion);
+
+      if (current === undefined) {
+        console.log(`  ⚠️  ${patchFile} — version mismatch (patch: ${patchVersion}, installed: ${installedVersion})`);
+      } else {
+        // Пакет называем так, как он назван в имени патча: при установке через
+        // алиас каталог в дереве зовётся иначе, и человек ищет файл по имени.
+        console.log(`  ⚠️  ${patchFile} — written for ${parsed!.packageDir} ${patchVersion}, but ${installedVersion} is installed`);
+        console.log(`      and ${current} is written for it. Both are applied, so the tree ends up`);
+        console.log(`      with both changes. Delete this file, or move its changes into ${current}.`);
+      }
       warnings++;
     }
   }
@@ -192,7 +219,7 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
       continue;
     }
 
-    warned += warnVersionMismatch(patchFile, targets);
+    warned += warnVersionMismatch(patchFile, patchFiles, targets);
 
     const absolute = absolutePathIn(targets);
     if (absolute !== undefined) {
