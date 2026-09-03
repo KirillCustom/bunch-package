@@ -2871,6 +2871,228 @@ describe('state file and status', () => {
   });
 });
 
+// Переключение ветки, где тот же патч написан иначе: жалобы patch-package #487
+// и #557. Файл патча стал другим, node_modules остался пропатченным прежним —
+// и apply клал новый поверх старого, печатая `✅` и `1 applied` (NOT-30, TSK-42).
+describe('a patch file that changed after it was applied', () => {
+  const PKG = 'branch-lib';
+  const NAME = 'branch-lib+1.0.0.patch';
+
+  // Дописывающий патч выбран нарочно: контекст он не трогает, поэтому вторая
+  // версия ложится поверх первой без единой жалобы — молча и навсегда.
+  function patchAdding(line: string): string {
+    return `--- a/node_modules/${PKG}/index.js
++++ b/node_modules/${PKG}/index.js
+@@ -1 +1,2 @@
+ const a = 1;
++// ${line}
+`;
+  }
+
+  function writePatch(content: string) {
+    writeFileSync(join(TEST_DIR, 'patches', NAME), content);
+  }
+
+  function setupApplied() {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writePatch(patchAdding('FIX VERSION TWO'));
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+  }
+
+  function reinstallPackage() {
+    rmSync(join(TEST_DIR, 'node_modules', PKG), {force: true, recursive: true});
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'index.js': 'const a = 1;\n'});
+  }
+
+  const indexJs = () => readFileSync(join(TEST_DIR, 'node_modules', PKG, 'index.js'), 'utf-8');
+  const stateOf = (file: string) =>
+    JSON.parse(readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8')).patches.find(
+      (patch: any) => patch.file === file,
+    );
+
+  test('refuses to stack the new version on top of the old one', () => {
+    setupApplied();
+    writePatch(patchAdding('FIX VERSION ONE'));
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.stdout).toContain('changed since it was applied');
+    expect(result.stdout).toContain(`node_modules/${PKG}/index.js is still the file that version left`);
+    expect(result.stdout).toContain(`delete node_modules/${PKG}`);
+    // Главное: дерево осталось тем, чем было. Прежде здесь лежали обе строки
+    // сразу — состояние, которого не описывает ни один из двух патчей.
+    expect(indexJs()).toBe('const a = 1;\n// FIX VERSION TWO\n');
+  });
+
+  test('refuses on every run, not only the first', () => {
+    setupApplied();
+    writePatch(patchAdding('FIX VERSION ONE'));
+    run('apply', TEST_DIR);
+
+    // Отказ стирал запись вместе с уликой, и второй `apply` уже ничего не знал.
+    // `bun install` зовут не по одному разу, так что защита на один раз — это
+    // отсутствие защиты.
+    const again = run('apply', TEST_DIR);
+
+    expect(again.exitCode).toBe(1);
+    expect(again.stdout).toContain('0 applied, 1 failed');
+    expect(indexJs()).toBe('const a = 1;\n// FIX VERSION TWO\n');
+    // Запись пережила отказ дословно: хеш в ней — от прежнего файла патча.
+    expect(stateOf(NAME).sha256).toBe(
+      createHash('sha256').update(patchAdding('FIX VERSION TWO')).digest('hex'),
+    );
+  });
+
+  test('applies as usual once the package has been reinstalled', () => {
+    setupApplied();
+    writePatch(patchAdding('FIX VERSION ONE'));
+    reinstallPackage();
+
+    // Прежней правки в дереве больше нет, и отказывать не за что: запись
+    // говорит только о самом патче, а решает дерево.
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    expect(indexJs()).toBe('const a = 1;\n// FIX VERSION ONE\n');
+  });
+
+  test('says nothing when only the header of the patch changed', () => {
+    setupApplied();
+    // `annotate` и `create --why` переписывают заголовок, а дерева не касаются.
+    // Отказ здесь означал бы «объяснил, зачем патч нужен — переустанавливай пакет».
+    writePatch(`Why: the previous release breaks SSR\n\n${patchAdding('FIX VERSION TWO')}`);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain('changed since it was applied');
+    expect(result.stdout).toContain('1 applied, 0 failed');
+
+    // Тот же вопрос дереву, которого запись уже не узнаёт. Выше молчит ветка
+    // «патч и так на месте» — здесь молчать может только сверка тела помимо
+    // заголовка, и без неё дописанное «зачем этот патч нужен» будило бы
+    // предупреждение на каждой чистой установке.
+    reinstallPackage();
+    const afterReinstall = run('apply', TEST_DIR);
+
+    expect(afterReinstall.exitCode).toBe(0);
+    expect(afterReinstall.stdout).not.toContain('⚠️');
+    expect(afterReinstall.stdout).toContain('1 applied, 0 failed');
+  });
+
+  test('warns instead of refusing when the record was written without file hashes', () => {
+    setupApplied();
+    // Записи прежних версий не знают, что патч оставил в дереве. Доказать по
+    // ним нечего, а промолчать — вернуться ровно к тому, на что жалуются.
+    const statePath = join(TEST_DIR, 'node_modules', '.bunch-package-state.json');
+    const state = JSON.parse(readFileSync(statePath, 'utf-8'));
+    delete state.patches[0].files;
+    writeFileSync(statePath, JSON.stringify(state));
+    writePatch(patchAdding('FIX VERSION ONE'));
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('⚠️');
+    expect(result.stdout).toContain("the previous version's changes may still be in node_modules");
+    expect(result.stdout).toContain('1 applied, 0 failed');
+    // А с --error-on-warn такая установка обязана покраснеть.
+    reinstallPackage();
+    writeFileSync(statePath, JSON.stringify(state));
+    expect(run('apply --error-on-warn', TEST_DIR).exitCode).toBe(1);
+  });
+
+  test('names the previous version as the reason a hunk no longer fits', () => {
+    setupApplied();
+    // Патч не дописывает, а заменяет строку, которой в пропатченном дереве уже
+    // нет: apply откажет и без записи — но скажет только «hunk failed». Ровно
+    // это и есть невнятный отказ, на который жалуются у patch-package.
+    writePatch(`--- a/node_modules/${PKG}/index.js
++++ b/node_modules/${PKG}/index.js
+@@ -1,2 +1,2 @@
+ const a = 1;
+-// FIX VERSION THREE
++// FIX VERSION ONE
+`);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain('changed since it was applied');
+    expect(result.stdout).toContain(`node_modules/${PKG}/index.js is still the file that version left`);
+    // Смешивать тут нечего — патч и так не лёг бы, и обещать обратное нельзя.
+    expect(result.stdout).not.toContain('would mix the two versions');
+  });
+
+  test('points at a file that exists, not at one the patch deleted', () => {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'legacy.js': 'module.exports = 0;\n', 'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // Первая секция удаляет файл, вторая правит соседний. Удалённый записан как
+    // отсутствующий, и показывать в отказе надо не на него: проверить «файла
+    // по-прежнему нет» человеку не на чем.
+    const withDeletion = (line: string) => `--- a/node_modules/${PKG}/legacy.js
++++ /dev/null
+@@ -1 +0,0 @@
+-module.exports = 0;
+--- a/node_modules/${PKG}/index.js
++++ b/node_modules/${PKG}/index.js
+@@ -1 +1,2 @@
+ const a = 1;
++// ${line}
+`;
+    writePatch(withDeletion('FIX VERSION TWO'));
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(stateOf(NAME).files[`node_modules/${PKG}/legacy.js`]).toBe(null);
+
+    writePatch(withDeletion('FIX VERSION ONE'));
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain(`node_modules/${PKG}/index.js is still the file that version left`);
+    expect(result.stdout).not.toContain('legacy.js is still');
+  });
+
+  test('a renamed file is recorded under the name it ended up with', () => {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // Переименование — единственная секция, где путь после применения не стоит
+    // ни в одной строке `+++`. Записать старое имя значило бы искать в дереве
+    // файл, которого там уже нет, и терять улику на ровном месте.
+    writePatch(`diff --git a/node_modules/${PKG}/index.js b/node_modules/${PKG}/renamed.js
+similarity index 100%
+rename from node_modules/${PKG}/index.js
+rename to node_modules/${PKG}/renamed.js
+`);
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+    expect(Object.keys(stateOf(NAME).files)).toEqual([`node_modules/${PKG}/renamed.js`]);
+  });
+
+  test('a patch rewritten by create applies without a word about the state file', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '\n// first\n');
+    expect(run('create is-number', TEST_DIR).exitCode).toBe(0);
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+    // Обычный ход работы: правку дописали и патч пересоздали. Файл патча стал
+    // другим, и запись о нём устарела — но дерево и есть то, что описывает новый
+    // патч. Ругаться здесь значило бы ругаться после каждого create.
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '// second\n');
+    expect(run('create is-number', TEST_DIR).exitCode).toBe(0);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain('changed since it was applied');
+    expect(result.stdout).not.toContain('⚠️');
+  });
+});
+
 // Патчи одного пакета — как коммиты: чтобы переделать не последний, надо снять
 // те, что легли поверх. Откат — это применение перевёрнутого патча тем же
 // кодом, что и обычное применение.

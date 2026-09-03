@@ -210,6 +210,15 @@ patch is computed in memory first, and nothing is written unless every file in i
 fits — so a patch can never leave your tree half-changed, and a failed apply leaves
 no `.rej` or `.orig` files behind. Applying the same patch twice is a no-op.
 
+If the patch file was rewritten after it landed — you switched branches, or pulled a
+patch someone else changed — `apply` refuses it instead of laying the new version on
+top of the old one, and names the file in `node_modules` the previous version left
+there. It refuses only when the tree proves it: every file that patch touched is
+still exactly what it left, so nothing has been reinstalled since. Delete the
+package directory, install again, and the patch applies as usual. If the tree has
+moved on and there is nothing left to prove either way, you get a warning instead of
+a refusal, and the patch is applied.
+
 Each file is written beside its target and moved over it, so a file is never visible
 half-written or briefly missing. An `apply` killed outright — Ctrl-C, a CI runner
 that died, a disk that filled up — leaves every file either as it was or fully
@@ -431,11 +440,13 @@ bunx bunch-package status
 Every answer is worked out from `node_modules` itself, by checking whether each
 patch is already in the files. `apply` also keeps a record at
 `node_modules/.bunch-package-state.json` — which patch, which version, the hash of
-the patch file, and when it first landed — and `status` uses it only for the parts
-the tree cannot tell you: when a patch was applied, whether the patch file has been
-edited since, and whether a patch file that used to be applied has been deleted
-while its changes are still in `node_modules`. The record is never taken as proof
-that a patch is applied; the files are.
+the patch file, the hashes of the files it left in the tree, and when it first
+landed — and `status` uses it only for the parts the tree cannot tell you: when a
+patch was applied, whether the patch file has been edited since, and whether a patch
+file that used to be applied has been deleted while its changes are still in
+`node_modules`. `apply` reads it for one thing: to notice that the patch describing
+what is in the tree is no longer the patch on disk. The record is never taken as
+proof that a patch is applied; the files are.
 
 `status` exits `1` when anything is missing from the tree, so it can stand in CI as
 a cheap check that `node_modules` is what the patches say it should be.
