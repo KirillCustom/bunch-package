@@ -116,7 +116,23 @@ function installedAt(directory: string): boolean {
 //
 // Не нашли нигде — отвечаем cwd, чтобы диагностика осталась прежней: «пакета
 // нет» скажет тот, у кого для этого есть слова.
+// Ответ спрашивают на каждый путь из патча, а путей в патче бывают сотни, и
+// каждый ответ — обход вверх с lstat на каждом шаге. Кеш тот же по смыслу, что
+// у rootCache: каталог пакета за прогон не появляется и не исчезает — apply
+// правит файлы внутри пакета, а не заводит и не сносит его каталог.
+const hostCache = new Map<string, string>();
+
 export function hostOfPackage(packageDir: string, from: string = process.cwd()): string {
+  const key = `${from}\u0000${packageDir}`;
+  const remembered = hostCache.get(key);
+  if (remembered !== undefined) return remembered;
+
+  const found = findHost(packageDir, from);
+  hostCache.set(key, found);
+  return found;
+}
+
+function findHost(packageDir: string, from: string): string {
   const root = workspaceRoot(from);
   if (root === null) return from;
 

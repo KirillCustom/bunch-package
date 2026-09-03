@@ -15,6 +15,17 @@ export type Presence =
   | {kind: 'not-in-tree'; ops: PlannedOp[]}
   | {kind: 'does-not-fit'; reason: string};
 
+// Разбор отдельно от чтения: `status` спрашивает у одного и того же файла и
+// секции, и заголовок, и оба хеша, — а пока разбор читал файл сам, тот же файл
+// открывался на патч четыре раза.
+export function targetsOf(content: string): PatchTarget[] | {error: string} {
+  const targets = parsePatch(content);
+  if (targets.length === 0) {
+    return {error: 'no hunks found — the patch file is empty or truncated'};
+  }
+  return targets;
+}
+
 export function readTargets(patchFile: string): PatchTarget[] | {error: string} {
   let content: string;
   try {
@@ -23,11 +34,7 @@ export function readTargets(patchFile: string): PatchTarget[] | {error: string} 
     return {error: `cannot read patch file: ${error.message}`};
   }
 
-  const targets = parsePatch(content);
-  if (targets.length === 0) {
-    return {error: 'no hunks found — the patch file is empty or truncated'};
-  }
-  return targets;
+  return targetsOf(content);
 }
 
 // Пустой план означает, что менять нечего, то есть изменения патча уже в дереве.

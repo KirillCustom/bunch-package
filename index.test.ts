@@ -1024,6 +1024,23 @@ index c4498bcc..74988d81 100644
     expect(result.stdout).toContain('📋 0 patch(es)');
   });
 
+  test('reverse leaves them alone instead of rolling back a project file', () => {
+    // Файл проекта выглядит так, будто патч bun уже лёг: обратная сторона
+    // сходится, и `reverse`, взявшись за чужой патч, откатил бы исходник
+    // проекта. Никакой другой защиты здесь нет — `unApply` спрашивает про общий
+    // стор и про то, лежит ли патч в дереве, но про формат путей не спрашивает.
+    // Проверено снятием фильтра: `↩️ ms@2.1.2.patch` и index.js проекта,
+    // вернувшийся к `const original = 1;`.
+    setupProjectFile({'ms@2.1.2': 'patches/ms@2.1.2.patch'});
+    overwriteFile(join(TEST_DIR, 'index.js'), 'const patchedByBun = 2;\n');
+
+    const result = run('reverse', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('No patches to un-apply');
+    expect(readFileSync(join(TEST_DIR, 'index.js'), 'utf-8')).toBe('const patchedByBun = 2;\n');
+  });
+
   test('create refuses a package bun already patches', () => {
     setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
     writeFileSync(
@@ -4385,6 +4402,29 @@ describe('monorepo workspaces', () => {
   }
 
   const libIndex = () => join(TEST_DIR, 'node_modules', LIB, 'index.js');
+
+  test('finds two packages that live in different node_modules in one run', () => {
+    // Один пакет поднят в корень монорепо, другой лежит в node_modules самого
+    // воркспейса. Место ищется на каждый путь из патча и запоминается — но
+    // помнить его надо про пакет, а не про каталог, откуда спросили. Проверено
+    // мутацией: ключ без имени пакета — и второй пакет объявляется
+    // ненайденным, потому что его ищут там, где нашёлся первый.
+    monorepo();
+    setupFakePackage(TEST_DIR, 'hoisted-lib', '1.0.0', {'index.js': 'const h = 1;\n'});
+    setupFakePackage(workspace('a'), 'local-lib', '1.0.0', {'index.js': 'const l = 1;\n'});
+
+    mkdirSync(join(workspace('a'), 'patches'), {recursive: true});
+    for (const [name, before, after] of [['hoisted-lib', 'const h = 1;', 'const h = 2;'], ['local-lib', 'const l = 1;', 'const l = 2;']]) {
+      writeFileSync(join(workspace('a'), 'patches', `${name}+1.0.0.patch`),
+        `--- a/node_modules/${name}/index.js\n+++ b/node_modules/${name}/index.js\n@@ -1 +1 @@\n-${before}\n+${after}\n`);
+    }
+
+    const result = run('apply', workspace('a'));
+
+    expect(result.stdout).toContain('2 applied, 0 failed');
+    expect(readFileSync(join(TEST_DIR, 'node_modules', 'hoisted-lib', 'index.js'), 'utf-8')).toBe('const h = 2;\n');
+    expect(readFileSync(join(workspace('a'), 'node_modules', 'local-lib', 'index.js'), 'utf-8')).toBe('const l = 2;\n');
+  });
 
   test('applies a patch to a package hoisted to the monorepo root', () => {
     // patch-package #356, самое повторяемое в самом популярном issue соседа:

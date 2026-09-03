@@ -4,7 +4,7 @@ import {missingPackages, skipsMissingPackage} from './dev';
 import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
 import {listPatchFiles, patchHeaderSummary, splitPatchHeader} from './patch-file';
 import {patchesDirectory} from './paths';
-import {Presence, outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
+import {Presence, outsideProjectReason, packagesOutsideProject, presenceOf, targetsOf} from './presence';
 import {appliedSequences} from './sequence';
 import {RecordedPatch, STATE_FILE, hashPatchBody, hashPatchFile, readState, recordedPatches} from './state';
 
@@ -12,10 +12,26 @@ import {RecordedPatch, STATE_FILE, hashPatchBody, hashPatchFile, readState, reco
 // говорит, что было, а спрашивают — что есть. Сам расчёт — общий с apply.
 type Shown = Presence | {kind: 'unreadable'; reason: string} | {kind: 'dev-only'; missing: string};
 
-function shownPresence(patchFile: string, wholeSequenceApplied: Set<string>): Shown {
+// Файл патча читается один раз на патч, и из этого чтения отвечают все трое:
+// разбор секций, строка заголовка и оба хеша. Пока каждый читал сам, `status`
+// открывал один и тот же файл четырежды.
+type PatchFile = {raw: Buffer; content: string} | {error: string};
+
+function readPatchFile(patchFile: string): PatchFile {
+  try {
+    const raw = readFileSync(join(patchesDirectory(), patchFile));
+    return {raw, content: raw.toString('utf-8')};
+  } catch (error: any) {
+    return {error: `cannot read patch file: ${error.message}`};
+  }
+}
+
+function shownPresence(patchFile: string, file: PatchFile, wholeSequenceApplied: Set<string>): Shown {
   if (wholeSequenceApplied.has(patchFile)) return {kind: 'in-tree'};
 
-  const targets = readTargets(patchFile);
+  if ('error' in file) return {kind: 'unreadable', reason: file.error};
+
+  const targets = targetsOf(file.content);
   if ('error' in targets) return {kind: 'unreadable', reason: targets.error};
 
   const outside = firstPathOutsideNodeModules(targets);
@@ -39,14 +55,13 @@ function shownPresence(patchFile: string, wholeSequenceApplied: Set<string>): Sh
   return presenceOf(targets);
 }
 
-function describeRecord(record: RecordedPatch | undefined, patchFile: string): string {
+function describeRecord(record: RecordedPatch | undefined, file: PatchFile): string {
   if (record === undefined) return 'not in the state file';
 
-  const path = join(patchesDirectory(), patchFile);
-  if (existsSync(path) && hashPatchFile(path) !== record.sha256) {
+  if (!('error' in file) && hashPatchFile(file.raw) !== record.sha256) {
     // Заголовок дерева не касается. Сказать про него «патч переписали» значило
     // бы звать человека разбираться туда, где менялось одно объяснение.
-    if (record.bodySha256 !== undefined && record.bodySha256 === hashPatchBody(path)) {
+    if (record.bodySha256 !== undefined && record.bodySha256 === hashPatchBody(file.content)) {
       return `only its header changed since it was applied on ${record.appliedAt}`;
     }
     return `the patch file changed since it was applied on ${record.appliedAt}`;
@@ -57,15 +72,9 @@ function describeRecord(record: RecordedPatch | undefined, patchFile: string): s
 // Зачем этот патч существует — если в файле написано. Без этого имя файла
 // говорит только про пакет и версию, и `status` отвечает на «что в дереве», но
 // не на «что это вообще такое».
-function headerLine(patchFile: string): string | null {
-  const path = join(patchesDirectory(), patchFile);
-  if (!existsSync(path)) return null;
-
-  try {
-    return patchHeaderSummary(splitPatchHeader(readFileSync(path, 'utf-8')).header);
-  } catch {
-    return null; // нечитаемый файл — забота presenceOf, а не этой строки
-  }
+function headerLine(file: PatchFile): string | null {
+  if ('error' in file) return null; // нечитаемый файл — забота presenceOf, а не этой строки
+  return patchHeaderSummary(splitPatchHeader(file.content).header);
 }
 
 export function showStatus(): void {
@@ -101,9 +110,10 @@ export function showStatus(): void {
   let skipped = 0;
 
   for (const patchFile of ours) {
-    const presence = shownPresence(patchFile, wholeSequenceApplied);
-    const record = describeRecord(recorded.get(patchFile), patchFile);
-    const why = headerLine(patchFile);
+    const file = readPatchFile(patchFile);
+    const presence = shownPresence(patchFile, file, wholeSequenceApplied);
+    const record = describeRecord(recorded.get(patchFile), file);
+    const why = headerLine(file);
     const say = (line: string) => {
       console.log(line);
       if (why !== null) console.log(`     ${why}`);
@@ -139,7 +149,8 @@ export function showStatus(): void {
 
   // Записи о патчах, которых в patches/ больше нет: сам файл удалили, а
   // изменения, скорее всего, так и лежат в node_modules.
-  const orphans = [...recorded.keys()].filter(file => !ours.includes(file));
+  const known = new Set(ours);
+  const orphans = [...recorded.keys()].filter(file => !known.has(file));
   if (orphans.length > 0) {
     console.log('');
     console.log(`⚠️  ${orphans.length} recorded patch file(s) no longer exist in ${patchesDirectory()}/:`);
