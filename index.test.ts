@@ -90,10 +90,18 @@ function setupFakePackage(dir: string, name: string, version: string, files: Rec
   }
 }
 
+// Песочницу сносим с повторами: на Windows файлы, оставшиеся от процесса,
+// убитого по таймауту внутри теста, система держит ещё какое-то время, и
+// обычный rmSync падает EBUSY — а падает он в beforeEach, то есть роняет не
+// свой тест, а все следующие. Измерено в CI: один тест с оборванной установкой
+// уронил шесть подряд.
+function removeTestDir() {
+  if (!existsSync(TEST_DIR)) return;
+  rmSync(TEST_DIR, {force: true, recursive: true, maxRetries: 10, retryDelay: 100});
+}
+
 function initTestDir() {
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, {force: true, recursive: true});
-  }
+  removeTestDir();
   mkdirSync(TEST_DIR, {recursive: true});
   writeFileSync(join(TEST_DIR, 'package.json'), JSON.stringify({name: 'test-project', version: '1.0.0'}));
 }
@@ -103,9 +111,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, {force: true, recursive: true});
-  }
+  removeTestDir();
 });
 
 describe('bunch-package create', () => {
