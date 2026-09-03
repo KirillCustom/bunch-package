@@ -455,7 +455,20 @@ export function withPristine<T>(name: string, version: string, run: (pristine: s
 
     return run(pristine, tempDir);
   } finally {
-    rmSync(tempDir, {force: true, recursive: true});
+    // Уборка не должна перебивать причину. На Windows файлы, оставшиеся от
+    // установщика, убитого по нашему таймауту, система держит ещё какое-то
+    // время, и rmSync бросает EBUSY прямо из finally — в CI это заменило
+    // «Could not fetch a pristine test-lib@1.0.0» на «EBUSY: resource busy or
+    // locked», то есть ровно тот невнятный отказ, от которого мы уходим.
+    //
+    // Повторные попытки — встроенные в rmSync и заведённые ровно для этого
+    // случая; не вышло и с ними — молчим: забытый временный каталог дешевле
+    // потерянного объяснения, а имя у него своё на каждый процесс.
+    try {
+      rmSync(tempDir, {force: true, recursive: true, maxRetries: 5, retryDelay: 100});
+    } catch {
+      // Каталог остаётся рядом; сказать о нём нечего сверх того, что уже сказано.
+    }
   }
 }
 

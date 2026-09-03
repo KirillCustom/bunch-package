@@ -2,7 +2,7 @@ import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from '
 import {execSync, spawn, spawnSync} from 'child_process';
 import {createHash} from 'crypto';
 import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
-import {findLinkDifferences, runDiff, scanTree} from './src/create';
+import {findLinkDifferences, runDiff, scanTree, withPristine} from './src/create';
 import {parseOptions} from './src/options';
 import {parseRepository} from './src/upstream';
 import {withApplyLock} from './src/lock';
@@ -214,6 +214,31 @@ rename to node_modules/ms/renamed.js
     expect(result.stdout).toMatch(/bun: .*bunch-package-no-such-thing-4f1c2a.*404/);
     expect(result.stdout).toMatch(/npm: .*bunch-package-no-such-thing-4f1c2a/);
     expect(result.stdout).not.toContain('Command failed');
+  });
+
+  test.skipIf(isWindows)('a failing cleanup does not swallow the reason', () => {
+    // Уборка временного каталога живёт в finally, и её собственный отказ
+    // перебивал причину, с которой всё началось. На Windows это поймал CI:
+    // установщик, убитый нашим таймаутом, ещё держал файлы, и человек вместо
+    // «Could not fetch a pristine …» получал «EBUSY: resource busy or locked».
+    //
+    // Здесь тот же сбой уборки строится правами: каталог, из которого удаляют,
+    // становится нередактируемым. На Windows прав в этом смысле нет, поэтому
+    // там за это отвечает сам сценарий с таймаутом.
+    const previous = process.cwd();
+    process.chdir(TEST_DIR);
+
+    try {
+      expect(() =>
+        withPristine('ms', '2.1.2', () => {
+          chmodSync(TEST_DIR, 0o555); // удалить временный каталог теперь нельзя
+          throw new Error('the reason we came here');
+        }),
+      ).toThrow('the reason we came here');
+    } finally {
+      chmodSync(TEST_DIR, 0o755);
+      process.chdir(previous);
+    }
   });
 
   test('keeps its pristine cache outside the run', () => {
