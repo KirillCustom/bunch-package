@@ -62,6 +62,14 @@ type Verdict = {applied: true} | {applied: false; forward: AppliedFile | {error:
 
 function looksApplied(lines: string[], endsWithNewline: boolean, hunks: Hunk[]): Verdict {
   const backwards = applyHunks(lines, endsWithNewline, hunks, true);
+
+  // Новая сторона села ровно там, где объявлена, — ближе не сядет ничто, и
+  // прямое применение проиграет ей при любом своём исходе. Считать его здесь
+  // значило бы второй раз пройти весь файл ровно в том случае, который
+  // случается чаще прочих: патч на месте, идёт очередной `bun install`.
+  // Измерено на файле 2,2 МБ — 2,5 мс из восьми.
+  if (!('error' in backwards) && backwards.displacement === 0) return {applied: true};
+
   const forward = applyHunks(lines, endsWithNewline, hunks, false);
 
   // Порядок проверок важен: не сошлись обе стороны — значит патч не лежит и не
