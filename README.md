@@ -701,22 +701,27 @@ nothing is refused there. A link that leaves the monorepo still is. See
 ## npm aliases
 
 When you install a package under a different name with `bun add mynum@npm:is-number@7.0.0`,
-the directory in `node_modules` is named by the alias (`mynum`), while the patch
-file is named after the package's own manifest — `is-number+7.0.0.patch`.
-
-Use the directory name — the alias — when creating or running commands:
+the directory in `node_modules` is named by the alias (`mynum`). The patch file is
+named after that directory, not after the package's own manifest:
 
 ```bash
-bunx bunch-package create mynum      # reads node_modules/mynum, writes patches/is-number+7.0.0.patch
-bunx bunch-package rebase mynum 0    # finds patches/is-number+7.0.0.patch via mynum's manifest
+bunx bunch-package create mynum      # reads node_modules/mynum, writes patches/mynum+7.0.0.patch
+bunx bunch-package rebase mynum 0    # takes it back off
 ```
 
-All commands resolve the alias automatically: they look up the manifest in
-`node_modules/<alias>/package.json`, take the `name` field from it, and use that
-to find and name patch files. Only `rebase` additionally accepts the manifest name
-(`is-number`) as its argument — the other commands require the directory name that
-is actually installed. The `rebase` output always shows the directory that exists
-on disk, so the suggested `edit` and `create` commands are ready to run.
+A patch is named after the directory it patches — the same way patch-package names
+it — because the directory is what makes it unique. The same package installed
+twice, once directly and once under an alias, is the point of aliases: two versions
+side by side. Both would share one manifest name, so a name taken from the manifest
+would put two different patches in one file, and whichever was written second would
+silently replace the first.
+
+Patches created before 1.18.0 carry the manifest name (`is-number+7.0.0.patch`).
+They are still read, and the next `create` for that package moves the file onto the
+directory name and says so. A patch that belongs to a neighbouring directory is
+never moved or overwritten. `rebase` also accepts the manifest name as its argument
+and works out which directory you mean — unless two of them answer to it, and then
+it says so instead of guessing.
 
 ## Monorepos
 

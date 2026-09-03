@@ -308,6 +308,21 @@ export function patchesOfPackage(files: string[], packageDir: string): string[] 
   return files.filter(file => parsePatchName(file)?.packageDir === packageDir);
 }
 
+// Под каким именем лежат патчи этого пакета. Начиная с 1.18.0 `create` называет
+// файл по каталогу в node_modules — так же, как это делает patch-package
+// (проверено запуском на `mynum@npm:is-number@7.0.0`: он пишет
+// `mynum+7.0.0.patch`). Прежние версии брали имя из манифеста, и такие файлы
+// продолжают читаться: пишем по-новому, понимаем оба.
+//
+// Порядок важен: каталог спрашивается первым. Пакет, установленный и напрямую,
+// и через алиас, даёт два каталога с одним manifest.name — начни мы с имени из
+// манифеста, набор одного каталога прихватил бы патчи соседнего.
+export function patchNameKey(packageDir: string, manifestName: string, files: string[] = listPatchFiles()): string {
+  if (manifestName === packageDir) return packageDir;
+  if (patchesOfPackage(files, packageDir).length > 0) return packageDir;
+  return patchesOfPackage(files, manifestName).length > 0 ? manifestName : packageDir;
+}
+
 // Все команды перечисляют patches/ одинаково, и все обязаны получить один и тот
 // же порядок: патчи последовательности строятся друг на друге. Отсутствующий
 // каталог — это просто пустой список; что о нём сказать, решает вызывающий.

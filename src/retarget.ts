@@ -1,8 +1,9 @@
 import {cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 import {diffTrees, readManifest, requireDiff, validatePackageName, withPristine} from './create';
-import {formatPatchName, listPatchFiles, parsePatchName, splitPatchHeader, updatePatchHeader} from './patch-file';
+import {formatPatchName, listPatchFiles, parsePatchName, splitPatchHeader, updatePatchHeader, patchNameKey, patchesOfPackage} from './patch-file';
 import {installedPackagePath, patchesDirectory} from './paths';
+import {patchTargetDirectory} from './presence';
 import {replayPatches} from './sequence';
 
 // Пакет обновили — патчи остались от старой версии. `apply` о таком только
@@ -27,9 +28,16 @@ export function retargetPatches(packageName: string): void {
 
   const {name, version} = readManifest(packagePath);
 
-  // Патчи вложенной зависимости названы путём под node_modules — см. create().
-  const patchDir = packageName.includes('/node_modules/') ? packageName : name;
-  const mine = listPatchFiles().filter(file => parsePatchName(file)?.packageDir === patchDir);
+  // Патчи названы по каталогу, в который ложатся; у файлов, созданных до 1.18.0,
+  // в имени стоит manifest.name — понимаем оба (см. patchNameKey).
+  const patchDir = patchNameKey(packageName, name);
+  // Один manifest.name бывает у двух каталогов сразу — пакет ставят и напрямую,
+  // и через алиас, ровно ради двух версий. Набор такого имени надо просеять по
+  // тому, куда патчи на самом деле ложатся, иначе retarget возьмётся за чужой
+  // каталог (TSK-44).
+  const mine = patchesOfPackage(listPatchFiles(), patchDir).filter(
+    file => patchTargetDirectory(file) === packageName || patchTargetDirectory(file) === null,
+  );
 
   if (mine.length === 0) {
     throw new Error(`No patches found for ${name} in ${patchesDirectory()}/`);

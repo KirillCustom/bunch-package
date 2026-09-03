@@ -15,6 +15,7 @@ import {
   patchHeaderField,
   splitPatchHeader,
   updatePatchHeader,
+  patchNameKey,
 } from './patch-file';
 import {installedPackagePath, patchesDirectory, realPathOutsideProject} from './paths';
 import {isInTree} from './presence';
@@ -74,8 +75,9 @@ export function foldPatches(packageName: string): void {
     );
   }
 
-  // Имя патча говорит, куда он ложится: у вложенной зависимости это путь.
-  const patchDir = packageName.includes('/node_modules/') ? packageName : name;
+  // Имя патча говорит, куда он ложится: это каталог в node_modules. Файлы,
+  // созданные до 1.18.0, названы по манифесту — их имя тоже понимаем.
+  const patchDir = patchNameKey(packageName, name);
 
   const sequenced = listPatchFiles().filter(file => {
     const parsed = parsePatchName(file);

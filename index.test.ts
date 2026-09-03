@@ -3512,7 +3512,7 @@ rename to node_modules/${PKG}/moved.js
   describe('with an npm alias (mynum@npm:is-number@7.0.0)', () => {
     const ALIAS = 'mynum';
     const MANIFEST = 'is-number';
-    const PATCH_FILE = `${MANIFEST}+7.0.0.patch`;
+    const PATCH_FILE = `${ALIAS}+7.0.0.patch`;
 
     function setupAlias() {
       execSync('bun add mynum@npm:is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
@@ -3520,7 +3520,7 @@ rename to node_modules/${PKG}/moved.js
       // Модифицируем файл перед create: create снимет diff, патч будет готов.
       overwriteFile(file, `// ALIAS PATCH\n${readFileSync(file, 'utf-8')}`);
       expect(run(`create ${ALIAS}`, TEST_DIR).exitCode).toBe(0);
-      // Патч назван по имени манифеста, а не по алиасу.
+      // Патч назван по каталогу, в который ложится, — так же именует patch-package.
       expect(existsSync(join(TEST_DIR, 'patches', PATCH_FILE))).toBe(true);
       // apply видит файл в состоянии «патч уже в дереве» и записывает его
       // в state: после этого rebase может снять патч.
@@ -3572,11 +3572,173 @@ rename to node_modules/${PKG}/moved.js
       expect(result.stdout).toContain(`create ${ALIAS} --append`);
     });
 
-    test('finds patches named by directory when the manifest name differs', () => {
-      // Патч назван по каталогу, а не по манифесту: так его переименовывают
-      // руками или приносят из проекта с другой раскладкой. Разрешение имени
-      // через манифест такой набор терять не должно — до правки `rebase` брал
-      // patchDir из манифеста (`is-number`) и отвечал «No patches found».
+    // Алиасы заводят затем, чтобы держать две версии одного пакета. Пока файл
+    // патча звался по манифесту, у обоих каталогов было одно имя: `create`
+    // второго молча переписывал патч первого, а `rebase` снимал оба (TSK-44).
+    describe('and the same package installed directly as well', () => {
+      function setupBoth(aliasVersion: string) {
+        execSync(`bun add is-number@7.0.0 mynum@npm:is-number@${aliasVersion}`, {cwd: TEST_DIR, stdio: 'pipe'});
+        for (const [dir, mark] of [[MANIFEST, 'DIRECT'], [ALIAS, 'ALIAS']]) {
+          const file = join(TEST_DIR, 'node_modules', dir, 'index.js');
+          overwriteFile(file, `// ${mark} PATCH\n${readFileSync(file, 'utf-8')}`);
+          expect(run(`create ${dir}`, TEST_DIR).exitCode).toBe(0);
+        }
+      }
+
+      test('keeps one patch per directory, even when the versions match', () => {
+        setupBoth('7.0.0');
+
+        // Оба каталога — is-number@7.0.0, и по манифесту оба патча звались бы
+        // is-number+7.0.0.patch: второй `create` затирал первый молча.
+        expect(readFileSync(join(TEST_DIR, 'patches', `${MANIFEST}+7.0.0.patch`), 'utf-8')).toContain(
+          '+// DIRECT PATCH',
+        );
+        expect(readFileSync(join(TEST_DIR, 'patches', `${ALIAS}+7.0.0.patch`), 'utf-8')).toContain(
+          '+// ALIAS PATCH',
+        );
+      });
+
+      test('rebase takes off only the patches of the directory it was given', () => {
+        setupBoth('6.0.0');
+        expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+        const result = run(`rebase ${MANIFEST} 0`, TEST_DIR);
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain(`${MANIFEST}+7.0.0.patch`);
+        expect(result.stdout).not.toContain(`${ALIAS}+6.0.0.patch`);
+        // Сосед не тронут: его правка на месте.
+        expect(readFileSync(join(TEST_DIR, 'node_modules', MANIFEST, 'index.js'), 'utf-8')).not.toContain(
+          'DIRECT PATCH',
+        );
+        expect(readFileSync(join(TEST_DIR, 'node_modules', ALIAS, 'index.js'), 'utf-8')).toContain(
+          'ALIAS PATCH',
+        );
+      });
+
+      test('the alias keeps its own set when the neighbour has patches too', () => {
+        // Ключ ищется сперва по каталогу и только потом по манифесту. В обратном
+        // порядке набор `mynum` начинался бы с патчей соседа: у того имя файла
+        // совпадает с manifest.name обоих.
+        setupBoth('6.0.0');
+        expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+        const result = run(`rebase ${ALIAS} 0`, TEST_DIR);
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain(`${ALIAS}+6.0.0.patch`);
+        expect(readFileSync(join(TEST_DIR, 'node_modules', ALIAS, 'index.js'), 'utf-8')).not.toContain(
+          'ALIAS PATCH',
+        );
+        // Патч соседа на месте.
+        expect(readFileSync(join(TEST_DIR, 'node_modules', MANIFEST, 'index.js'), 'utf-8')).toContain(
+          'DIRECT PATCH',
+        );
+      });
+
+      test('rebase separates two directories that share an old-style name', () => {
+        // Файлы, созданные до 1.18.0: оба названы по манифесту, и по имени их
+        // не различить. Ровно так и выглядит дефект в чужом проекте, где патчи
+        // уже лежат, — набор надо просеивать по тому, куда патч ложится.
+        setupBoth('6.0.0');
+        renameSync(
+          join(TEST_DIR, 'patches', `${ALIAS}+6.0.0.patch`),
+          join(TEST_DIR, 'patches', `${MANIFEST}+6.0.0.patch`),
+        );
+        expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+        const result = run(`rebase ${MANIFEST} 0`, TEST_DIR);
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain(`${MANIFEST}+7.0.0.patch`);
+        expect(result.stdout).not.toContain(`${MANIFEST}+6.0.0.patch`);
+        expect(readFileSync(join(TEST_DIR, 'node_modules', ALIAS, 'index.js'), 'utf-8')).toContain(
+          'ALIAS PATCH',
+        );
+      });
+
+      test('rebase refuses to guess when the manifest name fits two directories', () => {
+        // Два алиаса одного пакета: каталога `is-number` нет вовсе, а имя из
+        // манифеста подходит обоим. Угадать нельзя — надо сказать об этом.
+        execSync('bun add mynum@npm:is-number@7.0.0 othernum@npm:is-number@6.0.0', {
+          cwd: TEST_DIR,
+          stdio: 'pipe',
+        });
+        for (const dir of [ALIAS, 'othernum']) {
+          const file = join(TEST_DIR, 'node_modules', dir, 'index.js');
+          overwriteFile(file, `// ${dir} PATCH\n${readFileSync(file, 'utf-8')}`);
+          expect(run(`create ${dir}`, TEST_DIR).exitCode).toBe(0);
+        }
+        expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+        const result = run(`rebase ${MANIFEST} 0`, TEST_DIR);
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout).toContain('name the directory you mean');
+        // Ни один каталог не тронут: отказ случился до отката.
+        for (const dir of [ALIAS, 'othernum']) {
+          expect(readFileSync(join(TEST_DIR, 'node_modules', dir, 'index.js'), 'utf-8')).toContain('PATCH');
+        }
+      });
+
+      test('retarget does not read the neighbour as a second version of this package', () => {
+        setupBoth('6.0.0');
+        // Имя, которым сосед назывался бы до 1.18.0: тогда retarget видел два
+        // файла под одним ключом и отвечал «patches carry more than one version»,
+        // предлагая решить, какие правки остаются, — а они оба на своём месте.
+        renameSync(
+          join(TEST_DIR, 'patches', `${ALIAS}+6.0.0.patch`),
+          join(TEST_DIR, 'patches', `${MANIFEST}+6.0.0.patch`),
+        );
+        expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+        const result = run(`retarget ${MANIFEST}`, TEST_DIR);
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('already target 7.0.0');
+        expect(result.stdout).not.toContain('more than one version');
+      });
+
+      test('create moves an old manifest-named patch onto the directory name', () => {
+        execSync('bun add mynum@npm:is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+        const file = join(TEST_DIR, 'node_modules', ALIAS, 'index.js');
+        overwriteFile(file, `// ALIAS PATCH\n${readFileSync(file, 'utf-8')}`);
+        expect(run(`create ${ALIAS}`, TEST_DIR).exitCode).toBe(0);
+        // Имя, которым его назвали бы прежние версии.
+        renameSync(
+          join(TEST_DIR, 'patches', `${ALIAS}+7.0.0.patch`),
+          join(TEST_DIR, 'patches', `${MANIFEST}+7.0.0.patch`),
+        );
+
+        overwriteFile(file, `// SECOND\n${readFileSync(file, 'utf-8')}`);
+        const result = run(`create ${ALIAS}`, TEST_DIR);
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain(`${MANIFEST}+7.0.0.patch → ${ALIAS}+7.0.0.patch`);
+        expect(existsSync(join(TEST_DIR, 'patches', `${MANIFEST}+7.0.0.patch`))).toBe(false);
+        // Переехал ровно один файл, и в нём обе правки — старый патч не потерян.
+        const moved = readFileSync(join(TEST_DIR, 'patches', `${ALIAS}+7.0.0.patch`), 'utf-8');
+        expect(moved).toContain('+// ALIAS PATCH');
+        expect(moved).toContain('+// SECOND');
+      });
+
+      test('create leaves a neighbour patch of the same name alone', () => {
+        setupBoth('7.0.0');
+        // Патч соседнего каталога, названный по манифесту, — переносить его на
+        // наше имя нельзя: он не про нас.
+        const neighbour = readFileSync(join(TEST_DIR, 'patches', `${MANIFEST}+7.0.0.patch`), 'utf-8');
+
+        const file = join(TEST_DIR, 'node_modules', ALIAS, 'index.js');
+        overwriteFile(file, `// SECOND\n${readFileSync(file, 'utf-8')}`);
+        expect(run(`create ${ALIAS}`, TEST_DIR).exitCode).toBe(0);
+
+        expect(readFileSync(join(TEST_DIR, 'patches', `${MANIFEST}+7.0.0.patch`), 'utf-8')).toBe(neighbour);
+      });
+    });
+
+    test('still finds a patch named the old way, by the manifest', () => {
+      // До 1.18.0 файл назывался по манифесту. Такие патчи лежат в чужих
+      // репозиториях и продолжают читаться: пишем по-новому, понимаем оба.
       execSync('bun add mynum@npm:is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
       const file = join(TEST_DIR, 'node_modules', ALIAS, 'index.js');
       overwriteFile(file, `// ALIAS PATCH\n${readFileSync(file, 'utf-8')}`);
@@ -3586,15 +3748,15 @@ rename to node_modules/${PKG}/moved.js
       // переименование после неё упирается в посторонний дефект — `rebase`
       // падает с ENOENT на записи, чей файл исчез (это TSK-45, не про алиасы).
       renameSync(
-        join(TEST_DIR, 'patches', `${MANIFEST}+7.0.0.patch`),
         join(TEST_DIR, 'patches', `${ALIAS}+7.0.0.patch`),
+        join(TEST_DIR, 'patches', `${MANIFEST}+7.0.0.patch`),
       );
       expect(run('apply', TEST_DIR).exitCode).toBe(0);
 
       const result = run(`rebase ${ALIAS} 0`, TEST_DIR);
 
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain(`${ALIAS}+7.0.0.patch`);
+      expect(result.stdout).toContain(`${MANIFEST}+7.0.0.patch`);
       expect(readFileSync(join(TEST_DIR, 'node_modules', ALIAS, 'index.js'), 'utf-8')).not.toContain(
         'ALIAS PATCH',
       );

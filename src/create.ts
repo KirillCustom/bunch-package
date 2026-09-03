@@ -6,8 +6,8 @@ import {join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
 import {PathFilters, pathAllowed} from './options';
 import {ensureDir, installedPackagePath, isExecutable, patchesDirectory, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
-import {isInTree} from './presence';
-import {PatchHeaderFields, listPatchFiles, parsePatchName, patchesOfPackage, splitPatchHeader, updatePatchHeader} from './patch-file';
+import {isInTree, patchTargetDirectory} from './presence';
+import {PatchHeaderFields, formatPatchName, listPatchFiles, parsePatchName, patchesOfPackage, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 import {renameRecordedPatch} from './state';
 
@@ -705,6 +705,34 @@ function writePatch(plan: SequencePlan, patchContent: string, header: PatchHeade
   console.log(`   Hash: ${hash.substring(0, 12)}...`);
 }
 
+// Патчи, созданные до 1.18.0, названы по манифесту. Переезжают они здесь — в
+// ту минуту, когда `create` всё равно пишет в patches/ и знает про пакет всё.
+// Переносится только то, что действительно ложится в этот каталог: файл соседа
+// с тем же именем — не наш, и трогать его нельзя, ровно из-за этого задача и
+// заведена.
+function migratePatchNames(packageDir: string, manifestName: string): void {
+  if (manifestName === packageDir) return;
+
+  for (const file of patchesOfPackage(listPatchFiles(), manifestName)) {
+    if (patchTargetDirectory(file) !== packageDir) continue;
+
+    const parsed = parsePatchName(file);
+    if (parsed === null) continue;
+
+    const renamed = formatPatchName({...parsed, packageDir});
+    if (existsSync(join(patchesDirectory(), renamed))) {
+      console.log(`⚠️  ${file} patches node_modules/${packageDir}, but ${renamed} already exists — leaving both`);
+      continue;
+    }
+
+    renameSync(join(patchesDirectory(), file), join(patchesDirectory(), renamed));
+    // Запись о применённом переезжает следом: иначе она указывает на файл,
+    // которого больше нет, и `status` объявит патч осиротевшим.
+    renameRecordedPatch(file, renamed);
+    console.log(`🔢 ${file} → ${renamed} (a patch is named after the directory it patches)`);
+  }
+}
+
 // Дифф двух деревьев одного пакета, приведённый к тексту патча. Отдельно —
 // потому что этим заняты обе команды: `create` сравнивает эталон с
 // node_modules, а `retarget` — два соседних состояния эталона новой версии.
@@ -813,10 +841,13 @@ export function createPatch(
     );
   }
 
-  // Имя патча говорит, куда он ложится, поэтому для вложенной зависимости в нём
-  // стоит путь, а не имя из манифеста: `foo++bar+1.0.0.patch`. Для обычного
-  // пакета берём имя из манифеста — оно верно и при установке через алиас.
-  const patchDir = packageName.includes('/node_modules/') ? packageName : name;
+  // Имя патча говорит, куда он ложится: это каталог в node_modules, а не имя из
+  // манифеста. При установке через алиас они расходятся, и пока имя бралось из
+  // манифеста, два каталога с общим manifest.name делили один файл — `create`
+  // второго молча переписывал патч первого (TSK-44). Так же именует patch-package:
+  // проверено запуском, он пишет `mynum+7.0.0.patch`.
+  const patchDir = packageName;
+  migratePatchNames(patchDir, name);
 
   // Патчи одного пакета образуют последовательность, где каждый следующий
   // отсчитывается от состояния после предыдущих, а не от чистого пакета.

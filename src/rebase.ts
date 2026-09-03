@@ -2,11 +2,11 @@ import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 import {lockFile, withApplyLock} from './lock';
 import {applyHunks} from './hunks';
-import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch-file';
+import {invertTarget, listPatchFiles, parsePatchName, patchNameKey, patchesOfPackage, PatchTarget} from './patch-file';
 import {firstPathOutsideNodeModules, foreignPatchReason, patchesAppliedByBun} from './foreign';
-import {installedPackagePath, packageDirectoryOf, patchesDirectory, stripPathPrefix} from './paths';
+import {installedPackagePath, patchesDirectory} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
-import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
+import {outsideProjectReason, packagesOutsideProject, patchTargetDirectory, presenceOf, readTargets} from './presence';
 import {recordPatches, recordedPatches} from './state';
 import {readManifest, validatePackageName} from './create';
 
@@ -23,53 +23,62 @@ export function rebasePatches(packageName: string, target: string): void {
     throw new Error(`No ${patchesDirectory()}/ directory — there is nothing to rebase`);
   }
 
-  // Разрешаем имя: аргумент может быть каталогом на диске (алиас) или именем из
-  // манифеста. Тот же приём, что в retarget: смотрим на каталог, читаем manifest.
-  //
-  // patchDir — ключ в имени файла патча (из manifest.name или сам аргумент).
-  // dirName — каталог, который фактически редактируется: берётся из путей патча
-  //           (строки `--- a/node_modules/<каталог>/...`), а не из manifest.name.
+  // Аргумент — это каталог в node_modules; им же назван файл патча. Файлы,
+  // созданные до 1.18.0, названы по manifest.name — их имя тоже понимаем, см.
+  // patchNameKey. Имя из манифеста как аргумент тоже принимается: каталога с
+  // таким именем нет, и тогда ключом становится сам аргумент.
   const packagePath = installedPackagePath(packageName);
-  let patchDir: string;
-  let manifestFailed = false;
+  const installed = existsSync(packagePath);
+  let manifestName: string | null = null;
 
-  if (existsSync(packagePath)) {
-    // Аргумент — каталог на диске (возможно алиас, как `mynum` для `is-number`).
-    let manifestName: string | null = null;
+  if (installed) {
     try {
       manifestName = readManifest(packagePath).name;
     } catch {
-      // Битый манифест — не роняем весь откат. Говорим, какой файл не читается,
-      // и ищем патчи через пути внутри самих патч-файлов (см. ниже).
+      // Битый манифест — не повод не откатывать: патчи от этого из дерева не
+      // исчезают. Говорим, какой файл не читается, и ищем по путям внутри патчей.
       console.log(`⚠️  Cannot read node_modules/${packageName}/package.json — falling back to path-based patch search`);
-      manifestFailed = true;
     }
-    // Вложенная зависимость названа путём — `outer/node_modules/inner`.
-    patchDir = manifestName !== null && !packageName.includes('/node_modules/')
-      ? manifestName
-      : packageName;
-  } else {
-    // Аргумент — имя манифеста: каталога с таким именем нет на диске.
-    patchDir = packageName;
   }
 
   const all = listPatchFiles();
-  let mine = all.filter(file => parsePatchName(file)?.packageDir === patchDir);
+  const patchDir = manifestName === null ? packageName : patchNameKey(packageName, manifestName, all);
+  let mine = patchesOfPackage(all, patchDir);
 
-  // Запасной поиск при пустом результате — два независимых случая:
-  //
-  // 1. Манифест прочитан, patchDir = manifest.name, но патч назван по каталогу
-  //    (переименован руками или пришёл из проекта с другой раскладкой).
-  //    Ищем по имени аргумента — то самое поведение до этой правки.
-  //
-  // 2. Манифест недоступен: patchDir = packageName, но create мог записать в имя
-  //    файла что-то другое. Ищем по путям внутри патч-файлов: create записывает
-  //    туда имя каталога на диске, и это точнее имени файла.
-  if (mine.length === 0) {
-    if (patchDir !== packageName) {
-      mine = all.filter(file => parsePatchName(file)?.packageDir === packageName);
-    } else if (manifestFailed) {
-      mine = all.filter(file => dirNameFromPatch(file) === packageName);
+  // Один manifest.name бывает у двух каталогов сразу: пакет ставят и напрямую, и
+  // через алиас — ровно ради двух версий. Пока набор собирался по одному лишь
+  // имени, `rebase is-number 0` снимал заодно патчи соседнего каталога и
+  // рапортовал про него же (TSK-44). Просеиваем по тому, куда патч ложится, —
+  // это написано в нём самом.
+  if (installed) {
+    mine = mine.filter(file => {
+      const directory = patchTargetDirectory(file);
+      return directory === null || directory === packageName;
+    });
+  }
+
+  // Манифест не прочитан, а патч назван по нему — по имени его теперь не найти,
+  // зато путь внутри патча ведёт прямо в наш каталог.
+  if (mine.length === 0 && installed && manifestName === null) {
+    mine = all.filter(file => patchTargetDirectory(file) === packageName);
+  }
+
+  // Аргументом дали имя из манифеста, а каталог называется иначе: `rebase
+  // is-number 0` при `mynum@npm:is-number`. Ищем среди каталогов, у которых
+  // патчи есть, — их единицы, и ответ однозначен, в отличие от обхода всего
+  // node_modules: один manifest.name бывает у двух каталогов сразу.
+  if (mine.length === 0 && !installed) {
+    const directories = [...new Set(all.map(patchTargetDirectory))].filter(
+      (directory): directory is string => directory !== null && manifestNameOf(directory) === packageName,
+    );
+
+    if (directories.length > 1) {
+      throw new Error(
+        `${packageName} is installed as ${directories.join(' and ')} — name the directory you mean.`,
+      );
+    }
+    if (directories.length === 1) {
+      mine = all.filter(file => patchTargetDirectory(file) === directories[0]);
     }
   }
 
@@ -80,11 +89,8 @@ export function rebasePatches(packageName: string, target: string): void {
   const keep = resolveTarget(mine, target, packageName);
   const undo = mine.slice(keep).reverse(); // снимаем сверху вниз
 
-  // dirName берётся из путей первого патча — то, что create записал туда при создании.
-  // При алиасной установке это имя каталога (`mynum`), а не имя манифеста (`is-number`).
-  // Это точнее, чем искать по manifest.name: при двух установках одного пакета
-  // сканирование давало неверный каталог.
-  const dirName = dirNameFromPatch(mine[0]) ?? packageName;
+  // Каталог для подсказок — тот, куда патч ложится, а не тот, как его назвали.
+  const dirName = patchTargetDirectory(mine[0]) ?? packageName;
 
   console.log(`🔧 Rebasing ${dirName} onto ${keep === 0 ? 'nothing' : mine[keep - 1]}...`);
 
@@ -124,25 +130,18 @@ export function rebasePatches(packageName: string, target: string): void {
   for (const [command, purpose] of next) console.log(`  ${command.padEnd(width)}${purpose}`);
 }
 
-// Каталог пакета из первого файла патча — то место, куда патч фактически кладётся.
-// Точнее, чем искать по manifest.name: при двух установках одного пакета
-// (is-number@7.0.0 + mynum@npm:is-number@7.0.0) поиск по имени давал первый
-// попавшийся каталог, а путь в патче записан явно.
-function dirNameFromPatch(patchFile: string): string | null {
-  const targets = readTargets(patchFile);
-  if ('error' in targets) return null;
+// Имя пакета в манифесте установленного каталога. Битый или отсутствующий
+// манифест — это не ответ «совпало», поэтому null, а не бросок: спрашивают в
+// поиске, где отказ одного каталога не должен решать за все.
+function manifestNameOf(directory: string): string | null {
+  const path = installedPackagePath(directory);
+  if (!existsSync(path)) return null;
 
-  for (const t of targets) {
-    const path = t.newPath ?? t.oldPath;
-    if (path === null) continue;
-    const dir = packageDirectoryOf(stripPathPrefix(path));
-    if (dir === null) continue;
-    // packageDirectoryOf возвращает 'node_modules/mynum' — нам нужен 'mynum'.
-    const PREFIX = 'node_modules/';
-    if (dir.startsWith(PREFIX)) return dir.slice(PREFIX.length);
+  try {
+    return readManifest(path).name;
+  } catch {
+    return null;
   }
-
-  return null;
 }
 
 // Снять всё — отдельная команда, а не rebase с особым аргументом: rebase просит
