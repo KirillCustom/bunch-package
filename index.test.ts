@@ -1195,6 +1195,74 @@ index 1111111111111111111111111111111111111111..22222222222222222222222222222222
     writeFileSync(join(TEST_DIR, 'patches', '@scope%2Fpkg@1.0.0.patch'), BUN_PATCH);
   }
 
+  // В монорепо bun берёт patchedDependencies и у корня, и у воркспейса, а путь к
+  // файлу разрешает всегда от корня (NOT-25). Пока import читал один лишь cwd,
+  // он отвечал «Nothing to import» в двух сочетаниях из трёх — то есть молчал
+  // ровно там, где чужой патч и остаётся в дереве.
+  describe('in a monorepo', () => {
+    const PATCH = `--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-const a = 1;\n+const a = 2;\n`;
+    const workspace = () => join(TEST_DIR, 'packages', 'a');
+
+    function monorepo(keyAt: 'root' | 'workspace', fileAt: 'root' | 'workspace') {
+      const entry = {patchedDependencies: {'ms@2.1.2': 'patches/ms@2.1.2.patch'}};
+      mkdirSync(join(workspace(), 'patches'), {recursive: true});
+      mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+      setupFakePackage(TEST_DIR, 'ms', '2.1.2', {'index.js': 'const a = 1;\n'});
+
+      writeFileSync(join(TEST_DIR, 'package.json'), JSON.stringify({
+        name: 'mono', private: true, workspaces: ['packages/*'], ...(keyAt === 'root' ? entry : {}),
+      }));
+      writeFileSync(join(workspace(), 'package.json'), JSON.stringify({
+        name: '@mono/a', version: '1.0.0', ...(keyAt === 'workspace' ? entry : {}),
+      }));
+
+      const dir = fileAt === 'root' ? join(TEST_DIR, 'patches') : join(workspace(), 'patches');
+      writeFileSync(join(dir, 'ms@2.1.2.patch'), PATCH);
+    }
+
+    test('takes the patch declared here, even when its file sits at the root', () => {
+      // Путь в манифесте bun разрешает от корня, поэтому файл лежит там, а ключ
+      // здесь. Раньше файл не находился и патч пропускался молча.
+      monorepo('workspace', 'root');
+
+      const result = run('import', workspace());
+
+      expect(result.exitCode).toBe(0);
+      expect(readdirSync(join(workspace(), 'patches'))).toEqual(['ms+2.1.2.patch']);
+      expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual([]); // старый файл убран
+      expect(JSON.parse(readFileSync(join(workspace(), 'package.json'), 'utf-8')).patchedDependencies)
+        .toBeUndefined();
+    });
+
+    test('names the ones declared at the root instead of taking them', () => {
+      // Корневой патч применяется всему дереву. Забрать его отсюда в свой
+      // patches/ значило бы молча отобрать его у соседних воркспейсов.
+      monorepo('root', 'root');
+
+      const result = run('import', workspace());
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('declared in the monorepo root manifest');
+      expect(result.stdout).toContain('ms@2.1.2.patch');
+      expect(result.stdout).toContain('bunch-package import');
+      // И ничего не тронуто: ни файл, ни манифест.
+      expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['ms@2.1.2.patch']);
+      expect(JSON.parse(readFileSync(join(TEST_DIR, 'package.json'), 'utf-8')).patchedDependencies)
+        .toEqual({'ms@2.1.2': 'patches/ms@2.1.2.patch'});
+    });
+
+    test('imports a root patch when run at the root', () => {
+      monorepo('root', 'root');
+
+      const result = run('import', TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      expect(readdirSync(join(TEST_DIR, 'patches'))).toEqual(['ms+2.1.2.patch']);
+      expect(JSON.parse(readFileSync(join(TEST_DIR, 'package.json'), 'utf-8')).patchedDependencies)
+        .toBeUndefined();
+    });
+  });
+
   test('converts a bun patch, name and paths, and hands it to apply', () => {
     setupBunPatch();
 
