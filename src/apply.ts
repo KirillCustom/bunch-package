@@ -1,4 +1,5 @@
 import {existsSync, readFileSync} from 'fs';
+import {join} from 'path';
 import {inProduction, missingPackages, skipsMissingPackage} from './dev';
 import {firstPathOutsideNodeModules, foreignPatchReason, patchesAppliedByBun} from './foreign';
 import {lockFile, withApplyLock} from './lock';
@@ -8,7 +9,7 @@ import {executeOps} from './plan';
 import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
 import {appliedSequences} from './sequence';
 import {conflictingWorkspacePatch, sharedConflictReason} from './shared';
-import {recordPatches} from './state';
+import {RecordedPatch, patchBodyChanged, recordPatches, recordedPatches, unchangedTreeWitness} from './state';
 
 export function applyPatches(errorOnWarn = false): void {
   console.log(`🔧 Applying patches...`);
@@ -37,6 +38,19 @@ export function applyPatches(errorOnWarn = false): void {
   }
 }
 
+// Каталоги пакетов, которых касается патч. Спрашивают двое: сверка версии — у
+// всех сразу, отказ по устаревшей записи — у первого, чтобы назвать в совете
+// то, что переустанавливать.
+function packageDirsOf(targets: PatchTarget[]): string[] {
+  return [
+    ...new Set(
+      targets
+        .map(t => packageDirectoryOf(stripPathPrefix(t.newPath ?? t.oldPath ?? '')))
+        .filter((dir): dir is string => dir !== null),
+    ),
+  ];
+}
+
 // Версию сверяем по пакету из заголовков, а не по имени файла патча: при
 // установке через алиас каталог называется иначе, чем пакет, и разбор имени
 // файла уводил проверку к несуществующему манифесту — она молча пропадала.
@@ -46,13 +60,7 @@ function warnVersionMismatch(patchFile: string, targets: PatchTarget[]): number 
 
   let warnings = 0;
 
-  const packageDirs = new Set(
-    targets
-      .map(t => packageDirectoryOf(stripPathPrefix(t.newPath ?? t.oldPath ?? '')))
-      .filter((dir): dir is string => dir !== null),
-  );
-
-  for (const dir of packageDirs) {
+  for (const dir of packageDirsOf(targets)) {
     // Манифест читается там, где пакет установлен: в монорепо это может быть
     // node_modules корня, а не воркспейса.
     const pkgJsonPath = resolvePackagePath(`${dir}/package.json`);
@@ -85,6 +93,61 @@ function absolutePathIn(targets: PatchTarget[]): string | undefined {
     .find((path): path is string => path !== null && path.startsWith('/'));
 }
 
+// Файл патча переписали после того, как он лёг: так выглядит переключение ветки
+// с другой версией того же патча. Прежняя правка при этом осталась в дереве, и
+// новый патч лёг бы поверх неё — в файле оказались бы обе. У patch-package на
+// этом жалобы #487 и #557, и там это кончается отказом; у нас до сих пор
+// проходило молча, с `✅` и `1 applied` (NOT-30).
+//
+// `witness` — файл, который прежний патч оставил и которого с тех пор не
+// касались. Пока он такой, какой записан, прежняя правка доказуемо в дереве, и
+// это уже утверждение о дереве, а не о записи ([[DEC-11]]). Его нет — значит
+// дерево трогали или пакет переустановили: тогда говорим вслух, но не отказываем,
+// потому что отказ здесь встал бы поперёк обычной работы.
+type StaleRecord = {appliedAt: string; witness: string | null};
+
+function staleRecord(record: RecordedPatch | undefined, patchFile: string): StaleRecord | null {
+  if (record === undefined) return null;
+
+  let raw: Buffer;
+  try {
+    raw = readFileSync(join(patchesDirectory(), patchFile));
+  } catch {
+    return null; // файл только что читал разбор; если он исчез, скажет об этом он
+  }
+
+  if (!patchBodyChanged(record, raw, raw.toString('utf-8'))) return null;
+
+  return {appliedAt: record.appliedAt, witness: unchangedTreeWitness(record)};
+}
+
+// Что человек об этом прочтёт. Совет один — переустановить пакет: `reverse` снял
+// бы патч, который лежит в patches/ сейчас, а в дереве другой, и стало бы хуже.
+//
+// `mixes` отличает отказ «класть поверх прежнего не будем» от объяснения, зачем
+// это сказано при патче, который и так не лёг: во втором случае ничего не
+// смешалось бы, и обещать это было бы неправдой.
+function staleNote(stale: StaleRecord, packageDirs: string[], mixes: boolean): string {
+  const changed = `the patch file changed since it was applied on ${stale.appliedAt}`;
+
+  if (stale.witness === null) {
+    return `${changed} —\n     the previous version's changes may still be in node_modules`;
+  }
+
+  const dir = packageDirs[0];
+  const reinstall =
+    dir === undefined
+      ? 'Reinstall the package before applying this patch.'
+      : `Reinstall it first: delete ${dir}, then run \`bun install\``;
+
+  return (
+    `${changed}, and\n` +
+    `     ${stale.witness} is still the file that version left in the tree.\n` +
+    (mixes ? `     Applying this one on top of it would mix the two versions.\n` : '') +
+    `     ${reinstall}`
+  );
+}
+
 function applyAll(patchFiles: string[]): {failed: number; warned: number} {
   let failed = 0;
   let warned = 0;
@@ -92,8 +155,14 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
   // Патчи, оказавшиеся в дереве по итогам прогона: и легшие сейчас, и уже
   // лежавшие. Из них собирается запись о состоянии.
   const inTree: string[] = [];
+  // Патчи, чью запись отказ обязан пережить: в дереве лежит прежняя их версия,
+  // и забыть об этом значит применить их поверх при следующем же `bun install`.
+  const keepRecord: string[] = [];
   const byBun = patchesAppliedByBun();
   const wholeSequenceApplied = appliedSequences(patchFiles);
+  // Запись читается один раз на прогон: спрашивают её на каждый патч, а лежит
+  // она одна на проект.
+  const recorded = recordedPatches();
 
   for (const patchFile of patchFiles) {
     const fail = (reason: string) => {
@@ -178,16 +247,37 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
     // Весь патч считается в памяти, и пока не сойдётся целиком, на диск не идёт
     // ничего. Это и есть ответ на «применилось наполовину, а в отчёте ноль».
     const presence = presenceOf(targets);
+    const stale = staleRecord(recorded.get(patchFile), patchFile);
 
     if (presence.kind === 'does-not-fit') {
-      fail(presence.reason);
+      // Тот самый случай, ради которого жалобы и заведены: хунк не сходится не
+      // потому, что патч плох, а потому, что в дереве лежит прежняя его версия.
+      if (stale !== null) keepRecord.push(patchFile);
+      fail(stale === null ? presence.reason : `${presence.reason}\n     ${staleNote(stale, packageDirsOf(targets), false)}`);
       continue;
     }
 
+    // Патч уже в дереве — про запись молчим. Дерево здесь совпадает и с новым
+    // файлом патча, и с тем, что оставил `create`: он переписывает патч, не
+    // трогая node_modules, и предупреждать после каждой правки своего же патча
+    // значило бы приучить не читать предупреждения.
     if (presence.kind === 'in-tree') {
       inTree.push(patchFile);
       console.log(`  ✅ ${patchFile} (already applied)`);
       continue;
+    }
+
+    if (stale !== null) {
+      const note = staleNote(stale, packageDirsOf(targets), true);
+
+      if (stale.witness !== null) {
+        keepRecord.push(patchFile);
+        fail(note);
+        continue;
+      }
+
+      warned++;
+      console.log(`  ⚠️  ${patchFile} — ${note}`);
     }
 
     try {
@@ -201,7 +291,7 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
     console.log(`  ✅ ${patchFile}`);
   }
 
-  recordPatches(inTree);
+  recordPatches(inTree, keepRecord);
 
   console.log(`\n📊 Summary: ${inTree.length} applied, ${failed} failed`);
 

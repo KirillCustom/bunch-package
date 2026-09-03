@@ -1,8 +1,8 @@
 import {createHash} from 'crypto';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
-import {parsePatchName, splitPatchHeader} from './patch-file';
-import {patchesDirectory, atomicWrite, ensureDir} from './paths';
+import {PatchTarget, parsePatch, parsePatchName, splitPatchHeader} from './patch-file';
+import {patchesDirectory, atomicWrite, ensureDir, resolvePackagePath, stripPathPrefix} from './paths';
 
 // Запись о том, что и когда легло в дерево. Нужна затем, чтобы на вопрос «что
 // сейчас в node_modules» был ответ, не требующий разбирать патчи глазами.
@@ -26,6 +26,18 @@ export interface RecordedPatch {
   // записи, сделанные до появления заголовков, читаются как прежде.
   bodySha256?: string;
   appliedAt: string; // ISO-8601
+  // Файлы дерева, которых патч касался, — такими, какими их видел последний
+  // успешный `apply`: правку, сделанную в node_modules мимо патчей, он тоже
+  // запомнит, и это верно, потому что вопрос к записи один — «менялось ли
+  // дерево с тех пор, как этот патч в нём лежал». Нужны
+  // ровно затем, чтобы «файл патча с тех пор переписали» можно было превратить
+  // в утверждение о дереве: если ни один из них не изменился, прежняя правка
+  // всё ещё в node_modules. Без этого запись говорит только про сам патч, а
+  // отказывать по ней было бы отказом на пустом месте у того, кто просто
+  // переустановил пакет. Ключ — путь как он стоит в патче, `node_modules/<…>`;
+  // значение — sha256 файла или null, когда файла нет (патч его удаляет).
+  // Поля может не быть: записи, сделанные прежними версиями, читаются как были.
+  files?: Record<string, string | null>;
 }
 
 export interface State {
@@ -46,6 +58,75 @@ export function hashPatchFile(raw: Buffer): string {
 
 export function hashPatchBody(content: string): string {
   return createHash('sha256').update(splitPatchHeader(content).body).digest('hex');
+}
+
+// Файла нет — это тоже состояние, и оно значимо: патч на удаление именно им и
+// узнаётся. Отличать «нет» от «не прочли» здесь не нужно: непрочитанный файл
+// уронит сбор целиком, и тогда доказывать будет нечем — см. filesLeftBy().
+function hashTreeFile(path: string): string | null {
+  return existsSync(path) ? createHash('sha256').update(readFileSync(path)).digest('hex') : null;
+}
+
+// Путь, по которому файл оказывается после применения секции: новая сторона
+// заголовка, а у удаления от неё остаётся только старая. Переименование
+// отдельно не разбирается — git пишет новый путь уже в `diff --git a/… b/…`,
+// и `rename to` его лишь повторяет: снятая ветка для него не изменила ни одной
+// записи, то есть была вторым замком на той же двери.
+function pathAfterApply(target: PatchTarget): string | null {
+  const raw = target.newPath ?? target.oldPath;
+  return raw === null ? null : stripPathPrefix(raw);
+}
+
+// Снимок дерева на момент, когда патч в нём лежал. Собирается по самому патчу:
+// какие файлы он назвал, такие и хешируются. Не собралось — записи о файлах не
+// будет вовсе, и проверка «дерево не трогали» честно ответит «не знаю».
+function filesLeftBy(content: string): Record<string, string | null> | undefined {
+  try {
+    const targets = parsePatch(content);
+    if (targets.length === 0) return undefined;
+
+    const files: Record<string, string | null> = {};
+    for (const target of targets) {
+      const relative = pathAfterApply(target);
+      if (relative === null) return undefined;
+      files[relative] = hashTreeFile(resolvePackagePath(relative));
+    }
+    return files;
+  } catch {
+    return undefined;
+  }
+}
+
+// Файл патча описывает уже не ту правку, что легла в дерево. Заголовок не в
+// счёт: он объясняет, зачем патч существует, и дерева не касается.
+export function patchBodyChanged(record: RecordedPatch, raw: Buffer, content: string): boolean {
+  return !sameChange(record, hashPatchFile(raw), hashPatchBody(content));
+}
+
+// Дерево ровно такое, каким его оставил записанный патч: ни один из файлов, к
+// которым он прикасался, с тех пор не изменился. Возвращается один из них — тот,
+// на который можно показать пальцем в отказе.
+//
+// Это и есть доказательство, что прежняя правка на месте. Сама запись им не
+// является ([[DEC-11]]): она говорит, что было, а спрашивают про дерево — вот
+// дерево и спрашиваем. Ни одного файла в записи нет (её писала прежняя версия) —
+// значит доказательства нет, и молчать об этом нельзя так же, как и отказывать.
+export function unchangedTreeWitness(record: RecordedPatch): string | null {
+  const entries = Object.entries(record.files ?? {});
+  if (entries.length === 0) return null;
+
+  try {
+    if (entries.some(([relative, sha]) => hashTreeFile(resolvePackagePath(relative)) !== sha)) return null;
+  } catch {
+    return null; // путь наружу проекта — про это скажет проверка, у которой диагноз точнее
+  }
+
+  // Показывать надо на файл, который есть. Патч, удаляющий файл, оставляет в
+  // записи null, и «этот файл всё ещё такой» про отсутствующий файл человеку
+  // нечем проверить; а патч, который только удаляет, и не дошёл бы сюда —
+  // удалённое считается лежащим в дереве при любой версии такого патча.
+  const present = entries.find(([, sha]) => sha !== null);
+  return present === undefined ? null : present[0];
 }
 
 // Запись — это только запись. Считать по ней, что патч на месте, нельзя:
@@ -76,15 +157,22 @@ export function recordedPatches(state: State | null = readState()): Map<string, 
 // Пишут запись двое: apply, когда патчи легли, и rebase, когда часть их снял.
 // Время первого попадания в дерево сохраняется, пока файл патча не изменился, —
 // иначе `appliedAt` означал бы «когда последний раз запускали».
-export function recordPatches(inTree: string[]): void {
+//
+// `keepAsRecorded` — патчи, чью прежнюю запись надо оставить дословно. Так
+// сохраняется улика: apply отказался класть патч, потому что в дереве прежняя
+// его версия, — и если бы запись при этом стёрлась вместе с ним, следующий
+// `apply` уже ничего не знал бы и положил патч поверх. Отказ работал бы ровно
+// один раз, а `bun install` зовут не по одному разу.
+export function recordPatches(inTree: string[], keepAsRecorded: string[] = []): void {
   const previous = recordedPatches();
   const now = new Date().toISOString();
 
   const patches: RecordedPatch[] = inTree.map(file => {
     const parsed = parsePatchName(file);
     const raw = readFileSync(join(patchesDirectory(), file));
+    const content = raw.toString('utf-8');
     const sha256 = hashPatchFile(raw);
-    const bodySha256 = hashPatchBody(raw.toString('utf-8'));
+    const bodySha256 = hashPatchBody(content);
     const before = previous.get(file);
 
     return {
@@ -93,11 +181,20 @@ export function recordPatches(inTree: string[]): void {
       version: parsed?.version ?? '',
       sha256,
       bodySha256,
+      files: filesLeftBy(content),
       // Время первого попадания в дерево переживает правку заголовка: дерево от
       // неё не изменилось, значит и «применён тогда-то» остаётся верным.
       appliedAt: before !== undefined && sameChange(before, sha256, bodySha256) ? before.appliedAt : now,
     };
   });
+
+  // Пересчитывать их нельзя: файл патча уже другой, и пересчёт записал бы его
+  // хеш вместе с хешами файлов, которых этот патч в дерево не клал, — то есть
+  // стёр бы ровно то, чем отказ и доказывается.
+  for (const file of keepAsRecorded) {
+    const before = previous.get(file);
+    if (before !== undefined && !inTree.includes(file)) patches.push(before);
+  }
 
   try {
     writeState(patches);
