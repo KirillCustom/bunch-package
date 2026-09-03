@@ -9,8 +9,43 @@ import {Hunk, sideLines} from './patch-file';
 // патч перестаёт прикладываться, хотя ничего значимого не изменилось. На корпусе
 // из 269 реальных патчей это была причина девяти отказов из семнадцати.
 // patch-package сравнивает строки так же — и всегда, а не как запасной вариант.
+//
+// Резать строки регуляркой на каждое сравнение нельзя: сравнений здесь столько,
+// сколько в файле строк, помноженное на длину хунка, — расходящийся поиск
+// спрашивает про каждую позицию. Считаем обрезку по индексам, не создавая ни
+// одной новой строки. Набор пробельных кодов — ровно тот, что срезал `\s+$`;
+// расхождение здесь означало бы, что патч с неразрывным пробелом в конце строки
+// ложится не так, как ложился раньше.
+function isTrailingSpace(code: number): boolean {
+  return (
+    code === 0x20 ||
+    (code >= 0x09 && code <= 0x0d) ||
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000 ||
+    code === 0xfeff
+  );
+}
+
 function linesEqual(a: string, b: string): boolean {
-  return a === b || a.replace(/\s+$/, '') === b.replace(/\s+$/, '');
+  if (a === b) return true;
+
+  let aEnd = a.length;
+  while (aEnd > 0 && isTrailingSpace(a.charCodeAt(aEnd - 1))) aEnd--;
+  let bEnd = b.length;
+  while (bEnd > 0 && isTrailingSpace(b.charCodeAt(bEnd - 1))) bEnd--;
+
+  if (aEnd !== bEnd) return false;
+  // Срезать было нечего ни у той, ни у другой — а как есть они уже сравнены.
+  if (aEnd === a.length && bEnd === b.length) return false;
+
+  for (let at = 0; at < aEnd; at++) if (a.charCodeAt(at) !== b.charCodeAt(at)) return false;
+  return true;
 }
 
 function locateHunk(lines: string[], needle: string[], preferred: number, search = true): number {
@@ -112,6 +147,13 @@ function buildReplacement(
   return out;
 }
 
+// Сколько строк можно отдать splice разом. Предел зависит от рантайма, а
+// `engines` обещает bun с 1.0: на 1.0.36 splice принимает 60 000 аргументов и
+// падает RangeError на 65 535, на 1.4.0 переживает полмиллиона. Порог взят с
+// восьмикратным запасом от измеренной границы — хунков такого размера в патчах
+// и так не бывает, а падение здесь означало бы, что патч не ложится вовсе.
+const SPLICE_LIMIT = 8192;
+
 export function applyHunks(
   original: string[],
   endsWithNewline: boolean,
@@ -155,7 +197,22 @@ export function applyHunks(
 
     const reachedEnd = at + from.length === lines.length;
     const replacement = buildReplacement(hunk, lines, at, reverse, matchFileEndings);
-    lines = [...lines.slice(0, at), ...replacement, ...lines.slice(at + from.length)];
+
+    if (replacement.length > SPLICE_LIMIT) {
+      // Хунк, вставляющий десятки тысяч строк, упёрся бы в предел числа
+      // аргументов вызова. Такому достаётся пересборка — она этого предела не
+      // знает, а встречается такой хунк реже, чем стоит его беречь.
+      lines = [...lines.slice(0, at), ...replacement, ...lines.slice(at + from.length)];
+    } else {
+      // Массив строк принадлежит вызывающему: looksApplied зовёт нас дважды на
+      // одних и тех же строках. Поэтому первый хунк снимает копию, а дальше
+      // правится она. Раньше копия пересобиралась на каждый хунк — файл
+      // переписывался столько раз, сколько в нём хунков; на 120k строк это
+      // 40 мс при шестидесяти хунках против 0,5 мс сейчас.
+      if (lines === original) lines = original.slice();
+      lines.splice(at, from.length, ...replacement);
+    }
+
     offset += replacement.length - from.length;
 
     if (reachedEnd) {
