@@ -3093,6 +3093,120 @@ rename to node_modules/${PKG}/renamed.js
   });
 });
 
+// Пакет обновили, `create` назвал новый патч новой версией, а файл прежней
+// остался рядом — жалоба patch-package #480. Оба применяются, и в дереве
+// оказываются правки двух версий сразу (NOT-30, TSK-41).
+describe('patches for two versions of one package', () => {
+  const PKG = 'ver-lib';
+
+  function patchAdding(version: string, line: string): string {
+    writeFileSync(
+      join(TEST_DIR, 'patches', `${PKG}+${version}.patch`),
+      `--- a/node_modules/${PKG}/index.js
++++ b/node_modules/${PKG}/index.js
+@@ -1,2 +1,3 @@
+ const a = 1;
+ const b = 2;
++// ${line}
+`,
+    );
+    return `${PKG}+${version}.patch`;
+  }
+
+  function setupTwoVersions(installed = '2.1.3') {
+    setupFakePackage(TEST_DIR, PKG, installed, {'index.js': 'const a = 1;\nconst b = 2;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    patchAdding('2.1.2', 'FIX A');
+    patchAdding('2.1.3', 'FIX B');
+  }
+
+  test('names the patch written for the installed version, instead of warning into the air', () => {
+    setupTwoVersions();
+
+    const result = run('apply', TEST_DIR);
+
+    // Прежде здесь стояло `version mismatch (patch: 2.1.2, installed: 2.1.3)` —
+    // правда, из которой не следует, что делать: набор-то несогласован, а не
+    // версия одного файла.
+    expect(result.stdout).toContain(`${PKG}+2.1.2.patch — written for ${PKG} 2.1.2, but 2.1.3 is installed`);
+    expect(result.stdout).toContain(`and ${PKG}+2.1.3.patch is written for it`);
+    expect(result.stdout).toContain(`move its changes into ${PKG}+2.1.3.patch`);
+    // Применение не изменилось: дерево остаётся тем же, что у patch-package.
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('2 applied, 0 failed');
+  });
+
+  test('keeps the plain mismatch when no patch targets the installed version', () => {
+    // Одинокий патч соседней версии — обычное дело: он часто ложится и говорить
+    // про набор тут не о чем. Этот случай остаётся ровно таким, каким был.
+    setupFakePackage(TEST_DIR, PKG, '2.1.9', {'index.js': 'const a = 1;\nconst b = 2;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    patchAdding('2.1.2', 'FIX A');
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.stdout).toContain('version mismatch (patch: 2.1.2, installed: 2.1.9)');
+    expect(result.stdout).not.toContain('is written for it');
+  });
+
+  test('retarget names the files in the way, instead of saying sort it out', () => {
+    setupTwoVersions();
+
+    const result = run(`retarget ${PKG}`, TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    // Отказ остаётся отказом — перенос дал бы двум файлам одно имя, — но теперь
+    // он называет причину и файл, а `apply` посылает сюда за выходом.
+    expect(result.stdout).toContain('would give two files the same name');
+    expect(result.stdout).toContain(`patches/${PKG}+2.1.2.patch`);
+    expect(result.stdout).not.toContain('Sort that out first');
+  });
+
+  test('create says the old file is still there, and whether the new patch carries its changes', () => {
+    execSync('bun add ms@2.1.3', {cwd: TEST_DIR, stdio: 'pipe'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    const indexPath = join(TEST_DIR, 'node_modules', 'ms', 'index.js');
+    const original = readFileSync(indexPath, 'utf-8');
+    // Патч прежней версии, который в дереве не лежит.
+    writeFileSync(
+      join(TEST_DIR, 'patches', 'ms+2.1.2.patch'),
+      `--- a/node_modules/ms/index.js
++++ b/node_modules/ms/index.js
+@@ -1,2 +1,3 @@
+${original
+  .split('\n')
+  .slice(0, 2)
+  .map(line => ` ${line}`)
+  .join('\n')}
++// FIX A
+`,
+    );
+
+    overwriteFile(indexPath, original + '\n// FIX B\n');
+    const apart = run('create ms', TEST_DIR);
+
+    expect(apart.exitCode).toBe(0);
+    expect(apart.stdout).toContain('ms also has 1 patch(es) written for another version');
+    expect(apart.stdout).toContain('patches/ms+2.1.2.patch — not in node_modules');
+
+    // А теперь тот же вопрос, когда прежний патч в дереве лежит: create строит
+    // дифф всего пакета, поэтому его правка уже внутри нового файла — и это
+    // сказано как факт, а не как догадка.
+    rmSync(join(TEST_DIR, 'patches', 'ms+2.1.3.patch'), {force: true});
+    overwriteFile(indexPath, original);
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '// FIX B\n');
+
+    const together = run('create ms', TEST_DIR);
+
+    expect(together.stdout).toContain('patches/ms+2.1.2.patch — its changes were in node_modules');
+    expect(together.stdout).toContain('safe to delete');
+    const written = readFileSync(join(TEST_DIR, 'patches', 'ms+2.1.3.patch'), 'utf-8');
+    expect(written).toContain('+// FIX A');
+    expect(written).toContain('+// FIX B');
+  });
+});
+
 // Патчи одного пакета — как коммиты: чтобы переделать не последний, надо снять
 // те, что легли поверх. Откат — это применение перевёрнутого патча тем же
 // кодом, что и обычное применение.
