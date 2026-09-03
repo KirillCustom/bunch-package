@@ -41,7 +41,7 @@ export function rebasePatches(packageName: string, target: string): void {
     } catch {
       // Битый манифест — не роняем весь откат. Говорим, какой файл не читается,
       // и ищем патчи через пути внутри самих патч-файлов (см. ниже).
-      console.log(`⚠️  Cannot read ${join(packagePath, 'package.json')} — falling back to path-based patch search`);
+      console.log(`⚠️  Cannot read node_modules/${packageName}/package.json — falling back to path-based patch search`);
       manifestFailed = true;
     }
     // Вложенная зависимость названа путём — `outer/node_modules/inner`.
@@ -56,11 +56,21 @@ export function rebasePatches(packageName: string, target: string): void {
   const all = listPatchFiles();
   let mine = all.filter(file => parsePatchName(file)?.packageDir === patchDir);
 
-  // Когда манифест недоступен и прямой поиск ничего не нашёл, пробуем по путям
-  // внутри самих патчей. create записывает туда имя каталога на диске (`mynum`),
-  // поэтому патч найдётся даже когда manifest.name прочитать не удалось.
-  if (mine.length === 0 && manifestFailed) {
-    mine = all.filter(file => dirNameFromPatch(file) === packageName);
+  // Запасной поиск при пустом результате — два независимых случая:
+  //
+  // 1. Манифест прочитан, patchDir = manifest.name, но патч назван по каталогу
+  //    (переименован руками или пришёл из проекта с другой раскладкой).
+  //    Ищем по имени аргумента — то самое поведение до этой правки.
+  //
+  // 2. Манифест недоступен: patchDir = packageName, но create мог записать в имя
+  //    файла что-то другое. Ищем по путям внутри патч-файлов: create записывает
+  //    туда имя каталога на диске, и это точнее имени файла.
+  if (mine.length === 0) {
+    if (patchDir !== packageName) {
+      mine = all.filter(file => parsePatchName(file)?.packageDir === packageName);
+    } else if (manifestFailed) {
+      mine = all.filter(file => dirNameFromPatch(file) === packageName);
+    }
   }
 
   if (mine.length === 0) {

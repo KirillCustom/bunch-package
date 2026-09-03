@@ -711,12 +711,12 @@ bunx bunch-package create mynum      # reads node_modules/mynum, writes patches/
 bunx bunch-package rebase mynum 0    # finds patches/is-number+7.0.0.patch via mynum's manifest
 ```
 
-All commands that accept a package name resolve the alias automatically: they look
-up the manifest in `node_modules/<alias>/package.json`, take the `name` field from
-it, and use that to find and name patch files. The reverse also works — you can
-pass the manifest name (`is-number`) to any command, and it will find the patches
-regardless. The `rebase` output always shows the directory that actually exists on
-disk, so the suggested `edit` and `create` commands are ready to run.
+All commands resolve the alias automatically: they look up the manifest in
+`node_modules/<alias>/package.json`, take the `name` field from it, and use that
+to find and name patch files. Only `rebase` additionally accepts the manifest name
+(`is-number`) as its argument — the other commands require the directory name that
+is actually installed. The `rebase` output always shows the directory that exists
+on disk, so the suggested `edit` and `create` commands are ready to run.
 
 ## Monorepos
 
