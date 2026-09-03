@@ -1,7 +1,7 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
 import {execSync, spawn, spawnSync} from 'child_process';
 import {createHash} from 'crypto';
-import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
+import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree, withPristine} from './src/create';
 import {parseOptions} from './src/options';
 import {parseRepository} from './src/upstream';
@@ -3503,6 +3503,118 @@ rename to node_modules/${PKG}/moved.js
     expect(once.newMode).toBe(parsed[0].oldMode);
     expect(once.renameTo).toBe(parsed[0].renameFrom);
     expect(once.hunks[0].lines).toEqual(['+before', '-after', ' kept']);
+  });
+
+  // Пакет установлен через npm-алиас: каталог называется по алиасу (`mynum`),
+  // а патч — по имени из манифеста (`is-number+7.0.0.patch`). rebase должен
+  // принимать оба имени и в обоих случаях называть в подсказках тот каталог,
+  // который существует на диске. (TSK-43)
+  describe('with an npm alias (mynum@npm:is-number@7.0.0)', () => {
+    const ALIAS = 'mynum';
+    const MANIFEST = 'is-number';
+    const PATCH_FILE = `${MANIFEST}+7.0.0.patch`;
+
+    function setupAlias() {
+      execSync('bun add mynum@npm:is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+      const file = join(TEST_DIR, 'node_modules', ALIAS, 'index.js');
+      // Модифицируем файл перед create: create снимет diff, патч будет готов.
+      overwriteFile(file, `// ALIAS PATCH\n${readFileSync(file, 'utf-8')}`);
+      expect(run(`create ${ALIAS}`, TEST_DIR).exitCode).toBe(0);
+      // Патч назван по имени манифеста, а не по алиасу.
+      expect(existsSync(join(TEST_DIR, 'patches', PATCH_FILE))).toBe(true);
+      // apply видит файл в состоянии «патч уже в дереве» и записывает его
+      // в state: после этого rebase может снять патч.
+      expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    }
+
+    test('accepts the alias as the argument and un-applies the patch', () => {
+      setupAlias();
+
+      const result = run(`rebase ${ALIAS} 0`, TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      // Файл вернулся к состоянию до патча.
+      expect(readFileSync(join(TEST_DIR, 'node_modules', ALIAS, 'index.js'), 'utf-8')).not.toContain(
+        'ALIAS PATCH',
+      );
+    });
+
+    test('shows the alias directory in hints when called with the alias', () => {
+      setupAlias();
+
+      const result = run(`rebase ${ALIAS} 0`, TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      // Подсказки называют каталог, который существует на диске.
+      expect(result.stdout).toContain(`node_modules/${ALIAS}`);
+      expect(result.stdout).toContain(`create ${ALIAS} --append`);
+    });
+
+    test('also accepts the manifest name as the argument', () => {
+      setupAlias();
+
+      const result = run(`rebase ${MANIFEST} 0`, TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      expect(readFileSync(join(TEST_DIR, 'node_modules', ALIAS, 'index.js'), 'utf-8')).not.toContain(
+        'ALIAS PATCH',
+      );
+    });
+
+    test('shows the alias directory in hints when called with the manifest name', () => {
+      setupAlias();
+
+      const result = run(`rebase ${MANIFEST} 0`, TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      // Подсказки называют алиасный каталог, а не имя манифеста.
+      expect(result.stdout).toContain(`node_modules/${ALIAS}`);
+      expect(result.stdout).toContain(`create ${ALIAS} --append`);
+    });
+
+    test('finds patches named by directory when the manifest name differs', () => {
+      // Патч назван по каталогу, а не по манифесту: так его переименовывают
+      // руками или приносят из проекта с другой раскладкой. Разрешение имени
+      // через манифест такой набор терять не должно — до правки `rebase` брал
+      // patchDir из манифеста (`is-number`) и отвечал «No patches found».
+      execSync('bun add mynum@npm:is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+      const file = join(TEST_DIR, 'node_modules', ALIAS, 'index.js');
+      overwriteFile(file, `// ALIAS PATCH\n${readFileSync(file, 'utf-8')}`);
+      expect(run(`create ${ALIAS}`, TEST_DIR).exitCode).toBe(0);
+
+      // Переименование до `apply`: запись о применённом хранит имя файла, и
+      // переименование после неё упирается в посторонний дефект — `rebase`
+      // падает с ENOENT на записи, чей файл исчез (это TSK-45, не про алиасы).
+      renameSync(
+        join(TEST_DIR, 'patches', `${MANIFEST}+7.0.0.patch`),
+        join(TEST_DIR, 'patches', `${ALIAS}+7.0.0.patch`),
+      );
+      expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+      const result = run(`rebase ${ALIAS} 0`, TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain(`${ALIAS}+7.0.0.patch`);
+      expect(readFileSync(join(TEST_DIR, 'node_modules', ALIAS, 'index.js'), 'utf-8')).not.toContain(
+        'ALIAS PATCH',
+      );
+    });
+
+    test('broken package.json does not crash rebase — warns and still rolls back', () => {
+      // До правки: rebase читал манифест без try/catch и ронял весь откат
+      // голым SyntaxError'ом. После: предупреждает и ищет патч через пути
+      // внутри патч-файла, чтобы не бросать пользователя на полпути.
+      setupAlias();
+      overwriteFile(join(TEST_DIR, 'node_modules', ALIAS, 'package.json'), '{ not json');
+
+      const result = run(`rebase ${ALIAS} 0`, TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('Cannot read');
+      expect(readFileSync(join(TEST_DIR, 'node_modules', ALIAS, 'index.js'), 'utf-8')).not.toContain(
+        'ALIAS PATCH',
+      );
+    });
   });
 });
 

@@ -4,10 +4,11 @@ import {lockFile, withApplyLock} from './lock';
 import {applyHunks} from './hunks';
 import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch-file';
 import {firstPathOutsideNodeModules, foreignPatchReason, patchesAppliedByBun} from './foreign';
-import {patchesDirectory} from './paths';
+import {installedPackagePath, packageDirectoryOf, patchesDirectory, stripPathPrefix} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
 import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
 import {recordPatches, recordedPatches} from './state';
+import {readManifest, validatePackageName} from './create';
 
 // Патчи одного пакета — как коммиты: чтобы переделать не последний, надо сперва
 // снять те, что легли поверх него. Это и делает rebase, и ровно это же значит
@@ -16,12 +17,61 @@ import {recordPatches, recordedPatches} from './state';
 // Откат — применение перевёрнутого патча тем же кодом, что и обычное
 // применение: см. invertTarget().
 export function rebasePatches(packageName: string, target: string): void {
+  validatePackageName(packageName);
+
   if (!existsSync(patchesDirectory())) {
     throw new Error(`No ${patchesDirectory()}/ directory — there is nothing to rebase`);
   }
 
+  // Разрешаем имя: аргумент может быть каталогом на диске (алиас) или именем из
+  // манифеста. Тот же приём, что в retarget: смотрим на каталог, читаем manifest.
+  //
+  // patchDir — ключ в имени файла патча (из manifest.name или сам аргумент).
+  // dirName — каталог, который фактически редактируется: берётся из путей патча
+  //           (строки `--- a/node_modules/<каталог>/...`), а не из manifest.name.
+  const packagePath = installedPackagePath(packageName);
+  let patchDir: string;
+  let manifestFailed = false;
+
+  if (existsSync(packagePath)) {
+    // Аргумент — каталог на диске (возможно алиас, как `mynum` для `is-number`).
+    let manifestName: string | null = null;
+    try {
+      manifestName = readManifest(packagePath).name;
+    } catch {
+      // Битый манифест — не роняем весь откат. Говорим, какой файл не читается,
+      // и ищем патчи через пути внутри самих патч-файлов (см. ниже).
+      console.log(`⚠️  Cannot read node_modules/${packageName}/package.json — falling back to path-based patch search`);
+      manifestFailed = true;
+    }
+    // Вложенная зависимость названа путём — `outer/node_modules/inner`.
+    patchDir = manifestName !== null && !packageName.includes('/node_modules/')
+      ? manifestName
+      : packageName;
+  } else {
+    // Аргумент — имя манифеста: каталога с таким именем нет на диске.
+    patchDir = packageName;
+  }
+
   const all = listPatchFiles();
-  const mine = all.filter(file => parsePatchName(file)?.packageDir === packageName);
+  let mine = all.filter(file => parsePatchName(file)?.packageDir === patchDir);
+
+  // Запасной поиск при пустом результате — два независимых случая:
+  //
+  // 1. Манифест прочитан, patchDir = manifest.name, но патч назван по каталогу
+  //    (переименован руками или пришёл из проекта с другой раскладкой).
+  //    Ищем по имени аргумента — то самое поведение до этой правки.
+  //
+  // 2. Манифест недоступен: patchDir = packageName, но create мог записать в имя
+  //    файла что-то другое. Ищем по путям внутри патч-файлов: create записывает
+  //    туда имя каталога на диске, и это точнее имени файла.
+  if (mine.length === 0) {
+    if (patchDir !== packageName) {
+      mine = all.filter(file => parsePatchName(file)?.packageDir === packageName);
+    } else if (manifestFailed) {
+      mine = all.filter(file => dirNameFromPatch(file) === packageName);
+    }
+  }
 
   if (mine.length === 0) {
     throw new Error(`No patches found for ${packageName} in ${patchesDirectory()}/`);
@@ -30,7 +80,13 @@ export function rebasePatches(packageName: string, target: string): void {
   const keep = resolveTarget(mine, target, packageName);
   const undo = mine.slice(keep).reverse(); // снимаем сверху вниз
 
-  console.log(`🔧 Rebasing ${packageName} onto ${keep === 0 ? 'nothing' : mine[keep - 1]}...`);
+  // dirName берётся из путей первого патча — то, что create записал туда при создании.
+  // При алиасной установке это имя каталога (`mynum`), а не имя манифеста (`is-number`).
+  // Это точнее, чем искать по manifest.name: при двух установках одного пакета
+  // сканирование давало неверный каталог.
+  const dirName = dirNameFromPatch(mine[0]) ?? packageName;
+
+  console.log(`🔧 Rebasing ${dirName} onto ${keep === 0 ? 'nothing' : mine[keep - 1]}...`);
 
   const removed = withApplyLock(lockFile(), () => unApply(undo));
 
@@ -51,12 +107,12 @@ export function rebasePatches(packageName: string, target: string): void {
 
   const next: [string, string][] = keep === 0
     ? [
-        [`bunch-package create ${packageName} --append <name>`, 'to insert a patch before the others'],
+        [`bunch-package create ${dirName} --append <name>`, 'to insert a patch before the others'],
         ['bunch-package apply', 'to put the rest back'],
       ]
     : [
-        [`bunch-package create ${packageName}`, `to update ${mine[keep - 1]}`],
-        [`bunch-package create ${packageName} --append <name>`, 'to insert a patch after it'],
+        [`bunch-package create ${dirName}`, `to update ${mine[keep - 1]}`],
+        [`bunch-package create ${dirName} --append <name>`, 'to insert a patch after it'],
         ['bunch-package apply', 'to put the rest back'],
       ];
 
@@ -64,8 +120,29 @@ export function rebasePatches(packageName: string, target: string): void {
   const width = Math.max(...next.map(([command]) => command.length)) + 3;
 
   console.log('');
-  console.log(`Now edit node_modules/${packageName}, then run:`);
+  console.log(`Now edit node_modules/${dirName}, then run:`);
   for (const [command, purpose] of next) console.log(`  ${command.padEnd(width)}${purpose}`);
+}
+
+// Каталог пакета из первого файла патча — то место, куда патч фактически кладётся.
+// Точнее, чем искать по manifest.name: при двух установках одного пакета
+// (is-number@7.0.0 + mynum@npm:is-number@7.0.0) поиск по имени давал первый
+// попавшийся каталог, а путь в патче записан явно.
+function dirNameFromPatch(patchFile: string): string | null {
+  const targets = readTargets(patchFile);
+  if ('error' in targets) return null;
+
+  for (const t of targets) {
+    const path = t.newPath ?? t.oldPath;
+    if (path === null) continue;
+    const dir = packageDirectoryOf(stripPathPrefix(path));
+    if (dir === null) continue;
+    // packageDirectoryOf возвращает 'node_modules/mynum' — нам нужен 'mynum'.
+    const PREFIX = 'node_modules/';
+    if (dir.startsWith(PREFIX)) return dir.slice(PREFIX.length);
+  }
+
+  return null;
 }
 
 // Снять всё — отдельная команда, а не rebase с особым аргументом: rebase просит
