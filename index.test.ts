@@ -3045,6 +3045,171 @@ describe('a patch that landed with an offset', () => {
   });
 });
 
+// Несколько хунков в одном файле — случая не было в сюите вовсе: все
+// многохунковые патчи здесь были про разные файлы. А между хунками одного файла
+// живёт накопленный сдвиг: первый меняет длину, и второй обязан сесть с
+// поправкой на неё. Заодно это единственное место, где применение правит массив
+// строк не с чистого листа, — а массив этот принадлежит вызывающему, потому что
+// проверка «уже применён» зовёт применение дважды на одних и тех же строках.
+describe('several hunks in one file', () => {
+  const source = Array.from({length: 30}, (_, i) => `line ${i + 1}`).join('\n') + '\n';
+  const file = () => join(TEST_DIR, 'node_modules', 'test-lib', 'index.js');
+  const content = () => readFileSync(file(), 'utf-8');
+
+  function setup(patch: string) {
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': source});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), patch);
+  }
+
+  const header = `--- a/node_modules/test-lib/index.js
++++ b/node_modules/test-lib/index.js
+`;
+
+  test('the second hunk lands shifted by what the first one added', () => {
+    // Первый хунк удлиняет файл на две строки, второй объявлен по номерам
+    // исходного файла — сесть он обязан на две строки ниже.
+    setup(header + `@@ -1,3 +1,5 @@
+ line 1
++added one
++added two
+ line 2
+ line 3
+@@ -19,3 +21,3 @@
+ line 19
+-line 20
++line twenty
+ line 21
+`);
+
+    expect(run('apply', TEST_DIR).stdout).toContain('1 applied, 0 failed');
+
+    const expected = ['line 1', 'added one', 'added two',
+      ...Array.from({length: 18}, (_, i) => `line ${i + 2}`),
+      'line twenty',
+      ...Array.from({length: 10}, (_, i) => `line ${i + 21}`)].join('\n') + '\n';
+    expect(content()).toBe(expected);
+
+    // Второй прогон обязан узнать патч и не тронуть файл.
+    const again = run('apply', TEST_DIR);
+    expect(again.stdout).toContain('already applied');
+    expect(content()).toBe(expected);
+
+    // И круг замыкается: откат возвращает файл побайтово.
+    expect(run('rebase test-lib 0', TEST_DIR).exitCode).toBe(0);
+    expect(content()).toBe(source);
+  });
+
+  test('the second hunk lands shifted by what the first one removed', () => {
+    setup(header + `@@ -1,4 +1,2 @@
+ line 1
+-line 2
+-line 3
+ line 4
+@@ -19,3 +17,3 @@
+ line 19
+-line 20
++line twenty
+ line 21
+`);
+
+    expect(run('apply', TEST_DIR).stdout).toContain('1 applied, 0 failed');
+
+    const expected = ['line 1', 'line 4',
+      ...Array.from({length: 15}, (_, i) => `line ${i + 5}`),
+      'line twenty',
+      ...Array.from({length: 10}, (_, i) => `line ${i + 21}`)].join('\n') + '\n';
+    expect(content()).toBe(expected);
+
+    expect(run('apply', TEST_DIR).stdout).toContain('already applied');
+    expect(content()).toBe(expected);
+    expect(run('rebase test-lib 0', TEST_DIR).exitCode).toBe(0);
+    expect(content()).toBe(source);
+  });
+
+  test('the shift decides which of two identical blocks the hunk lands on', () => {
+    // Тот же кусок кода встречается в файле дважды, и второй хунк объявлен про
+    // второй из них. Первый хунк удлинил файл, поэтому искать второй надо со
+    // сдвигом: без него ближайшим к объявленному месту оказывается ЧУЖОЙ блок,
+    // и патч молча правит не ту копию. Проверено мутацией: снимаешь `+ offset`
+    // — правится первый блок, а вся остальная сюита остаётся зелёной.
+    const before = ['head', 'filler', 'marker', 'target', 'end', 'spacer', 'marker', 'target', 'end'];
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': before.join('\n') + '\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), header + `@@ -1,1 +1,4 @@
+ head
++added one
++added two
++added three
+@@ -7,3 +10,3 @@
+ marker
+-target
++patched
+ end
+`);
+
+    expect(run('apply', TEST_DIR).stdout).toContain('1 applied, 0 failed');
+
+    expect(content()).toBe(['head', 'added one', 'added two', 'added three',
+      'filler', 'marker', 'target', 'end', 'spacer', 'marker', 'patched', 'end'].join('\n') + '\n');
+
+    expect(run('apply', TEST_DIR).stdout).toContain('already applied');
+    expect(run('rebase test-lib 0', TEST_DIR).exitCode).toBe(0);
+    expect(content()).toBe(before.join('\n') + '\n');
+  });
+
+  test('a patch that is half in the tree is refused, not finished', () => {
+    // Первый хунк в дереве уже есть, второго нет. Проверка «уже применён»
+    // разбирает файл обратной стороной, и первый хунк ей сходится: если бы она
+    // писала в тот же массив строк, что и прямое применение, прямое считалось бы
+    // по наполовину откаченному файлу — и патч ложился бы с рапортом ✅ вместо
+    // отказа. Измерено: снимаешь копию массива — здесь `1 applied, 0 failed` и
+    // изменённый файл.
+    const half = Array.from({length: 30}, (_, i) => `line ${i + 1}`);
+    half[4] = 'line five';
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': half.join('\n') + '\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), header + `@@ -4,3 +4,3 @@
+ line 4
+-line 5
++line five
+ line 6
+@@ -19,3 +19,3 @@
+ line 19
+-line 20
++line twenty
+ line 21
+`);
+
+    const before = content();
+    const result = run('apply', TEST_DIR);
+
+    expect(result.stdout).toContain('0 applied, 1 failed');
+    expect(result.exitCode).not.toBe(0);
+    expect(content()).toBe(before);
+  });
+
+  test('a hunk larger than the splice limit lands whole', () => {
+    // Строки вставляются в массив разом, а предел числа аргументов вызова у
+    // рантайма конечен: на bun 1.0.36 splice падает RangeError на 65 535
+    // аргументах. Хунк крупнее порога идёт другим путём, и путь этот обязан
+    // давать тот же файл.
+    const inserted = Array.from({length: 9000}, (_, i) => `inserted ${i + 1}`);
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'head\ntail\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'),
+      header + `@@ -1,2 +1,9002 @@\n head\n${inserted.map(line => `+${line}`).join('\n')}\n tail\n`);
+
+    expect(run('apply', TEST_DIR).stdout).toContain('1 applied, 0 failed');
+
+    const expected = ['head', ...inserted, 'tail'].join('\n') + '\n';
+    expect(content()).toBe(expected);
+
+    expect(run('apply', TEST_DIR).stdout).toContain('already applied');
+    expect(content()).toBe(expected);
+  });
+});
+
 // Пакет обновили, патч остался от старой версии. `apply` о таком только
 // предупреждает; retarget переписывает патчи под установленную версию.
 //
