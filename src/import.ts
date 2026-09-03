@@ -1,5 +1,6 @@
 import {existsSync, readFileSync, renameSync, rmSync, writeFileSync} from 'fs';
-import {basename, join} from 'path';
+import {basename, join, relative, resolve} from 'path';
+import {workspaceRoot} from './workspace';
 import {firstPathOutsideNodeModules} from './foreign';
 import {formatPatchName, listPatchFiles, parsePatch} from './patch-file';
 import {patchesDirectory} from './paths';
@@ -10,19 +11,41 @@ import {patchesDirectory} from './paths';
 // пути внутри от корня пакета. Переписать десяток таких файлов руками никто не
 // станет, поэтому переписываем мы.
 interface Foreign {
-  file: string; // имя файла в patches/
+  file: string; // имя файла патча
+  dir: string; // каталог, где файл лежит: наш patches/ или корневой
   name: string; // имя пакета
   version: string;
   key: string | null; // ключ в patchedDependencies, если патч записан туда
+  manifest: string | null; // манифест, где стоит этот ключ
 }
 
-function readManifestJson(): any {
-  if (!existsSync('package.json')) return null;
+function readManifestJson(path: string = 'package.json'): any {
+  if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync('package.json', 'utf-8'));
+    return JSON.parse(readFileSync(path, 'utf-8'));
   } catch {
     return null;
   }
+}
+
+// Манифесты, где bun ищет patchedDependencies: свой и, внутри монорепо,
+// корневой. Измерено на bun 1.4.0 (NOT-25): ключ он берёт у обоих, а путь к
+// файлу разрешает всегда от корня воркспейсов. Пока import читал один лишь
+// cwd, запись у корня он не видел вовсе и молчал: «Nothing to import».
+function manifestPaths(): string[] {
+  const root = workspaceRoot();
+  if (root === null || resolve(root) === resolve(process.cwd())) return ['package.json'];
+  return ['package.json', join(root, 'package.json')];
+}
+
+function patchedIn(manifest: string): Record<string, string> {
+  const parsed = readManifestJson(manifest);
+  const value = parsed?.patchedDependencies;
+  if (value === null || typeof value !== 'object') return {};
+
+  return Object.fromEntries(
+    Object.entries(value).filter((pair): pair is [string, string] => typeof pair[1] === 'string'),
+  );
 }
 
 // `@vercel/og@0.4.1` → имя и версия. Разбираем справа: имя scoped-пакета само
@@ -85,24 +108,36 @@ export function toProjectPaths(content: string, name: string): string {
   return out.join('\n');
 }
 
-function collect(): Foreign[] {
-  const manifest = readManifestJson();
-  const patched: Record<string, string> =
-    manifest?.patchedDependencies !== null && typeof manifest?.patchedDependencies === 'object'
-      ? manifest.patchedDependencies
-      : {};
+// Где лежит файл патча: у себя или там, куда его кладёт bun — от корня
+// воркспейсов. Второе встречается ровно потому, что путь в манифесте bun
+// разрешает от корня, даже когда сам ключ стоит в манифесте воркспейса.
+function locatePatchFile(value: string): string | null {
+  const file = basename(value);
+  if (existsSync(join(patchesDirectory(), file))) return patchesDirectory();
 
+  const root = workspaceRoot();
+  if (root === null) return null;
+
+  const atRoot = join(root, value);
+  return existsSync(atRoot) ? join(atRoot, '..') : null;
+}
+
+function collect(): Foreign[] {
   const found: Foreign[] = [];
   const seen = new Set<string>();
 
-  for (const [key, value] of Object.entries(patched)) {
-    if (typeof value !== 'string') continue;
-    const parts = splitNameAndVersion(key);
-    const file = basename(value);
-    if (parts === null || !existsSync(join(patchesDirectory(), file))) continue;
+  for (const manifest of manifestPaths()) {
+    for (const [key, value] of Object.entries(patchedIn(manifest))) {
+      const parts = splitNameAndVersion(key);
+      const dir = locatePatchFile(value);
+      if (parts === null || dir === null) continue;
 
-    found.push({file, name: parts.name, version: parts.version, key});
-    seen.add(file);
+      const file = basename(value);
+      if (seen.has(file)) continue;
+
+      found.push({file, dir, name: parts.name, version: parts.version, key, manifest});
+      seen.add(file);
+    }
   }
 
   // Файл могли записать в patches/ и не прописать в package.json — тогда
@@ -115,7 +150,7 @@ function collect(): Foreign[] {
 
     const parts = fromFileName(file);
     if (parts === null) continue;
-    found.push({file, name: parts.name, version: parts.version, key: null});
+    found.push({file, dir: patchesDirectory(), name: parts.name, version: parts.version, key: null, manifest: null});
   }
 
   return found;
@@ -128,17 +163,29 @@ export function importPatches(): void {
   }
 
   const foreign = collect();
-  if (foreign.length === 0) {
-    console.log('✅ Nothing to import — every patch here is already in this tool’s format');
+
+  // Патч, объявленный у корня монорепо, применяется всему дереву, а не одному
+  // воркспейсу. Перенести его отсюда в свой patches/ значило бы молча отобрать
+  // его у соседей — поэтому мы такие называем, а берёмся только за свои.
+  const ours = foreign.filter(patch => patch.manifest === null || isOurManifest(patch.manifest));
+  const elsewhere = foreign.filter(patch => !ours.includes(patch));
+
+  if (ours.length === 0) {
+    console.log(
+      elsewhere.length === 0
+        ? '✅ Nothing to import — every patch here is already in this tool’s format'
+        : `✅ Nothing to import here`,
+    );
+    reportElsewhere(elsewhere);
     return;
   }
 
-  console.log(`📥 Importing ${foreign.length} patch(es)...`);
+  console.log(`📥 Importing ${ours.length} patch(es)...`);
 
   const imported: Foreign[] = [];
 
-  for (const patch of foreign) {
-    const path = join(patchesDirectory(), patch.file);
+  for (const patch of ours) {
+    const path = join(patch.dir, patch.file);
     const content = readFileSync(path, 'utf-8');
 
     if (firstPathOutsideNodeModules(parsePatch(content)) === undefined) {
@@ -150,9 +197,11 @@ export function importPatches(): void {
     const rewritten = toProjectPaths(content, patch.name);
 
     // Сначала пишем новый файл, потом убираем старый: половина переноса —
-    // состояние, из которого не выбраться.
-    writeFileSync(join(patchesDirectory(), target), rewritten);
-    if (target !== patch.file) rmSync(path, {force: true});
+    // состояние, из которого не выбраться. Новый пишется всегда в наш каталог,
+    // а старый бывает и у корня: путь к нему bun разрешает оттуда.
+    const written = join(patchesDirectory(), target);
+    writeFileSync(written, rewritten);
+    if (resolve(written) !== resolve(path)) rmSync(path, {force: true});
 
     console.log(`  ✅ ${patch.file} → ${target}`);
     imported.push(patch);
@@ -165,18 +214,37 @@ export function importPatches(): void {
   console.log('');
   console.log(`📊 ${imported.length} patch(es) now belong to bunch-package`);
   console.log(`   Run \`bunch-package apply\` after your next install — bun no longer applies them.`);
+  reportElsewhere(elsewhere);
+}
+
+function isOurManifest(path: string): boolean {
+  return resolve(path) === resolve('package.json');
+}
+
+// Молчать о них нельзя: человек пришёл сюда именно за тем, чтобы патчей bun в
+// проекте не осталось, а эти никуда не делись — просто объявлены не здесь.
+function reportElsewhere(elsewhere: Foreign[]): void {
+  if (elsewhere.length === 0) return;
+
+  const root = workspaceRoot();
+  console.log('');
+  console.log(`🏠 ${elsewhere.length} patch(es) are declared in the monorepo root manifest, not here:`);
+  for (const patch of elsewhere) console.log(`   ${patch.file} (${patch.key})`);
+  console.log(`   They apply to the whole tree, so import them from the root:`);
+  console.log(`     cd ${root === null ? '<monorepo root>' : relative(process.cwd(), root) || '.'} && bunch-package import`);
 }
 
 // Запись в patchedDependencies надо убрать: файла под старым именем больше нет,
 // и bun при следующей установке спотыкался бы о него.
 function dropFromManifest(imported: Foreign[]): void {
-  const keys = imported.map(patch => patch.key).filter((key): key is string => key !== null);
+  const keys = imported.filter((patch): patch is Foreign & {key: string; manifest: string} =>
+    patch.key !== null && patch.manifest !== null);
   if (keys.length === 0) return;
 
   const manifest = readManifestJson();
   if (manifest?.patchedDependencies === undefined || manifest.patchedDependencies === null) return;
 
-  for (const key of keys) delete manifest.patchedDependencies[key];
+  for (const patch of keys) delete manifest.patchedDependencies[patch.key];
   if (Object.keys(manifest.patchedDependencies).length === 0) delete manifest.patchedDependencies;
 
   const temp = `package.json.bunch-import-${process.pid}`;
