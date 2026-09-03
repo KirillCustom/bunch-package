@@ -33,13 +33,19 @@ export interface State {
   patches: RecordedPatch[];
 }
 
-export function hashPatchFile(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+// Хеши считаются от уже прочитанного файла, а не читают его сами: их всегда
+// спрашивают парой и вместе с заголовком, и, пока каждый открывал файл сам,
+// `status` открывал файл патча четыре раза на патч, а `recordPatches` — три.
+//
+// Весь файл хешируется байтами, а тело — строкой: так было и раньше, и от
+// этого зависит, узнает ли `status` уже записанный патч. Байты патча, который
+// не читается как UTF-8, через строку не прошли бы неизменными.
+export function hashPatchFile(raw: Buffer): string {
+  return createHash('sha256').update(raw).digest('hex');
 }
 
-export function hashPatchBody(path: string): string {
-  const body = splitPatchHeader(readFileSync(path, 'utf-8')).body;
-  return createHash('sha256').update(body).digest('hex');
+export function hashPatchBody(content: string): string {
+  return createHash('sha256').update(splitPatchHeader(content).body).digest('hex');
 }
 
 // Запись — это только запись. Считать по ней, что патч на месте, нельзя:
@@ -76,8 +82,9 @@ export function recordPatches(inTree: string[]): void {
 
   const patches: RecordedPatch[] = inTree.map(file => {
     const parsed = parsePatchName(file);
-    const path = join(patchesDirectory(), file);
-    const sha256 = hashPatchFile(path);
+    const raw = readFileSync(join(patchesDirectory(), file));
+    const sha256 = hashPatchFile(raw);
+    const bodySha256 = hashPatchBody(raw.toString('utf-8'));
     const before = previous.get(file);
 
     return {
@@ -85,10 +92,10 @@ export function recordPatches(inTree: string[]): void {
       packageDir: parsed?.packageDir ?? '',
       version: parsed?.version ?? '',
       sha256,
-      bodySha256: hashPatchBody(path),
+      bodySha256,
       // Время первого попадания в дерево переживает правку заголовка: дерево от
       // неё не изменилось, значит и «применён тогда-то» остаётся верным.
-      appliedAt: before !== undefined && sameChange(before, sha256, path) ? before.appliedAt : now,
+      appliedAt: before !== undefined && sameChange(before, sha256, bodySha256) ? before.appliedAt : now,
     };
   });
 
@@ -103,9 +110,9 @@ export function recordPatches(inTree: string[]): void {
 
 // Одна и та же правка дерева: либо файл патча тот же побайтово, либо изменился
 // только заголовок — тело осталось прежним.
-function sameChange(before: RecordedPatch, sha256: string, path: string): boolean {
+function sameChange(before: RecordedPatch, sha256: string, bodySha256: string): boolean {
   if (before.sha256 === sha256) return true;
-  return before.bodySha256 !== undefined && before.bodySha256 === hashPatchBody(path);
+  return before.bodySha256 !== undefined && before.bodySha256 === bodySha256;
 }
 
 // Переименование патча дерева не касается: файл тот же, содержимое то же, и
