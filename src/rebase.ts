@@ -1,13 +1,14 @@
-import {existsSync, readFileSync} from 'fs';
+import {existsSync, readFileSync, readdirSync} from 'fs';
 import {join} from 'path';
 import {lockFile, withApplyLock} from './lock';
 import {applyHunks} from './hunks';
 import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch-file';
 import {firstPathOutsideNodeModules, foreignPatchReason, patchesAppliedByBun} from './foreign';
-import {patchesDirectory} from './paths';
+import {installedPackagePath, patchesDirectory} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
 import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
 import {recordPatches, recordedPatches} from './state';
+import {readManifest, validatePackageName} from './create';
 
 // Патчи одного пакета — как коммиты: чтобы переделать не последний, надо сперва
 // снять те, что легли поверх него. Это и делает rebase, и ровно это же значит
@@ -16,12 +17,36 @@ import {recordPatches, recordedPatches} from './state';
 // Откат — применение перевёрнутого патча тем же кодом, что и обычное
 // применение: см. invertTarget().
 export function rebasePatches(packageName: string, target: string): void {
+  validatePackageName(packageName);
+
   if (!existsSync(patchesDirectory())) {
     throw new Error(`No ${patchesDirectory()}/ directory — there is nothing to rebase`);
   }
 
+  // Разрешаем имя: аргумент может быть каталогом на диске (алиас) или именем из
+  // манифеста. Тот же приём, что в retarget: смотрим на каталог, читаем manifest.
+  //
+  // dirName — что существует в node_modules, для подсказок и edit.
+  // patchDir — ключ в имени файла патча, берётся из manifest.name.
+  const packagePath = installedPackagePath(packageName);
+  let dirName: string;
+  let patchDir: string;
+
+  if (existsSync(packagePath)) {
+    // Аргумент — каталог на диске (возможно алиас, как `mynum` для `is-number`).
+    const {name} = readManifest(packagePath);
+    // Вложенная зависимость названа путём — `outer/node_modules/inner`.
+    patchDir = packageName.includes('/node_modules/') ? packageName : name;
+    dirName = packageName;
+  } else {
+    // Аргумент похож на имя манифеста: каталога с таким именем нет. Ищем, под
+    // каким алиасом этот пакет на самом деле установлен — для корректных подсказок.
+    patchDir = packageName;
+    dirName = findDirectoryByManifestName(packageName) ?? packageName;
+  }
+
   const all = listPatchFiles();
-  const mine = all.filter(file => parsePatchName(file)?.packageDir === packageName);
+  const mine = all.filter(file => parsePatchName(file)?.packageDir === patchDir);
 
   if (mine.length === 0) {
     throw new Error(`No patches found for ${packageName} in ${patchesDirectory()}/`);
@@ -30,7 +55,7 @@ export function rebasePatches(packageName: string, target: string): void {
   const keep = resolveTarget(mine, target, packageName);
   const undo = mine.slice(keep).reverse(); // снимаем сверху вниз
 
-  console.log(`🔧 Rebasing ${packageName} onto ${keep === 0 ? 'nothing' : mine[keep - 1]}...`);
+  console.log(`🔧 Rebasing ${dirName} onto ${keep === 0 ? 'nothing' : mine[keep - 1]}...`);
 
   const removed = withApplyLock(lockFile(), () => unApply(undo));
 
@@ -51,12 +76,12 @@ export function rebasePatches(packageName: string, target: string): void {
 
   const next: [string, string][] = keep === 0
     ? [
-        [`bunch-package create ${packageName} --append <name>`, 'to insert a patch before the others'],
+        [`bunch-package create ${dirName} --append <name>`, 'to insert a patch before the others'],
         ['bunch-package apply', 'to put the rest back'],
       ]
     : [
-        [`bunch-package create ${packageName}`, `to update ${mine[keep - 1]}`],
-        [`bunch-package create ${packageName} --append <name>`, 'to insert a patch after it'],
+        [`bunch-package create ${dirName}`, `to update ${mine[keep - 1]}`],
+        [`bunch-package create ${dirName} --append <name>`, 'to insert a patch after it'],
         ['bunch-package apply', 'to put the rest back'],
       ];
 
@@ -64,8 +89,58 @@ export function rebasePatches(packageName: string, target: string): void {
   const width = Math.max(...next.map(([command]) => command.length)) + 3;
 
   console.log('');
-  console.log(`Now edit node_modules/${packageName}, then run:`);
+  console.log(`Now edit node_modules/${dirName}, then run:`);
   for (const [command, purpose] of next) console.log(`  ${command.padEnd(width)}${purpose}`);
+}
+
+// Ищем каталог в node_modules, чей manifest.name совпадает с именем из патча.
+// Нужен, когда аргументом передали имя манифеста, а пакет установлен под алиасом:
+// `rebase is-number 0` при `mynum@npm:is-number` → возвращает `mynum`.
+//
+// Для вложенных зависимостей этот путь недостижим: они всегда именуются путём
+// (`outer/node_modules/inner`), который существует на диске, и попадают в ветку
+// existsSync выше. Поэтому ищем только на верхнем уровне node_modules.
+function findDirectoryByManifestName(manifestName: string): string | null {
+  const nmPath = join(process.cwd(), 'node_modules');
+  if (!existsSync(nmPath)) return null;
+
+  let entries;
+  try {
+    entries = readdirSync(nmPath, {withFileTypes: true});
+  } catch {
+    return null;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = entry.name;
+
+    if (dir.startsWith('@')) {
+      // Скоуп (@scope/pkg): заходим на уровень глубже.
+      const scopePath = join(nmPath, dir);
+      let scopeEntries;
+      try {
+        scopeEntries = readdirSync(scopePath, {withFileTypes: true});
+      } catch {
+        continue;
+      }
+      for (const sub of scopeEntries) {
+        if (!sub.isDirectory()) continue;
+        const subDir = `${dir}/${sub.name}`;
+        try {
+          const {name} = readManifest(join(nmPath, subDir));
+          if (name === manifestName) return subDir;
+        } catch {}
+      }
+    } else {
+      try {
+        const {name} = readManifest(join(nmPath, dir));
+        if (name === manifestName) return dir;
+      } catch {}
+    }
+  }
+
+  return null;
 }
 
 // Снять всё — отдельная команда, а не rebase с особым аргументом: rebase просит
