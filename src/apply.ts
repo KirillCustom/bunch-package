@@ -1,6 +1,6 @@
 import {existsSync, readFileSync} from 'fs';
 import {inProduction, missingPackages, skipsMissingPackage} from './dev';
-import {firstPathOutsideNodeModules, patchesAppliedByBun} from './foreign';
+import {firstPathOutsideNodeModules, foreignPatchReason, patchesAppliedByBun} from './foreign';
 import {lockFile, withApplyLock} from './lock';
 import {PatchTarget, formatPatchName, listPatchFiles, parsePatchName} from './patch-file';
 import {patchesDirectory, packageDirectoryOf, resolvePackagePath, stripPathPrefix} from './paths';
@@ -135,11 +135,7 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
     // они от корня пакета, и, срезав `a/`, мы взялись бы за файлы проекта.
     const outside = firstPathOutsideNodeModules(targets);
     if (outside !== undefined) {
-      fail(
-        `${outside} is not inside node_modules/ — this looks like a \`bun patch\` patch, whose paths ` +
-          `are relative to the package root. bun applies those itself; list it in patchedDependencies, ` +
-          `or recreate it with \`bunch-package create\`.`,
-      );
+      fail(foreignPatchReason(outside));
       continue;
     }
 

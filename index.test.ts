@@ -1041,6 +1041,38 @@ index c4498bcc..74988d81 100644
     expect(readFileSync(join(TEST_DIR, 'index.js'), 'utf-8')).toBe('const patchedByBun = 2;\n');
   });
 
+  test('reverse refuses one that is not listed, instead of editing the project', () => {
+    // Патч чужого формата, которого нет в patchedDependencies: фильтр по
+    // манифесту его не поймает, а формат путей откат до этого не проверял
+    // вовсе. Измерено на этом же стенде до правки: `↩️ ms@2.1.2.patch`,
+    // `1 of 1 un-applied` и index.js проекта, вернувшийся к `const original`.
+    setupProjectFile();
+    overwriteFile(join(TEST_DIR, 'index.js'), 'const patchedByBun = 2;\n');
+
+    const result = run('reverse', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('is not inside node_modules/');
+    expect(result.stdout).toContain('0 of 1 un-applied');
+    expect(readFileSync(join(TEST_DIR, 'index.js'), 'utf-8')).toBe('const patchedByBun = 2;\n');
+  });
+
+  test('rebase refuses it too, whatever the patch file is called', () => {
+    // Имя файла о формате не говорит ничего: чужой патч переименовывают руками,
+    // и `import` занят ровно этим. Под нашим именем его берёт и rebase — он
+    // ищет патчи пакета разбором имени, а снимает тем же кодом, что reverse.
+    setupProjectFile();
+    unlinkSync(join(TEST_DIR, 'patches', 'ms@2.1.2.patch'));
+    writeFileSync(join(TEST_DIR, 'patches', 'ms+2.1.2.patch'), BUN_PATCH);
+    overwriteFile(join(TEST_DIR, 'index.js'), 'const patchedByBun = 2;\n');
+
+    const result = run('rebase ms 0', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('is not inside node_modules/');
+    expect(readFileSync(join(TEST_DIR, 'index.js'), 'utf-8')).toBe('const patchedByBun = 2;\n');
+  });
+
   test('create refuses a package bun already patches', () => {
     setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
     writeFileSync(

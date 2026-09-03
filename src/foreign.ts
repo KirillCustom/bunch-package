@@ -64,6 +64,17 @@ export function bunAlsoPatches(name: string): boolean {
 // не записан: и наш `create`, и patch-package пишут пути от корня проекта,
 // начиная с `node_modules/`. Всё остальное — не наше дело, и молча бить по
 // файлам проекта мы не станем.
+// Один и тот же текст у apply и у отката: расходиться в объяснении одного и
+// того же отказа — значит дважды объяснять его по-разному. Так же живёт
+// outsideProjectReason рядом со своей проверкой.
+export function foreignPatchReason(path: string): string {
+  return (
+    `${path} is not inside node_modules/ — this looks like a \`bun patch\` patch, whose paths ` +
+    `are relative to the package root. bun applies those itself; list it in patchedDependencies, ` +
+    `or recreate it with \`bunch-package create\`.`
+  );
+}
+
 export function firstPathOutsideNodeModules(targets: PatchTarget[]): string | undefined {
   // Путь, уходящий за пределы проекта, — другой разговор, и его ведёт
   // resolveInsideProject: там и диагноз точнее, и проверка старше этой.
