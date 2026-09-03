@@ -3,7 +3,7 @@ import {join} from 'path';
 import {lockFile, withApplyLock} from './lock';
 import {applyHunks} from './hunks';
 import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch-file';
-import {patchesAppliedByBun} from './foreign';
+import {firstPathOutsideNodeModules, foreignPatchReason, patchesAppliedByBun} from './foreign';
 import {patchesDirectory} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
 import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
@@ -138,6 +138,20 @@ function unApply(files: string[]): number {
     if ('error' in targets) {
       console.log(`  ❌ ${file}`);
       console.log(`     ${targets.error}`);
+      break;
+    }
+
+    // Патч не нашего формата: у `bun patch` пути от корня пакета, и, срезав
+    // `a/`, откат взялся бы за файлы самого проекта. Пока эта проверка стояла
+    // только в apply, так и было — измерено: чужой патч, не записанный в
+    // `patchedDependencies`, возвращал `index.js` проекта к дореверсной строке,
+    // и `reverse`, и `rebase` печатали при этом успех. Фильтр по манифесту в
+    // reverseAll прикрывает лишь тех, кто в манифесте записан, а имя файла не
+    // говорит о формате ничего: его переименовывают руками.
+    const foreign = firstPathOutsideNodeModules(targets);
+    if (foreign !== undefined) {
+      console.log(`  ❌ ${file}`);
+      console.log(`     ${foreignPatchReason(foreign)}`);
       break;
     }
 
