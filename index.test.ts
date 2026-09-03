@@ -2,7 +2,7 @@ import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from '
 import {execSync, spawn, spawnSync} from 'child_process';
 import {createHash} from 'crypto';
 import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
-import {findLinkDifferences, runDiff, scanTree} from './src/create';
+import {findLinkDifferences, runDiff, scanTree, withPristine} from './src/create';
 import {parseOptions} from './src/options';
 import {parseRepository} from './src/upstream';
 import {withApplyLock} from './src/lock';
@@ -90,10 +90,13 @@ function setupFakePackage(dir: string, name: string, version: string, files: Rec
   }
 }
 
+function removeTestDir() {
+  if (!existsSync(TEST_DIR)) return;
+  rmSync(TEST_DIR, {force: true, recursive: true});
+}
+
 function initTestDir() {
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, {force: true, recursive: true});
-  }
+  removeTestDir();
   mkdirSync(TEST_DIR, {recursive: true});
   writeFileSync(join(TEST_DIR, 'package.json'), JSON.stringify({name: 'test-project', version: '1.0.0'}));
 }
@@ -103,9 +106,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, {force: true, recursive: true});
-  }
+  removeTestDir();
 });
 
 describe('bunch-package create', () => {
@@ -180,6 +181,73 @@ rename to node_modules/ms/renamed.js
   // лежал внутри временного каталога, а тот убирается в finally. Измерено на
   // typescript@5.4.5 (31 МБ): 8–10 с на каждый create против 0,6 с, когда кеш
   // пережил прогон.
+  // Не на Windows: установщик здесь убивается нашим таймаутом, а его потомки
+  // переживают убийство и держат файлы временного каталога — система не отдаёт
+  // их и через секунду повторов, поэтому песочницу не может снести уже сама
+  // сюита, и падает не этот тест, а шесть следующих (измерено в CI дважды).
+  // Тот же класс отказа на Windows закрыт соседним тестом, который получает
+  // ответ реестра, ничего не обрывая.
+  test.skipIf(isWindows)('names why the pristine copy could not be fetched, instead of printing progress', () => {
+    // Первая строка чужого вывода — это ход работы, а не отказ: на недоступном
+    // реестре bun печатает `Resolving dependencies`, и раньше именно она уезжала
+    // в наш отчёт. Второй по частоте класс жалоб на patch-package — ровно такой
+    // невнятный отказ (NOT-24), и «говорить вслух» — заявленная сильная сторона.
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+
+    const result = run('create test-lib', TEST_DIR, {
+      BUN_CONFIG_REGISTRY: 'http://127.0.0.1:9/',
+      npm_config_registry: 'http://127.0.0.1:9/',
+      BUNCH_FETCH_TIMEOUT: '5',
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Could not fetch a pristine test-lib@1.0.0');
+    expect(result.stdout).toMatch(/bun: .*error/i);
+    expect(result.stdout).not.toContain('Resolving dependencies');
+  });
+
+  test('passes on what the registry said, for both ways of fetching', () => {
+    // Запасной путь через npm мы просили молчать флагом `--silent`, и он молчал
+    // ровно тогда, когда сказать было что: в отчёте оставалось «Command failed:
+    // npm pack …» — команда вместо причины. Здесь спрашивается пакет, которого
+    // в реестре нет, и обе строки отчёта обязаны нести ответ реестра.
+    setupFakePackage(TEST_DIR, 'bunch-package-no-such-thing-4f1c2a', '9.9.9', {'index.js': 'const a = 1;\n'});
+
+    const result = run('create bunch-package-no-such-thing-4f1c2a', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    // Строка обязана называть пакет, а не только код: `npm error code E404`
+    // человеку не говорит ни что искали, ни где.
+    expect(result.stdout).toMatch(/bun: .*bunch-package-no-such-thing-4f1c2a.*404/);
+    expect(result.stdout).toMatch(/npm: .*bunch-package-no-such-thing-4f1c2a/);
+    expect(result.stdout).not.toContain('Command failed');
+  });
+
+  test.skipIf(isWindows)('a failing cleanup does not swallow the reason', () => {
+    // Уборка временного каталога живёт в finally, и её собственный отказ
+    // перебивал причину, с которой всё началось. На Windows это поймал CI:
+    // установщик, убитый нашим таймаутом, ещё держал файлы, и человек вместо
+    // «Could not fetch a pristine …» получал «EBUSY: resource busy or locked».
+    //
+    // Здесь тот же сбой уборки строится правами: каталог, из которого удаляют,
+    // становится нередактируемым. На Windows прав в этом смысле нет, поэтому
+    // там за это отвечает сам сценарий с таймаутом.
+    const previous = process.cwd();
+    process.chdir(TEST_DIR);
+
+    try {
+      expect(() =>
+        withPristine('ms', '2.1.2', () => {
+          chmodSync(TEST_DIR, 0o555); // удалить временный каталог теперь нельзя
+          throw new Error('the reason we came here');
+        }),
+      ).toThrow('the reason we came here');
+    } finally {
+      chmodSync(TEST_DIR, 0o755);
+      process.chdir(previous);
+    }
+  });
+
   test('keeps its pristine cache outside the run', () => {
     const cache = join(TEST_DIR, 'pristine-cache');
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
