@@ -3,7 +3,7 @@ import {existsSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
 import {readManifest, requireDiff, validatePackageName, withPristine} from './create';
 import {bunAlsoPatches} from './foreign';
-import {listPatchFiles, orderPatchFiles, parsePatch, parsePatchName} from './patch-file';
+import {listPatchFiles, orderPatchFiles, parsePatch, parsePatchName, patchNameKey} from './patch-file';
 import {installedPackagePath, realPathOutsideProject} from './paths';
 import {replayPatches} from './sequence';
 
@@ -104,7 +104,7 @@ export function annotateFile(packageName: string, relativePath: string): void {
     throw new Error(`node_modules/${packageName}/${relativePath} does not exist`);
   }
 
-  const patchDir = packageName.includes('/node_modules/') ? packageName : name;
+  const patchDir = patchNameKey(packageName, name);
   const patches = orderPatchFiles(
     listPatchFiles().filter(file => {
       const parsed = parsePatchName(file);

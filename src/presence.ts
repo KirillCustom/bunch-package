@@ -37,6 +37,28 @@ export function readTargets(patchFile: string): PatchTarget[] | {error: string} 
   return targetsOf(content);
 }
 
+// Каталог пакета, в который ложится патч, — по путям внутри него самого. Это
+// единственный надёжный ответ: имя файла говорит лишь то, как патч назвали, а
+// у алиасной установки каталог и имя пакета расходятся. Спрашивают трое: rebase
+// и retarget — чтобы не сгрести в один набор патчи двух разных каталогов,
+// create — чтобы понять, свой ли файл он собирается переписать.
+export function patchTargetDirectory(patchFile: string): string | null {
+  const targets = readTargets(patchFile);
+  if ('error' in targets) return null;
+
+  for (const target of targets) {
+    const raw = target.newPath ?? target.oldPath;
+    if (raw === null) continue;
+
+    const directory = packageDirectoryOf(stripPathPrefix(raw));
+    // packageDirectoryOf отвечает путём от корня проекта: `node_modules/mynum`,
+    // а спрашивают про `mynum` — то самое, что стоит в имени файла патча.
+    if (directory !== null) return directory.slice('node_modules/'.length);
+  }
+
+  return null;
+}
+
 // Пустой план означает, что менять нечего, то есть изменения патча уже в дереве.
 // Операции возвращаются здесь же: apply всё равно собирается их исполнить, и
 // считать план дважды незачем.
