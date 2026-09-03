@@ -7,7 +7,7 @@ import {parseOptions} from './src/options';
 import {parseRepository} from './src/upstream';
 import {withApplyLock} from './src/lock';
 import {ensureDir} from './src/paths';
-import {invertTarget, parsePatch} from './src/patch-file';
+import {invertTarget, orderPatchFiles, parsePatch} from './src/patch-file';
 import {join} from 'path';
 
 // writeFileSync пишет в тот же inode, что ломает тесты при hardlink-кеше bun.
@@ -3099,6 +3099,31 @@ rename to node_modules/${PKG}/moved.js
     expect(once.newMode).toBe(parsed[0].oldMode);
     expect(once.renameTo).toBe(parsed[0].renameFrom);
     expect(once.hunks[0].lines).toEqual(['+before', '-after', ' kept']);
+  });
+});
+
+// Патчи последовательности строятся друг на друге, поэтому порядок обязан быть
+// одним и тем же при любом ответе readdirSync — ради этого функция и заведена.
+describe('the order patches are applied in', () => {
+  test('goes by sequence number', () => {
+    expect(orderPatchFiles(['pkg+1.0.0+010+j.patch', 'pkg+1.0.0+002+b.patch', 'pkg+1.0.0+001+a.patch']))
+      .toEqual(['pkg+1.0.0+001+a.patch', 'pkg+1.0.0+002+b.patch', 'pkg+1.0.0+010+j.patch']);
+  });
+
+  test('does not depend on the order the files come in, even at the same number', () => {
+    // Два патча с одним номером — вещь рукотворная, но имена и правят руками.
+    // Компаратор возвращал для них ноль, сортировка стабильна, и порядок
+    // оставался тем, в каком файлы отдал readdirSync: на одной машине один, на
+    // другой другой, а патчи ложатся друг на друга.
+    const files = ['pkg+1.0.0+001+bbb.patch', 'pkg+1.0.0+001+aaa.patch'];
+
+    expect(orderPatchFiles(files)).toEqual(orderPatchFiles([...files].reverse()));
+    expect(orderPatchFiles(files)).toEqual(['pkg+1.0.0+001+aaa.patch', 'pkg+1.0.0+001+bbb.patch']);
+  });
+
+  test('keeps patches of different packages apart by name', () => {
+    expect(orderPatchFiles(['zebra+1.0.0.patch', 'alpha+2.0.0+001+x.patch']))
+      .toEqual(['alpha+2.0.0+001+x.patch', 'zebra+1.0.0.patch']);
   });
 });
 
