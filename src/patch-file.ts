@@ -318,7 +318,13 @@ export function orderPatchFiles(files: string[]): string[] {
   return [...files].sort((a, b) => {
     const left = names.get(a) ?? null;
     const right = names.get(b) ?? null;
-    if (left && right && left.packageDir === right.packageDir && left.version === right.version) {
+    // Номера сравниваем, только когда они различаются: при равных `sequence`
+    // разность давала ноль, сортировка стабильна — и порядок оставался тем, в
+    // каком файлы отдал readdirSync. То есть ровно тем, от которого эта функция
+    // и заведена уходить. Два патча с одним номером — вещь рукотворная, но
+    // руками имена и правят.
+    if (left && right && left.packageDir === right.packageDir && left.version === right.version
+        && left.sequence !== right.sequence) {
       return left.sequence - right.sequence;
     }
     return a.localeCompare(b);
