@@ -311,9 +311,13 @@ export function listPatchFiles(): string[] {
 // порядок обязан быть детерминированным. readdirSync его не даёт: он вернул
 // файлы в порядке создания, а не по имени.
 export function orderPatchFiles(files: string[]): string[] {
+  // Имя разбирается один раз на файл: компаратор зовут O(n log n) раз, и разбор
+  // регулярками шёл столько же вместо числа самих файлов.
+  const names = new Map(files.map(file => [file, parsePatchName(file)]));
+
   return [...files].sort((a, b) => {
-    const left = parsePatchName(a);
-    const right = parsePatchName(b);
+    const left = names.get(a) ?? null;
+    const right = names.get(b) ?? null;
     if (left && right && left.packageDir === right.packageDir && left.version === right.version) {
       return left.sequence - right.sequence;
     }

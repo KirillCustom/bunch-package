@@ -134,7 +134,9 @@ export function appliedSequences(files: string[]): Set<string> {
     const parsed = parsePatchName(file);
     if (parsed === null || parsed.sequence === 0) continue;
     const key = `${parsed.packageDir}@${parsed.version}`;
-    groups.set(key, [...(groups.get(key) ?? []), file]);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [file]);
+    else group.push(file);
   }
 
   const applied = new Set<string>();

@@ -83,14 +83,20 @@ function readManifestJson(): any {
   }
 }
 
-// Добавляет запись в patchedDependencies и перезаписывает package.json.
-// Без этой записи bun при следующей установке патч не найдёт.
-function addToManifest(name: string, version: string, patchFile: string): void {
+// Добавляет записи в patchedDependencies и перезаписывает package.json.
+// Без них bun при следующей установке патч не найдёт.
+//
+// Все записи разом, а не по одной на патч: манифест иначе перечитывался,
+// сериализовался и переставлялся столько раз, сколько патчей экспортируется, —
+// и посреди экспорта в нём лежала бы половина списка.
+function addToManifest(entries: [string, string][]): void {
   const manifest = readManifestJson();
   if (typeof manifest.patchedDependencies !== 'object' || manifest.patchedDependencies === null) {
     manifest.patchedDependencies = {};
   }
-  manifest.patchedDependencies[`${name}@${version}`] = manifestPath(patchFile);
+  for (const [spec, patchFile] of entries) {
+    manifest.patchedDependencies[spec] = manifestPath(patchFile);
+  }
 
   const temp = `package.json.bunch-export-${process.pid}`;
   try {
@@ -138,6 +144,7 @@ export function exportPatches(packageNames: string[]): void {
 
   let exported = 0;
   let refused = 0;
+  const entries: [string, string][] = [];
 
   for (const [, files] of byPackage) {
     const parsed = parsePatchName(files[0])!;
@@ -173,11 +180,13 @@ export function exportPatches(packageNames: string[]): void {
     writeFileSync(join(patchesDirectory(), target), rewritten);
     if (target !== file) rmSync(join(patchesDirectory(), file), {force: true});
 
-    addToManifest(parsed.packageDir, parsed.version, target);
+    entries.push([`${parsed.packageDir}@${parsed.version}`, target]);
 
     console.log(`  ✅ ${file} → ${target}`);
     exported++;
   }
+
+  if (entries.length > 0) addToManifest(entries);
 
   if (exported === 0) {
     if (refused > 0) console.log(`\n❌ All patches refused — see reasons above`);

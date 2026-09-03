@@ -73,7 +73,11 @@ export function rebasePatches(packageName: string, target: string): void {
 // `--reverse`, и повод тот же: вернуть node_modules к тому, что поставил
 // установщик, не переустанавливая их.
 export function reverseAll(): void {
-  const all = listPatchFiles().filter(file => !patchesAppliedByBun().has(file));
+  // Список читается один раз: внутри он разбирает манифест — а в монорепо ещё
+  // и корневой, — и спрошенный на каждый файл он перечитывал бы их столько раз,
+  // сколько в проекте патчей. Так же он вынесен в apply и в status.
+  const byBun = patchesAppliedByBun();
+  const all = listPatchFiles().filter(file => !byBun.has(file));
 
   if (all.length === 0) {
     console.log('📭 No patches to un-apply');

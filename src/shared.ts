@@ -38,7 +38,23 @@ function bodyHash(path: string): string | null {
 // Патчи одного пакета в заданном каталоге патчей, по порядку последовательности.
 // Сравнивать надо весь набор: у соседа патчей может быть больше, и тогда его
 // дерево всё равно не то, даже если первые совпадают.
+// Спрашивают это на каждый патч прогона — и про свой каталог, и про каталог
+// каждого соседа, — а ответ за прогон не меняется: файлы патчей никто по ходу
+// не переписывает. Без памяти каждый патч стоил readdir и sha256 всех патчей
+// своего пакета, помноженных на число воркспейсов.
+const patchesCache = new Map<string, {file: string; hash: string | null}[]>();
+
 function patchesForPackage(patchesDir: string, packageDir: string): {file: string; hash: string | null}[] {
+  const key = `${patchesDir}\u0000${packageDir}`;
+  const remembered = patchesCache.get(key);
+  if (remembered !== undefined) return remembered;
+
+  const found = collectPatchesFor(patchesDir, packageDir);
+  patchesCache.set(key, found);
+  return found;
+}
+
+function collectPatchesFor(patchesDir: string, packageDir: string): {file: string; hash: string | null}[] {
   let files: string[];
   try {
     files = readdirSync(patchesDir).filter(file => file.endsWith('.patch'));
