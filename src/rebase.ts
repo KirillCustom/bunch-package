@@ -1,10 +1,10 @@
-import {existsSync, readFileSync, readdirSync} from 'fs';
+import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 import {lockFile, withApplyLock} from './lock';
 import {applyHunks} from './hunks';
 import {invertTarget, listPatchFiles, parsePatchName, PatchTarget} from './patch-file';
 import {firstPathOutsideNodeModules, foreignPatchReason, patchesAppliedByBun} from './foreign';
-import {installedPackagePath, patchesDirectory} from './paths';
+import {installedPackagePath, packageDirectoryOf, patchesDirectory, stripPathPrefix} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
 import {outsideProjectReason, packagesOutsideProject, presenceOf, readTargets} from './presence';
 import {recordPatches, recordedPatches} from './state';
@@ -26,27 +26,42 @@ export function rebasePatches(packageName: string, target: string): void {
   // Разрешаем имя: аргумент может быть каталогом на диске (алиас) или именем из
   // манифеста. Тот же приём, что в retarget: смотрим на каталог, читаем manifest.
   //
-  // dirName — что существует в node_modules, для подсказок и edit.
-  // patchDir — ключ в имени файла патча, берётся из manifest.name.
+  // patchDir — ключ в имени файла патча (из manifest.name или сам аргумент).
+  // dirName — каталог, который фактически редактируется: берётся из путей патча
+  //           (строки `--- a/node_modules/<каталог>/...`), а не из manifest.name.
   const packagePath = installedPackagePath(packageName);
-  let dirName: string;
   let patchDir: string;
+  let manifestFailed = false;
 
   if (existsSync(packagePath)) {
     // Аргумент — каталог на диске (возможно алиас, как `mynum` для `is-number`).
-    const {name} = readManifest(packagePath);
+    let manifestName: string | null = null;
+    try {
+      manifestName = readManifest(packagePath).name;
+    } catch {
+      // Битый манифест — не роняем весь откат. Говорим, какой файл не читается,
+      // и ищем патчи через пути внутри самих патч-файлов (см. ниже).
+      console.log(`⚠️  Cannot read ${join(packagePath, 'package.json')} — falling back to path-based patch search`);
+      manifestFailed = true;
+    }
     // Вложенная зависимость названа путём — `outer/node_modules/inner`.
-    patchDir = packageName.includes('/node_modules/') ? packageName : name;
-    dirName = packageName;
+    patchDir = manifestName !== null && !packageName.includes('/node_modules/')
+      ? manifestName
+      : packageName;
   } else {
-    // Аргумент похож на имя манифеста: каталога с таким именем нет. Ищем, под
-    // каким алиасом этот пакет на самом деле установлен — для корректных подсказок.
+    // Аргумент — имя манифеста: каталога с таким именем нет на диске.
     patchDir = packageName;
-    dirName = findDirectoryByManifestName(packageName) ?? packageName;
   }
 
   const all = listPatchFiles();
-  const mine = all.filter(file => parsePatchName(file)?.packageDir === patchDir);
+  let mine = all.filter(file => parsePatchName(file)?.packageDir === patchDir);
+
+  // Когда манифест недоступен и прямой поиск ничего не нашёл, пробуем по путям
+  // внутри самих патчей. create записывает туда имя каталога на диске (`mynum`),
+  // поэтому патч найдётся даже когда manifest.name прочитать не удалось.
+  if (mine.length === 0 && manifestFailed) {
+    mine = all.filter(file => dirNameFromPatch(file) === packageName);
+  }
 
   if (mine.length === 0) {
     throw new Error(`No patches found for ${packageName} in ${patchesDirectory()}/`);
@@ -54,6 +69,12 @@ export function rebasePatches(packageName: string, target: string): void {
 
   const keep = resolveTarget(mine, target, packageName);
   const undo = mine.slice(keep).reverse(); // снимаем сверху вниз
+
+  // dirName берётся из путей первого патча — то, что create записал туда при создании.
+  // При алиасной установке это имя каталога (`mynum`), а не имя манифеста (`is-number`).
+  // Это точнее, чем искать по manifest.name: при двух установках одного пакета
+  // сканирование давало неверный каталог.
+  const dirName = dirNameFromPatch(mine[0]) ?? packageName;
 
   console.log(`🔧 Rebasing ${dirName} onto ${keep === 0 ? 'nothing' : mine[keep - 1]}...`);
 
@@ -93,51 +114,22 @@ export function rebasePatches(packageName: string, target: string): void {
   for (const [command, purpose] of next) console.log(`  ${command.padEnd(width)}${purpose}`);
 }
 
-// Ищем каталог в node_modules, чей manifest.name совпадает с именем из патча.
-// Нужен, когда аргументом передали имя манифеста, а пакет установлен под алиасом:
-// `rebase is-number 0` при `mynum@npm:is-number` → возвращает `mynum`.
-//
-// Для вложенных зависимостей этот путь недостижим: они всегда именуются путём
-// (`outer/node_modules/inner`), который существует на диске, и попадают в ветку
-// existsSync выше. Поэтому ищем только на верхнем уровне node_modules.
-function findDirectoryByManifestName(manifestName: string): string | null {
-  const nmPath = join(process.cwd(), 'node_modules');
-  if (!existsSync(nmPath)) return null;
+// Каталог пакета из первого файла патча — то место, куда патч фактически кладётся.
+// Точнее, чем искать по manifest.name: при двух установках одного пакета
+// (is-number@7.0.0 + mynum@npm:is-number@7.0.0) поиск по имени давал первый
+// попавшийся каталог, а путь в патче записан явно.
+function dirNameFromPatch(patchFile: string): string | null {
+  const targets = readTargets(patchFile);
+  if ('error' in targets) return null;
 
-  let entries;
-  try {
-    entries = readdirSync(nmPath, {withFileTypes: true});
-  } catch {
-    return null;
-  }
-
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const dir = entry.name;
-
-    if (dir.startsWith('@')) {
-      // Скоуп (@scope/pkg): заходим на уровень глубже.
-      const scopePath = join(nmPath, dir);
-      let scopeEntries;
-      try {
-        scopeEntries = readdirSync(scopePath, {withFileTypes: true});
-      } catch {
-        continue;
-      }
-      for (const sub of scopeEntries) {
-        if (!sub.isDirectory()) continue;
-        const subDir = `${dir}/${sub.name}`;
-        try {
-          const {name} = readManifest(join(nmPath, subDir));
-          if (name === manifestName) return subDir;
-        } catch {}
-      }
-    } else {
-      try {
-        const {name} = readManifest(join(nmPath, dir));
-        if (name === manifestName) return dir;
-      } catch {}
-    }
+  for (const t of targets) {
+    const path = t.newPath ?? t.oldPath;
+    if (path === null) continue;
+    const dir = packageDirectoryOf(stripPathPrefix(path));
+    if (dir === null) continue;
+    // packageDirectoryOf возвращает 'node_modules/mynum' — нам нужен 'mynum'.
+    const PREFIX = 'node_modules/';
+    if (dir.startsWith(PREFIX)) return dir.slice(PREFIX.length);
   }
 
   return null;

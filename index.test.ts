@@ -3571,6 +3571,22 @@ rename to node_modules/${PKG}/moved.js
       expect(result.stdout).toContain(`node_modules/${ALIAS}`);
       expect(result.stdout).toContain(`create ${ALIAS} --append`);
     });
+
+    test('broken package.json does not crash rebase — warns and still rolls back', () => {
+      // До правки: rebase читал манифест без try/catch и ронял весь откат
+      // голым SyntaxError'ом. После: предупреждает и ищет патч через пути
+      // внутри патч-файла, чтобы не бросать пользователя на полпути.
+      setupAlias();
+      overwriteFile(join(TEST_DIR, 'node_modules', ALIAS, 'package.json'), '{ not json');
+
+      const result = run(`rebase ${ALIAS} 0`, TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('Cannot read');
+      expect(readFileSync(join(TEST_DIR, 'node_modules', ALIAS, 'index.js'), 'utf-8')).not.toContain(
+        'ALIAS PATCH',
+      );
+    });
   });
 });
 
