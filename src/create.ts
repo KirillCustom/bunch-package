@@ -265,8 +265,19 @@ export function requireDiff(): void {
 // Функция была потеряна при одном из рефакторингов, и запасной путь через npm
 // из-за этого падал с ReferenceError вместо того, чтобы отработать.
 function firstDiagnosticLine(error: any): string {
-  const streams = nonEmptyLines(`${error.stderr?.toString() ?? ''}\n${error.stdout?.toString() ?? ''}`);
-  return streams[0] ?? (error.message ? String(error.message).split('\n')[0].trim() : '');
+  const lines = nonEmptyLines(`${error.stderr?.toString() ?? ''}\n${error.stdout?.toString() ?? ''}`);
+
+  // Первая строка вывода — обычно не ошибка, а ход работы. Измерено: на пакете,
+  // которого нет в реестре, bun печатает `Resolving dependencies`, а причину —
+  // `error: GET https://registry.npmjs.org/<пакет> - 404` — четвёртой строкой,
+  // и в отчёт уезжал прогресс. Поэтому сперва ищем строку, которой чужой
+  // инструмент называет отказ.
+  //
+  // `npm error code E404` при этом пропускаем: следующая строка та же по смыслу,
+  // но с именем пакета и адресом, а код без них человеку ничего не говорит.
+  const named = lines.find(line => /\berror\b|ERR!/i.test(line) && !/^npm error code \S+$/i.test(line));
+
+  return named ?? lines[0] ?? (error.message ? String(error.message).split('\n')[0].trim() : '');
 }
 
 // Чужой вывод разбирают четверо — bun, npm, tar и diff, — и всем нужно одно:
@@ -383,10 +394,18 @@ function fetchPristine(name: string, version: string, tempDir: string): string {
   // Запасной путь — тарбол из реестра. Он тоже мимо кеша bun, но требует npm,
   // которого нет, например, в официальном образе oven/bun.
   try {
-    const packed = execFileSync('npm', ['pack', '--silent', '--pack-destination', tempDir, `${name}@${version}`], {
+    // Без `--silent`: он глушит `npm error 404 ... could not be found`, и в
+    // отчёте оставалась строка «Command failed: npm pack …» — то есть команда
+    // вместо причины. На stdout это не влияет, там по-прежнему одно имя
+    // тарбола: весь остальной вывод npm пишет в stderr (проверено на ms@2.1.2).
+    const packed = execFileSync('npm', ['pack', '--pack-destination', tempDir, `${name}@${version}`], {
       cwd: tempDir,
       encoding: 'utf-8',
       timeout,
+      // Оба потока забираем себе: без `--silent` npm пишет в stderr и ход
+      // работы, и «A complete log of this run can be found in …», а печатать это
+      // человеку вместо нашего отчёта — тот же шум, от которого мы уходим.
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     const printed = nonEmptyLines(packed).pop();
     if (!printed) throw new Error('npm pack printed no tarball name');

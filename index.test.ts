@@ -180,6 +180,42 @@ rename to node_modules/ms/renamed.js
   // лежал внутри временного каталога, а тот убирается в finally. Измерено на
   // typescript@5.4.5 (31 МБ): 8–10 с на каждый create против 0,6 с, когда кеш
   // пережил прогон.
+  test('names why the pristine copy could not be fetched, instead of printing progress', () => {
+    // Первая строка чужого вывода — это ход работы, а не отказ: на недоступном
+    // реестре bun печатает `Resolving dependencies`, и раньше именно она уезжала
+    // в наш отчёт. Второй по частоте класс жалоб на patch-package — ровно такой
+    // невнятный отказ (NOT-24), и «говорить вслух» — заявленная сильная сторона.
+    setupFakePackage(TEST_DIR, 'test-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+
+    const result = run('create test-lib', TEST_DIR, {
+      BUN_CONFIG_REGISTRY: 'http://127.0.0.1:9/',
+      npm_config_registry: 'http://127.0.0.1:9/',
+      BUNCH_FETCH_TIMEOUT: '5',
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('Could not fetch a pristine test-lib@1.0.0');
+    expect(result.stdout).toMatch(/bun: .*error/i);
+    expect(result.stdout).not.toContain('Resolving dependencies');
+  });
+
+  test('passes on what the registry said, for both ways of fetching', () => {
+    // Запасной путь через npm мы просили молчать флагом `--silent`, и он молчал
+    // ровно тогда, когда сказать было что: в отчёте оставалось «Command failed:
+    // npm pack …» — команда вместо причины. Здесь спрашивается пакет, которого
+    // в реестре нет, и обе строки отчёта обязаны нести ответ реестра.
+    setupFakePackage(TEST_DIR, 'bunch-package-no-such-thing-4f1c2a', '9.9.9', {'index.js': 'const a = 1;\n'});
+
+    const result = run('create bunch-package-no-such-thing-4f1c2a', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    // Строка обязана называть пакет, а не только код: `npm error code E404`
+    // человеку не говорит ни что искали, ни где.
+    expect(result.stdout).toMatch(/bun: .*bunch-package-no-such-thing-4f1c2a.*404/);
+    expect(result.stdout).toMatch(/npm: .*bunch-package-no-such-thing-4f1c2a/);
+    expect(result.stdout).not.toContain('Command failed');
+  });
+
   test('keeps its pristine cache outside the run', () => {
     const cache = join(TEST_DIR, 'pristine-cache');
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
