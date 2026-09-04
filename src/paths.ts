@@ -1,6 +1,6 @@
 import {chmodSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync} from 'fs';
 import {dirname, join, resolve, sep} from 'path';
-import {hostOfPatchPath, projectRoot, workspaceRoot} from './workspace';
+import {hostOfPatchPath, projectRoot} from './workspace';
 
 // Каталог патчей по умолчанию тот же, что у patch-package, — патчи ходят между
 // инструментами. Монорепозиторию этого мало: воркспейсам нужен свой каталог на
@@ -166,21 +166,32 @@ export function withExecutable(mode: number, executable: boolean): number {
   return executable ? mode | EXECUTABLE : mode & ~EXECUTABLE;
 }
 
-// Пишем рядом и переставляем поверх. rename в пределах каталога атомарен:
-// снаружи файл виден либо старым целиком, либо новым целиком, и убитый посреди
 // Ищем пакет в node_modules родительских каталогов — только для подсказки в
-// сообщении об ошибке. Монорепо сюда не попадает: там hostOfPatchPath уже ищет
-// вверх до корня воркспейсов. Начинаем с parent(cwd), потому что cwd мы уже
+// сообщении об ошибке. Начинаем с parent(cwd), потому что cwd мы уже
 // проверили и ничего не нашли.
+//
+// Без своего package.json у cwd подъём не начинаем: иначе подсказка ведёт в
+// случайно расположенного предка. Измерено на .probe-tmp внутри самого
+// bunch-package — пробный каталог без манифеста, запущенный из него `create
+// typescript` предлагал патчить node_modules самого bunch-package только
+// потому, что там нашёлся node_modules/typescript, хотя .probe-tmp к этому
+// проекту отношения не имеет.
 function findPackageAbove(packageName: string): string | null {
-  // В монорепо пакет поднятый к корню уже найден через hostOfPatchPath.
-  // Искать выше корня воркспейсов было бы ложной подсказкой.
-  if (workspaceRoot() !== null) return null;
+  const cwd = resolve(process.cwd());
+  if (!existsSync(join(cwd, 'package.json'))) return null;
 
   const parts = packageName.split('/');
-  let at = dirname(resolve(process.cwd()));
+  let at = dirname(cwd);
   for (;;) {
-    if (existsSync(join(at, 'node_modules', ...parts))) return at;
+    // Первый предок со своим package.json — граница проекта, дальше неё не
+    // поднимаемся. В монорепо это корень воркспейсов: манифест там обязателен,
+    // чтобы объявить `workspaces`, поэтому отдельная проверка workspaceRoot()
+    // здесь не нужна — снятие этой границы ловится мутацией на пакете,
+    // установленном выше корня воркспейсов. За границей — уже другое дерево,
+    // к которому cwd отношения не имеет.
+    if (existsSync(join(at, 'package.json'))) {
+      return existsSync(join(at, 'node_modules', ...parts)) ? at : null;
+    }
     const up = dirname(at);
     if (up === at) return null;
     at = up;
@@ -201,6 +212,8 @@ export function packageNotFoundError(packageName: string): Error {
   return new Error(`Package ${packageName} not found in node_modules`);
 }
 
+// Пишем рядом и переставляем поверх. rename в пределах каталога атомарен:
+// снаружи файл виден либо старым целиком, либо новым целиком, и убитый посреди
 // работы процесс не оставляет ни обрезка, ни дыры на его месте. Заодно это
 // разрывает hardlink на общий кеш bun — у временного файла свой инод.
 export function atomicWrite(file: string, content: string | Uint8Array, mode: number | null = null): void {
