@@ -122,6 +122,11 @@ always enough — raise it with `BUNCH_FETCH_TIMEOUT`, in seconds:
 BUNCH_FETCH_TIMEOUT=300 bunx bunch-package create some-enormous-package
 ```
 
+Packages installed from a local path rather than the registry — `file:`, `link:`,
+`workspace:`, a git URL, or a `.tgz` file — cannot be patched this way: there is no
+pristine copy to fetch from the registry. `create` detects the specifier in
+`package.json` and says so before attempting any network request.
+
 The pristine copy is kept in a cache of its own — `~/.cache/bunch-package/pristine`
 (`%LOCALAPPDATA%\bunch-package\pristine` on Windows), moved elsewhere with
 `BUNCH_PRISTINE_CACHE`. It is separate from bun's own cache on purpose: bun links

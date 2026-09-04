@@ -497,6 +497,172 @@ rename to node_modules/ms/renamed.js
     expect(result.stdout).toContain('Lines:');
     expect(result.stdout).toContain('Size:');
   });
+
+  test('refuses to create a patch for a package installed from a local tarball', () => {
+    // Воспроизводит: bun add ./vendor/localpkg-1.0.0.tgz записывает спецификатор
+    // в package.json. Вместо npm pack + bun add пишем манифест напрямую — детектор
+    // читает именно его, а не lockfile или метаданные установщика.
+    setupFakePackage(TEST_DIR, 'localpkg', '1.0.0', {'index.js': 'const a = 1;\n'});
+    // Что bun add ./vendor/localpkg-1.0.0.tgz записал бы в package.json:
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({
+        name: 'test-project',
+        version: '1.0.0',
+        dependencies: {'localpkg': './vendor/localpkg-1.0.0.tgz'},
+      }),
+    );
+    overwriteFile(join(TEST_DIR, 'node_modules', 'localpkg', 'index.js'), 'const a = 1;\n// patched\n');
+
+    const result = run('create localpkg', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    // Три вещи в отказе: что пакет — не из реестра, каким спецификатором, что патч создать нельзя.
+    expect(result.stdout).toContain('localpkg');
+    expect(result.stdout).toContain('non-registry specifier');
+    expect(result.stdout).toContain('./vendor/localpkg-1.0.0.tgz');
+    expect(result.stdout).toContain('cannot be created');
+    // До правки отказ ссылался на реестр («404»); теперь туда не ходим вовсе.
+    expect(result.stdout).not.toContain('Fetching pristine');
+  });
+
+  test('refuses to create a patch for a package installed with file: specifier', () => {
+    setupFakePackage(TEST_DIR, 'localpkg', '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({
+        name: 'test-project',
+        version: '1.0.0',
+        dependencies: {'localpkg': 'file:../localpkg'},
+      }),
+    );
+
+    const result = run('create localpkg', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('non-registry specifier');
+    expect(result.stdout).toContain('file:../localpkg');
+    expect(result.stdout).not.toContain('Fetching pristine');
+  });
+
+  test('refuses to create a patch for a package installed from a relative directory path', () => {
+    // `"localpkg": "./local/pkg"` — путь к каталогу без протокола `file:`. bun
+    // пишет именно такую запись для некоторых спецификаторов. Тест проверяет
+    // ветку ./  отдельно от .tgz, иначе мутация «убрать ./» остаётся незамеченной.
+    setupFakePackage(TEST_DIR, 'localpkg', '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({
+        name: 'test-project',
+        version: '1.0.0',
+        dependencies: {'localpkg': './local/localpkg'},
+      }),
+    );
+
+    const result = run('create localpkg', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('non-registry specifier');
+    expect(result.stdout).toContain('./local/localpkg');
+    expect(result.stdout).not.toContain('Fetching pristine');
+  });
+
+  test('refuses to create a patch for a package installed from an http tgz url', () => {
+    // Спецификатор без ./ и без file: — только .tgz в конце URL. Это тест именно
+    // ветки «заканчивается .tgz»: без него мутация «убрать .tgz-проверку» выживает.
+    setupFakePackage(TEST_DIR, 'localpkg', '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({
+        name: 'test-project',
+        version: '1.0.0',
+        dependencies: {'localpkg': 'https://example.com/localpkg-1.0.0.tgz'},
+      }),
+    );
+
+    const result = run('create localpkg', TEST_DIR);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('non-registry specifier');
+    expect(result.stdout).toContain('https://example.com/localpkg-1.0.0.tgz');
+    expect(result.stdout).not.toContain('Fetching pristine');
+  });
+
+  test('does not refuse a transitive dependency with the same name absent from the manifest', () => {
+    // Если пакет транзитивный (не объявлен в dependencies явно), create должен
+    // идти в реестр как раньше. Нельзя отказывать, не зная спецификатора.
+    setupFakePackage(TEST_DIR, 'localpkg', '1.0.0', {'index.js': 'const a = 1;\n'});
+    // package.json без объявления localpkg — он транзитивный.
+    writeFileSync(
+      join(TEST_DIR, 'package.json'),
+      JSON.stringify({name: 'test-project', version: '1.0.0'}),
+    );
+
+    const result = run('create localpkg', TEST_DIR);
+
+    // Отказывает — но из-за реестра, а не из-за спецификатора. До правки и после
+    // поведение одинаковое: тест проверяет, что новая проверка не задела этот путь.
+    expect(result.stdout).not.toContain('non-registry specifier');
+    expect(result.stdout).toContain('Could not fetch a pristine');
+  });
+
+  test('does not refuse when project manifest is corrupt JSON', () => {
+    // Битый манифест — проблема проекта, а не нашего инструмента. Молча пропускаем
+    // и ведём себя как раньше: идём в реестр за эталоном.
+    setupFakePackage(TEST_DIR, 'localpkg', '1.0.0', {'index.js': 'const a = 1;\n'});
+    writeFileSync(join(TEST_DIR, 'package.json'), '{ invalid json :::');
+
+    const result = run('create localpkg', TEST_DIR);
+
+    expect(result.stdout).not.toContain('non-registry specifier');
+    expect(result.stdout).toContain('Could not fetch a pristine');
+  });
+
+  test('does not refuse when sibling workspace declares the same package as non-registry', () => {
+    // Регрессия: раньше nonRegistrySpecifier перебирал всех соседей в монорепо.
+    // Воркспейс packages/a объявляет registrypkg нереестровым, packages/b — реестровым.
+    // `create registrypkg` из packages/b должен идти в реестр, а не отказывать,
+    // ссылаясь на чужой спецификатор из пакета a.
+    const monoRoot = TEST_DIR;
+    // Корневой манифест с воркспейсами
+    writeFileSync(
+      join(monoRoot, 'package.json'),
+      JSON.stringify({name: 'mono', private: true, workspaces: ['packages/*']}),
+    );
+
+    // packages/a — нереестровый спецификатор для registrypkg (тот же пакет)
+    const pkgA = join(monoRoot, 'packages', 'a');
+    mkdirSync(pkgA, {recursive: true});
+    writeFileSync(
+      join(pkgA, 'package.json'),
+      JSON.stringify({
+        name: '@mono/a',
+        version: '1.0.0',
+        dependencies: {'registrypkg': '../../vendor/registrypkg-9.9.9.tgz'},
+      }),
+    );
+
+    // packages/b — реестровый спецификатор (1.0.0)
+    const pkgB = join(monoRoot, 'packages', 'b');
+    mkdirSync(pkgB, {recursive: true});
+    writeFileSync(
+      join(pkgB, 'package.json'),
+      JSON.stringify({name: '@mono/b', version: '1.0.0', dependencies: {'registrypkg': '1.0.0'}}),
+    );
+
+    // Пакет лежит в node_modules воркспейса b
+    setupFakePackage(pkgB, 'registrypkg', '1.0.0', {
+      'index.js': "module.exports = 1;\n",
+    });
+
+    // Из packages/b: спецификатор b — реестровый, должны идти в реестр как обычно.
+    const result = run('create registrypkg', pkgB);
+
+    // Не должен ссылаться на нереестровый спецификатор от соседа a
+    expect(result.stdout).not.toContain('non-registry specifier');
+    // Пакет не существует в реестре — ожидаемый отказ реестра (не наш)
+    expect(result.stdout).toContain('Could not fetch a pristine');
+  });
 });
 
 describe('bunch-package apply', () => {
