@@ -28,7 +28,7 @@ export function retargetPatches(packageName: string): void {
 
   const {name, version} = readManifest(packagePath);
 
-  // Патчи названы по каталогу, в который ложатся; у файлов, созданных до 1.18.0,
+  // Патчи названы по каталогу, в который ложатся; у файлов, созданных до 1.17.0,
   // в имени стоит manifest.name — понимаем оба (см. patchNameKey).
   const patchDir = patchNameKey(packageName, name);
   // Один manifest.name бывает у двух каталогов сразу — пакет ставят и напрямую,

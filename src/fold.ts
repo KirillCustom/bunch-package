@@ -76,7 +76,7 @@ export function foldPatches(packageName: string): void {
   }
 
   // Имя патча говорит, куда он ложится: это каталог в node_modules. Файлы,
-  // созданные до 1.18.0, названы по манифесту — их имя тоже понимаем.
+  // созданные до 1.17.0, названы по манифесту — их имя тоже понимаем.
   const patchDir = patchNameKey(packageName, name);
 
   const sequenced = listPatchFiles().filter(file => {

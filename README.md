@@ -721,7 +721,7 @@ side by side. Both would share one manifest name, so a name taken from the manif
 would put two different patches in one file, and whichever was written second would
 silently replace the first.
 
-Patches created before 1.18.0 carry the manifest name (`is-number+7.0.0.patch`).
+Patches created before 1.17.0 carry the manifest name (`is-number+7.0.0.patch`).
 They are still read, and the next `create` for that package moves the file onto the
 directory name and says so. A patch that belongs to a neighbouring directory is
 never moved or overwritten. `rebase` also accepts the manifest name as its argument

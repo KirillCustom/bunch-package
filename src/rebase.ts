@@ -24,7 +24,7 @@ export function rebasePatches(packageName: string, target: string): void {
   }
 
   // Аргумент — это каталог в node_modules; им же назван файл патча. Файлы,
-  // созданные до 1.18.0, названы по manifest.name — их имя тоже понимаем, см.
+  // созданные до 1.17.0, названы по manifest.name — их имя тоже понимаем, см.
   // patchNameKey. Имя из манифеста как аргумент тоже принимается: каталога с
   // таким именем нет, и тогда ключом становится сам аргумент.
   const packagePath = installedPackagePath(packageName);
