@@ -163,19 +163,43 @@ export function recordedPatches(state: State | null = readState()): Map<string, 
 // его версия, — и если бы запись при этом стёрлась вместе с ним, следующий
 // `apply` уже ничего не знал бы и положил патч поверх. Отказ работал бы ровно
 // один раз, а `bun install` зовут не по одному разу.
-export function recordPatches(inTree: string[], keepAsRecorded: string[] = []): void {
+//
+// `forget` — файлы, которые мы удалили сами и знаем, что их изменения не
+// потеряны: так делает `fold`, схлопывая последовательность. Для всех прочих
+// исчезнувших файлов запись сохраняется, потому что она — единственное, что
+// помнит про оставшиеся в дереве правки.
+export interface RecordOptions {
+  keepAsRecorded?: string[];
+  forget?: string[];
+}
+
+export function recordPatches(inTree: string[], {keepAsRecorded = [], forget = []}: RecordOptions = {}): void {
   const previous = recordedPatches();
   const now = new Date().toISOString();
 
-  const patches: RecordedPatch[] = inTree.map(file => {
+  const patches: RecordedPatch[] = [];
+
+  for (const file of inTree) {
+    const before = previous.get(file);
+
+    let raw: Buffer;
+    try {
+      raw = readFileSync(join(patchesDirectory(), file));
+    } catch {
+      // Файла патча больше нет. Пересчитать запись не из чего, но и уронить
+      // прогон нельзя: `rebase` и `reverse` зовут запись **после** того, как
+      // дерево уже изменено, и падение здесь означало бы «работа сделана, а
+      // команда отчиталась отказом» — стек вместо отчёта (TSK-45).
+      if (before !== undefined) patches.push(before);
+      continue;
+    }
+
     const parsed = parsePatchName(file);
-    const raw = readFileSync(join(patchesDirectory(), file));
     const content = raw.toString('utf-8');
     const sha256 = hashPatchFile(raw);
     const bodySha256 = hashPatchBody(content);
-    const before = previous.get(file);
 
-    return {
+    patches.push({
       file,
       packageDir: parsed?.packageDir ?? '',
       version: parsed?.version ?? '',
@@ -185,8 +209,8 @@ export function recordPatches(inTree: string[], keepAsRecorded: string[] = []): 
       // Время первого попадания в дерево переживает правку заголовка: дерево от
       // неё не изменилось, значит и «применён тогда-то» остаётся верным.
       appliedAt: before !== undefined && sameChange(before, sha256, bodySha256) ? before.appliedAt : now,
-    };
-  });
+    });
+  }
 
   // Пересчитывать их нельзя: файл патча уже другой, и пересчёт записал бы его
   // хеш вместе с хешами файлов, которых этот патч в дерево не клал, — то есть
@@ -194,6 +218,17 @@ export function recordPatches(inTree: string[], keepAsRecorded: string[] = []): 
   for (const file of keepAsRecorded) {
     const before = previous.get(file);
     if (before !== undefined && !inTree.includes(file)) patches.push(before);
+  }
+
+  // Записи о патчах, чьих файлов в patches/ больше нет, переживают перезапись.
+  // Это единственное, что помнит: их изменения, скорее всего, так и лежат в
+  // node_modules, — и ровно об этом говорит `status`. Пока запись собиралась из
+  // одних лишь существующих файлов, предупреждение исчезало после первого же
+  // `bun install`, а правки удалённого патча оставались в дереве молча (TSK-45).
+  for (const [file, before] of previous) {
+    if (patches.some(patch => patch.file === file) || forget.includes(file)) continue;
+    if (existsSync(join(patchesDirectory(), file))) continue;
+    patches.push(before);
   }
 
   try {

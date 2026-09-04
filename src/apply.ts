@@ -318,7 +318,7 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
     console.log(`  ✅ ${patchFile}`);
   }
 
-  recordPatches(inTree, keepRecord);
+  recordPatches(inTree, {keepAsRecorded: keepRecord});
 
   console.log(`\n📊 Summary: ${inTree.length} applied, ${failed} failed`);
 

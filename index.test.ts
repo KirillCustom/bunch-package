@@ -2854,6 +2854,74 @@ describe('state file and status', () => {
     expect(result.exitCode).toBe(0);
   });
 
+  // Файл патча удалили или переименовали, а запись о нём осталась: она —
+  // единственное, что помнит, что его изменения так и лежат в node_modules.
+  // Пока запись собиралась из одних существующих файлов, `rebase` и `reverse`
+  // падали на ней ENOENT уже после отката, а `apply` стирал её молча (TSK-45).
+  describe('when a recorded patch file is gone', () => {
+    function setupTwoPatched() {
+      for (const name of ['pkg-a', 'pkg-b']) {
+        setupFakePackage(TEST_DIR, name, '1.0.0', {'index.js': 'const x = 1;\n'});
+        mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+        writeFileSync(
+          join(TEST_DIR, 'patches', `${name}+1.0.0.patch`),
+          `--- a/node_modules/${name}/index.js
++++ b/node_modules/${name}/index.js
+@@ -1 +1 @@
+-const x = 1;
++const x = 2;
+`,
+        );
+      }
+      expect(run('apply', TEST_DIR).exitCode).toBe(0);
+      rmSync(join(TEST_DIR, 'patches', 'pkg-b+1.0.0.patch'), {force: true});
+    }
+
+    const recorded = () =>
+      JSON.parse(readFileSync(join(TEST_DIR, 'node_modules', '.bunch-package-state.json'), 'utf-8')).patches.map(
+        (patch: any) => patch.file,
+      );
+
+    test('rebase finishes the rollback instead of throwing ENOENT over it', () => {
+      setupTwoPatched();
+
+      const result = run('rebase pkg-a 0', TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain('ENOENT');
+      // Откат и до правки доходил до конца — падала запись после него, и
+      // команда отчитывалась отказом о сделанной работе.
+      expect(readFileSync(join(TEST_DIR, 'node_modules', 'pkg-a', 'index.js'), 'utf-8')).toBe('const x = 1;\n');
+      expect(recorded()).toContain('pkg-b+1.0.0.patch');
+    });
+
+    test('reverse finishes too', () => {
+      setupTwoPatched();
+
+      const result = run('reverse', TEST_DIR);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('1 of 1 un-applied');
+      expect(result.stdout).not.toContain('ENOENT');
+    });
+
+    test('apply keeps the record, so status still warns after an install', () => {
+      setupTwoPatched();
+      // До правки предупреждение жило ровно до следующей установки, а `apply`
+      // зовётся из postinstall — то есть не жило вовсе.
+      expect(run('status', TEST_DIR).stdout).toContain('no longer exist');
+
+      expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+      const after = run('status', TEST_DIR);
+      expect(after.stdout).toContain('pkg-b+1.0.0.patch');
+      expect(after.stdout).toContain('Their changes may still be in node_modules');
+      expect(after.exitCode).toBe(1);
+      // И правка удалённого патча действительно на месте — предупреждение не пустое.
+      expect(readFileSync(join(TEST_DIR, 'node_modules', 'pkg-b', 'index.js'), 'utf-8')).toBe('const x = 2;\n');
+    });
+  });
+
   test('create ignores a state file left behind by patch-package', () => {
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
     const pkg = join(TEST_DIR, 'node_modules', 'is-number');
