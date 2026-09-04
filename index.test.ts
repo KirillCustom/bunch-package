@@ -116,6 +116,103 @@ describe('bunch-package create', () => {
     expect(result.exitCode).not.toBe(0);
   });
 
+  test('suggests parent directory when package is installed one level above cwd', () => {
+    // Воспроизводит сценарий TSK-46: root/node_modules/ms есть, но запуск из
+    // root/app — и пользователь не понимает, куда бежать. Подсказка должна
+    // назвать каталог с node_modules и сказать запустить оттуда.
+    setupFakePackage(TEST_DIR, 'ms', '2.1.2', {'index.js': 'const a = 1;\n'});
+    const subDir = join(TEST_DIR, 'app');
+    mkdirSync(subDir, {recursive: true});
+    writeFileSync(join(subDir, 'package.json'), JSON.stringify({name: 'app', version: '1.0.0'}));
+
+    const result = run('create ms', subDir);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+    expect(result.stdout).toContain('Found in');
+    expect(result.stdout).toContain(TEST_DIR);
+    expect(result.stdout).toContain('run the command from there');
+  });
+
+  test('does not hint when package is absent from all parent directories', () => {
+    // Пакет нигде нет — подсказки не должно быть, текст прежний.
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    const result = run('create nonexistent-pkg', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+    expect(result.stdout).not.toContain('Found in');
+  });
+
+  test('does not hint in monorepo when package is not found anywhere', () => {
+    // Пакет нигде нет — ни в воркспейсе, ни в корне. Зелёный этот тест и с
+    // границей проекта, и без неё (findPackageAbove в обоих случаях находит
+    // только пустой node_modules), так что он один защиту не доказывает —
+    // для этого следующий тест, с пакетом за пределами корня воркспейсов.
+    const workspace = join(TEST_DIR, 'packages', 'a');
+    mkdirSync(workspace, {recursive: true});
+    writeFileSync(join(TEST_DIR, 'package.json'), JSON.stringify({
+      name: 'mono', version: '1.0.0', workspaces: ['packages/*'],
+    }));
+    writeFileSync(join(workspace, 'package.json'), JSON.stringify({name: '@mono/a', version: '1.0.0'}));
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+
+    const result = run('create nonexistent-pkg', workspace);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+    expect(result.stdout).not.toContain('Found in');
+  });
+
+  test('does not hint when package sits above the monorepo root', () => {
+    // Пакет — снаружи монорепо, в родителе корня воркспейсов. Подниматься
+    // туда нельзя: там уже другой проект, и подсказка увела бы за границу
+    // монорепо. Граница проекта (первый предок со своим package.json — здесь
+    // это corень воркспейсов repo/) должна остановить подъём раньше, чем он
+    // дойдёт до TEST_DIR/node_modules.
+    setupFakePackage(TEST_DIR, 'ms', '2.1.2', {'index.js': 'const a = 1;\n'});
+    const repo = join(TEST_DIR, 'repo');
+    const workspace = join(repo, 'packages', 'a');
+    mkdirSync(workspace, {recursive: true});
+    writeFileSync(join(repo, 'package.json'), JSON.stringify({
+      name: 'mono', version: '1.0.0', workspaces: ['packages/*'],
+    }));
+    writeFileSync(join(workspace, 'package.json'), JSON.stringify({name: '@mono/a', version: '1.0.0'}));
+
+    const result = run('create ms', workspace);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+    expect(result.stdout).not.toContain('Found in');
+  });
+
+  test('does not hint when the directory holding the package has no manifest of its own', () => {
+    // Пакет лежит выше, но по пути нет ни одного package.json: `outer` —
+    // просто промежуточный каталог, не корень проекта. Подсказка не должна
+    // называть его: граница проекта ищется по first-ancestor-with-manifest,
+    // а не по первому node_modules с нужным именем.
+    setupFakePackage(join(TEST_DIR, 'outer'), 'ms', '2.1.2', {'index.js': 'const a = 1;\n'});
+    const inner = join(TEST_DIR, 'outer', 'inner');
+    mkdirSync(inner, {recursive: true});
+    writeFileSync(join(inner, 'package.json'), JSON.stringify({name: 'inner', version: '1.0.0'}));
+
+    const result = run('create ms', inner);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+    expect(result.stdout).not.toContain('Found in');
+  });
+
+  test('does not hint when cwd has no manifest of its own', () => {
+    // Воспроизводит измерение на .probe-tmp внутри bunch-package: каталог без
+    // package.json, запущенный из него create нашёл бы node_modules/ms
+    // родителя и предложил бы патчить чужой проект. Без своего package.json у
+    // cwd подъём не начинается вовсе.
+    setupFakePackage(TEST_DIR, 'ms', '2.1.2', {'index.js': 'const a = 1;\n'});
+    const probe = join(TEST_DIR, 'probe');
+    mkdirSync(probe, {recursive: true}); // ни одного package.json внутри
+
+    const result = run('create ms', probe);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+    expect(result.stdout).not.toContain('Found in');
+  });
+
   test('creates patch file when package is modified', () => {
     // Устанавливаем реальный маленький пакет и модифицируем его
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});

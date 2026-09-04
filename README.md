@@ -114,6 +114,12 @@ Example:
 bunx bunch-package create react-native-date-picker
 ```
 
+Run `create` from the directory that owns the package — the one where
+`node_modules/<package>` lives. A patch records paths relative to that root, so
+running it from a subdirectory without its own `node_modules` would produce a
+patch with wrong paths. When the package is found in a parent directory, `create`
+names that directory and says where to run the command from.
+
 `create` downloads a pristine copy of the package to compare against, and gives
 that download 60 seconds. On a slow link, or for a very large package, that is not
 always enough — raise it with `BUNCH_FETCH_TIMEOUT`, in seconds:

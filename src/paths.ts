@@ -1,5 +1,5 @@
 import {chmodSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync} from 'fs';
-import {resolve, sep} from 'path';
+import {dirname, join, resolve, sep} from 'path';
 import {hostOfPatchPath, projectRoot} from './workspace';
 
 // Каталог патчей по умолчанию тот же, что у patch-package, — патчи ходят между
@@ -164,6 +164,52 @@ export function isExecutable(mode: number): boolean {
 
 export function withExecutable(mode: number, executable: boolean): number {
   return executable ? mode | EXECUTABLE : mode & ~EXECUTABLE;
+}
+
+// Ищем пакет в node_modules родительских каталогов — только для подсказки в
+// сообщении об ошибке. Начинаем с parent(cwd), потому что cwd мы уже
+// проверили и ничего не нашли.
+//
+// Без своего package.json у cwd подъём не начинаем: иначе подсказка ведёт в
+// случайно расположенного предка. Измерено на .probe-tmp внутри самого
+// bunch-package — пробный каталог без манифеста, запущенный из него `create
+// typescript` предлагал патчить node_modules самого bunch-package только
+// потому, что там нашёлся node_modules/typescript, хотя .probe-tmp к этому
+// проекту отношения не имеет.
+function findPackageAbove(packageName: string): string | null {
+  const cwd = resolve(process.cwd());
+  if (!existsSync(join(cwd, 'package.json'))) return null;
+
+  const parts = packageName.split('/');
+  let at = dirname(cwd);
+  for (;;) {
+    // Первый предок со своим package.json — граница проекта, дальше неё не
+    // поднимаемся. В монорепо это корень воркспейсов: манифест там обязателен,
+    // чтобы объявить `workspaces`, поэтому отдельная проверка workspaceRoot()
+    // здесь не нужна — снятие этой границы ловится мутацией на пакете,
+    // установленном выше корня воркспейсов. За границей — уже другое дерево,
+    // к которому cwd отношения не имеет.
+    if (existsSync(join(at, 'package.json'))) {
+      return existsSync(join(at, 'node_modules', ...parts)) ? at : null;
+    }
+    const up = dirname(at);
+    if (up === at) return null;
+    at = up;
+  }
+}
+
+// Ошибка «пакет не установлен» выбрасывается из пяти команд одним и тем же
+// текстом. Собираем здесь, чтобы подсказка о родительском каталоге жила в
+// одном месте и не дублировалась.
+export function packageNotFoundError(packageName: string): Error {
+  const above = findPackageAbove(packageName);
+  if (above !== null) {
+    return new Error(
+      `Package ${packageName} not found in node_modules\n` +
+        `   Found in ${above} — run the command from there`,
+    );
+  }
+  return new Error(`Package ${packageName} not found in node_modules`);
 }
 
 // Пишем рядом и переставляем поверх. rename в пределах каталога атомарен:

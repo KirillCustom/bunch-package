@@ -2,7 +2,7 @@ import {cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync} fro
 import {join} from 'path';
 import {diffTrees, readManifest, requireDiff, validatePackageName, withPristine} from './create';
 import {formatPatchName, listPatchFiles, parsePatchName, splitPatchHeader, updatePatchHeader, patchNameKey, patchesOfPackage} from './patch-file';
-import {installedPackagePath, patchesDirectory} from './paths';
+import {installedPackagePath, packageNotFoundError, patchesDirectory} from './paths';
 import {patchTargetDirectory} from './presence';
 import {replayPatches} from './sequence';
 
@@ -23,7 +23,7 @@ export function retargetPatches(packageName: string): void {
 
   const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
-    throw new Error(`Package ${packageName} not found in node_modules`);
+    throw packageNotFoundError(packageName);
   }
 
   const {name, version} = readManifest(packagePath);

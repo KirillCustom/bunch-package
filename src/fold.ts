@@ -17,7 +17,7 @@ import {
   updatePatchHeader,
   patchNameKey,
 } from './patch-file';
-import {installedPackagePath, patchesDirectory, realPathOutsideProject} from './paths';
+import {installedPackagePath, packageNotFoundError, patchesDirectory, realPathOutsideProject} from './paths';
 import {isInTree} from './presence';
 import {recordPatches, recordedPatches} from './state';
 
@@ -57,7 +57,7 @@ export function foldPatches(packageName: string): void {
 
   const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
-    throw new Error(`Package ${packageName} not found in node_modules`);
+    throw packageNotFoundError(packageName);
   }
 
   const {name, version} = readManifest(packagePath);
