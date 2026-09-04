@@ -10,6 +10,7 @@ import {isInTree, patchTargetDirectory} from './presence';
 import {PatchHeaderFields, formatPatchName, listPatchFiles, parsePatchName, patchesOfPackage, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 import {renameRecordedPatch} from './state';
+import {projectRoot, workspaceDirectories} from './workspace';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
 // что артефактно на любой глубине. Каталоги сборки сюда не входят: `build` у
@@ -257,6 +258,72 @@ export function requireDiff(): void {
         : '`create` needs the `diff` command, which is not on PATH. Install diffutils. `apply` does not need it.',
     );
   }
+}
+
+// Спецификатор нереестровый, если пакет явно указывает на локальный источник,
+// а не на имя+версию в реестре. bun add ./vendor/pkg.tgz пишет именно путь, и
+// с реестра эталон взять нельзя — до попытки говорим об этом вслух.
+function isNonRegistrySpecifier(spec: string): boolean {
+  if (
+    spec.startsWith('file:') ||
+    spec.startsWith('link:') ||
+    spec.startsWith('workspace:') ||
+    spec.startsWith('git:') ||
+    spec.startsWith('git+ssh:') ||
+    spec.startsWith('git+https:') ||
+    spec.startsWith('github:') ||
+    spec.startsWith('./') ||
+    spec.startsWith('../')
+  ) {
+    return true;
+  }
+  // .tgz-ссылка без явного протокола: пакет мог прийти как http://…/pkg.tgz
+  // или просто ./vendor/pkg.tgz — в обоих случаях реестр не при чём.
+  return spec.endsWith('.tgz') || spec.includes('.tgz/') || spec.includes('.tgz?');
+}
+
+// Ищет нереестровый спецификатор для пакета в манифестах проекта и воркспейсов.
+// Если пакет транзитивный (не объявлен нигде явно) — возвращает null: create
+// должен вести себя как прежде и дать реестру самому ответить на запрос.
+// Битые манифесты молча пропускаются: ошибка разбора — не наша, а чужого дерева.
+function nonRegistrySpecifier(packageName: string): string | null {
+  const root = projectRoot();
+
+  // Манифесты для проверки: cwd и корень проекта (одно и то же вне монорепо),
+  // плюс все воркспейсы. Дубликаты отфильтровываются по пути.
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+
+  for (const dir of [process.cwd(), root, ...workspaceDirectories(root)]) {
+    const p = join(dir, 'package.json');
+    if (!seen.has(p)) {
+      seen.add(p);
+      candidates.push(p);
+    }
+  }
+
+  for (const manifestPath of candidates) {
+    let pkg: any;
+    try {
+      pkg = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    } catch {
+      continue; // битый или отсутствующий манифест — идём дальше
+    }
+
+    const allDeps = Object.assign(
+      {},
+      pkg.dependencies,
+      pkg.devDependencies,
+      pkg.optionalDependencies,
+      pkg.peerDependencies,
+    );
+    const spec: unknown = allDeps[packageName];
+    if (typeof spec === 'string' && isNonRegistrySpecifier(spec)) {
+      return spec;
+    }
+  }
+
+  return null;
 }
 
 // Apple patch писал диагностику в stdout, GNU — в stderr, и привычка читать оба
@@ -838,6 +905,19 @@ export function createPatch(
         `   That patch is in node_modules but not in the pristine copy, so a patch created now\n` +
         `   would carry bun's changes too. Run \`bunch-package import\` to take it over, or remove\n` +
         `   the entry from patchedDependencies yourself.`,
+    );
+  }
+
+  // Пакет установлен не из реестра: `file:`, `link:`, путь на .tgz и т. д. —
+  // эталона в реестре нет и не будет. Говорим об этом до похода в сеть, иначе
+  // человек читает «404» и ищет проблему в сети или имени, хотя причина — в
+  // манифесте проекта. Транзитивные зависимости (не объявленные явно) пропускаем:
+  // для них реестр может знать эталон, и отказывать преждевременно нельзя.
+  const nonRegistry = nonRegistrySpecifier(packageName);
+  if (nonRegistry !== null) {
+    throw new Error(
+      `${packageName} is installed from a non-registry specifier (${JSON.stringify(nonRegistry)}), not from the npm registry.\n` +
+        `   A pristine copy cannot be fetched from the registry, so a patch cannot be created for it.`,
     );
   }
 
