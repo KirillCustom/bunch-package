@@ -116,6 +116,50 @@ describe('bunch-package create', () => {
     expect(result.exitCode).not.toBe(0);
   });
 
+  test('suggests parent directory when package is installed one level above cwd', () => {
+    // Воспроизводит сценарий TSK-46: root/node_modules/ms есть, но запуск из
+    // root/app — и пользователь не понимает, куда бежать. Подсказка должна
+    // назвать каталог с node_modules и сказать запустить оттуда.
+    setupFakePackage(TEST_DIR, 'ms', '2.1.2', {'index.js': 'const a = 1;\n'});
+    const subDir = join(TEST_DIR, 'app');
+    mkdirSync(subDir, {recursive: true});
+    writeFileSync(join(subDir, 'package.json'), JSON.stringify({name: 'app', version: '1.0.0'}));
+
+    const result = run('create ms', subDir);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+    expect(result.stdout).toContain('Found in');
+    expect(result.stdout).toContain(TEST_DIR);
+    expect(result.stdout).toContain('run the command from there');
+  });
+
+  test('does not hint when package is absent from all parent directories', () => {
+    // Пакет нигде нет — подсказки не должно быть, текст прежний.
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    const result = run('create nonexistent-pkg', TEST_DIR);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+    expect(result.stdout).not.toContain('Found in');
+  });
+
+  test('does not hint in monorepo when package is not found', () => {
+    // В монорепо workspaceRoot() != null, поэтому findPackageAbove возвращает
+    // null — подсказки о «родительском каталоге» быть не должно: там монорепо,
+    // а не обычный подкаталог.
+    const workspace = join(TEST_DIR, 'packages', 'a');
+    mkdirSync(workspace, {recursive: true});
+    writeFileSync(join(TEST_DIR, 'package.json'), JSON.stringify({
+      name: 'mono', version: '1.0.0', workspaces: ['packages/*'],
+    }));
+    writeFileSync(join(workspace, 'package.json'), JSON.stringify({name: '@mono/a', version: '1.0.0'}));
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+
+    const result = run('create nonexistent-pkg', workspace);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain('not found in node_modules');
+    expect(result.stdout).not.toContain('Found in');
+  });
+
   test('creates patch file when package is modified', () => {
     // Устанавливаем реальный маленький пакет и модифицируем его
     execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});

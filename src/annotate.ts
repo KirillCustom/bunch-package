@@ -4,7 +4,7 @@ import {join} from 'path';
 import {readManifest, requireDiff, validatePackageName, withPristine} from './create';
 import {bunAlsoPatches} from './foreign';
 import {listPatchFiles, orderPatchFiles, parsePatch, parsePatchName, patchNameKey} from './patch-file';
-import {installedPackagePath, realPathOutsideProject} from './paths';
+import {installedPackagePath, packageNotFoundError, realPathOutsideProject} from './paths';
 import {replayPatches} from './sequence';
 
 // Метка строки — индекс патча, который её принёс, или null: строку никто не
@@ -83,7 +83,7 @@ export function annotateFile(packageName: string, relativePath: string): void {
 
   const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
-    throw new Error(`Package ${packageName} not found in node_modules`);
+    throw packageNotFoundError(packageName);
   }
 
   const shared = realPathOutsideProject(`node_modules/${packageName}`);

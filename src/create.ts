@@ -5,7 +5,7 @@ import {homedir} from 'os';
 import {join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
 import {PathFilters, pathAllowed} from './options';
-import {ensureDir, installedPackagePath, isExecutable, patchesDirectory, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
+import {ensureDir, installedPackagePath, isExecutable, packageNotFoundError, patchesDirectory, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
 import {isInTree, patchTargetDirectory} from './presence';
 import {PatchHeaderFields, formatPatchName, listPatchFiles, parsePatchName, patchesOfPackage, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
@@ -876,7 +876,7 @@ export function createPatch(
 
   const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
-    throw new Error(`Package ${packageName} not found in node_modules`);
+    throw packageNotFoundError(packageName);
   }
 
   // При изолированной раскладке (`bun install --linker isolated`) это симлинк на

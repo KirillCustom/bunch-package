@@ -1,6 +1,6 @@
 import {chmodSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync} from 'fs';
-import {resolve, sep} from 'path';
-import {hostOfPatchPath, projectRoot} from './workspace';
+import {dirname, join, resolve, sep} from 'path';
+import {hostOfPatchPath, projectRoot, workspaceRoot} from './workspace';
 
 // Каталог патчей по умолчанию тот же, что у patch-package, — патчи ходят между
 // инструментами. Монорепозиторию этого мало: воркспейсам нужен свой каталог на
@@ -168,6 +168,39 @@ export function withExecutable(mode: number, executable: boolean): number {
 
 // Пишем рядом и переставляем поверх. rename в пределах каталога атомарен:
 // снаружи файл виден либо старым целиком, либо новым целиком, и убитый посреди
+// Ищем пакет в node_modules родительских каталогов — только для подсказки в
+// сообщении об ошибке. Монорепо сюда не попадает: там hostOfPatchPath уже ищет
+// вверх до корня воркспейсов. Начинаем с parent(cwd), потому что cwd мы уже
+// проверили и ничего не нашли.
+function findPackageAbove(packageName: string): string | null {
+  // В монорепо пакет поднятый к корню уже найден через hostOfPatchPath.
+  // Искать выше корня воркспейсов было бы ложной подсказкой.
+  if (workspaceRoot() !== null) return null;
+
+  const parts = packageName.split('/');
+  let at = dirname(resolve(process.cwd()));
+  for (;;) {
+    if (existsSync(join(at, 'node_modules', ...parts))) return at;
+    const up = dirname(at);
+    if (up === at) return null;
+    at = up;
+  }
+}
+
+// Ошибка «пакет не установлен» выбрасывается из пяти команд одним и тем же
+// текстом. Собираем здесь, чтобы подсказка о родительском каталоге жила в
+// одном месте и не дублировалась.
+export function packageNotFoundError(packageName: string): Error {
+  const above = findPackageAbove(packageName);
+  if (above !== null) {
+    return new Error(
+      `Package ${packageName} not found in node_modules\n` +
+        `   Found in ${above} — run the command from there`,
+    );
+  }
+  return new Error(`Package ${packageName} not found in node_modules`);
+}
+
 // работы процесс не оставляет ни обрезка, ни дыры на его месте. Заодно это
 // разрывает hardlink на общий кеш bun — у временного файла свой инод.
 export function atomicWrite(file: string, content: string | Uint8Array, mode: number | null = null): void {

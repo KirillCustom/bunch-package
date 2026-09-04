@@ -3,7 +3,7 @@ import {join, relative, sep} from 'path';
 import {readManifest, validatePackageName} from './create';
 import {bunAlsoPatches} from './foreign';
 import {lockFile, withApplyLock} from './lock';
-import {atomicWrite, installedPackagePath, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
+import {atomicWrite, installedPackagePath, packageNotFoundError, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
 
 // Правка файла в node_modules меняет запись общего кеша bun. Измерено на 1.4.0:
 // при `--backend=hardlink` (умолчание Linux) у файла в node_modules и у файла в
@@ -59,7 +59,7 @@ export function editPackage(packageName: string): void {
 
   const packagePath = installedPackagePath(packageName);
   if (!existsSync(packagePath)) {
-    throw new Error(`Package ${packageName} not found in node_modules`);
+    throw packageNotFoundError(packageName);
   }
 
   const {name, version} = readManifest(packagePath);
