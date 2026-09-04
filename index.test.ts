@@ -4794,7 +4794,7 @@ describe('isolated layout and the shared store', () => {
 
     expect(result.exitCode).not.toBe(0);
     expect(result.stdout).toContain('outside the project.');
-    expect(result.stdout).toContain('We do not write outside the project boundary');
+    expect(result.stdout).toContain('Patches are only ever written inside the project');
     expect(result.stdout).not.toContain('BUN_INSTALL_GLOBAL_STORE=0');
     // Главное: вынесенный каталог ничего не изменилось.
     expect(readFileSync(join(STORE(), 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 1;\n');
@@ -4808,7 +4808,7 @@ describe('isolated layout and the shared store', () => {
     const result = run('reverse', TEST_DIR);
 
     expect(result.stdout).toContain('outside the project.');
-    expect(result.stdout).toContain('We do not write outside the project boundary');
+    expect(result.stdout).toContain('Patches are only ever written inside the project');
     expect(readFileSync(join(STORE(), 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 2;\n');
   });
 
@@ -4842,7 +4842,7 @@ describe('isolated layout and the shared store', () => {
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout).toContain("outside the project — that is bun's shared store");
       expect(result.stdout).toContain('BUN_INSTALL_GLOBAL_STORE=0');
-      expect(result.stdout).not.toContain('We do not write outside the project boundary');
+      expect(result.stdout).not.toContain('Patches are only ever written inside the project');
       expect(readFileSync(join(pkgInStore, 'index.js'), 'utf-8')).toBe('const a = 1;\n');
     } finally {
       rmSync(fakeStore, {force: true, recursive: true});
@@ -5577,7 +5577,7 @@ describe('monorepo workspaces', () => {
 
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout).toContain('outside the project.');
-      expect(result.stdout).toContain('We do not write outside the project boundary');
+      expect(result.stdout).toContain('Patches are only ever written inside the project');
       expect(readFileSync(join(outside, LIB, 'index.js'), 'utf-8')).toBe('const a = 1;\n');
     } finally {
       rmSync(outside, {force: true, recursive: true});

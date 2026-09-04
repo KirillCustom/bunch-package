@@ -151,6 +151,6 @@ export function outsideProjectReason({directory, real}: OutsidePackage): string 
 
   return (
     `${directory} resolves to ${real}, outside the project.\n` +
-    `     We do not write outside the project boundary.`
+    `     Patches are only ever written inside the project.`
   );
 }
