@@ -617,6 +617,52 @@ rename to node_modules/ms/renamed.js
     expect(result.stdout).not.toContain('non-registry specifier');
     expect(result.stdout).toContain('Could not fetch a pristine');
   });
+
+  test('does not refuse when sibling workspace declares the same package as non-registry', () => {
+    // Регрессия: раньше nonRegistrySpecifier перебирал всех соседей в монорепо.
+    // Воркспейс packages/a объявляет registrypkg нереестровым, packages/b — реестровым.
+    // `create registrypkg` из packages/b должен идти в реестр, а не отказывать,
+    // ссылаясь на чужой спецификатор из пакета a.
+    const monoRoot = TEST_DIR;
+    // Корневой манифест с воркспейсами
+    writeFileSync(
+      join(monoRoot, 'package.json'),
+      JSON.stringify({name: 'mono', private: true, workspaces: ['packages/*']}),
+    );
+
+    // packages/a — нереестровый спецификатор для registrypkg (тот же пакет)
+    const pkgA = join(monoRoot, 'packages', 'a');
+    mkdirSync(pkgA, {recursive: true});
+    writeFileSync(
+      join(pkgA, 'package.json'),
+      JSON.stringify({
+        name: '@mono/a',
+        version: '1.0.0',
+        dependencies: {'registrypkg': '../../vendor/registrypkg-9.9.9.tgz'},
+      }),
+    );
+
+    // packages/b — реестровый спецификатор (1.0.0)
+    const pkgB = join(monoRoot, 'packages', 'b');
+    mkdirSync(pkgB, {recursive: true});
+    writeFileSync(
+      join(pkgB, 'package.json'),
+      JSON.stringify({name: '@mono/b', version: '1.0.0', dependencies: {'registrypkg': '1.0.0'}}),
+    );
+
+    // Пакет лежит в node_modules воркспейса b
+    setupFakePackage(pkgB, 'registrypkg', '1.0.0', {
+      'index.js': "module.exports = 1;\n",
+    });
+
+    // Из packages/b: спецификатор b — реестровый, должны идти в реестр как обычно.
+    const result = run('create registrypkg', pkgB);
+
+    // Не должен ссылаться на нереестровый спецификатор от соседа a
+    expect(result.stdout).not.toContain('non-registry specifier');
+    // Пакет не существует в реестре — ожидаемый отказ реестра (не наш)
+    expect(result.stdout).toContain('Could not fetch a pristine');
+  });
 });
 
 describe('bunch-package apply', () => {

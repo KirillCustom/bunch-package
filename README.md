@@ -118,6 +118,11 @@ bunx bunch-package create react-native-date-picker
 that download 60 seconds. On a slow link, or for a very large package, that is not
 always enough — raise it with `BUNCH_FETCH_TIMEOUT`, in seconds:
 
+Packages installed from a local path rather than the registry — `file:`, `link:`,
+`workspace:`, a git URL, or a `.tgz` file — cannot be patched this way: there is no
+pristine copy to fetch from the registry. `create` detects the specifier in
+`package.json` and says so before attempting any network request.
+
 ```bash
 BUNCH_FETCH_TIMEOUT=300 bunx bunch-package create some-enormous-package
 ```

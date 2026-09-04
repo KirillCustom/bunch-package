@@ -10,7 +10,7 @@ import {isInTree, patchTargetDirectory} from './presence';
 import {PatchHeaderFields, formatPatchName, listPatchFiles, parsePatchName, patchesOfPackage, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 import {renameRecordedPatch} from './state';
-import {projectRoot, workspaceDirectories} from './workspace';
+import {projectRoot} from './workspace';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
 // что артефактно на любой глубине. Каталоги сборки сюда не входят: `build` у
@@ -289,12 +289,15 @@ function isNonRegistrySpecifier(spec: string): boolean {
 function nonRegistrySpecifier(packageName: string): string | null {
   const root = projectRoot();
 
-  // Манифесты для проверки: cwd и корень проекта (одно и то же вне монорепо),
-  // плюс все воркспейсы. Дубликаты отфильтровываются по пути.
+  // Манифесты для проверки: только cwd и корень проекта (одно и то же вне
+  // монорепо). Соседние воркспейсы не перебираем: их спецификатор для того же
+  // имени пакета может быть нереестровым, а мы патчим экземпляр, объявленный в
+  // нашем воркспейсе или поднятый к корню — не чужой. Ложный отказ хуже
+  // молчания: пропустить случай безопасно, ошибочно запретить — нет.
   const seen = new Set<string>();
   const candidates: string[] = [];
 
-  for (const dir of [process.cwd(), root, ...workspaceDirectories(root)]) {
+  for (const dir of [process.cwd(), root]) {
     const p = join(dir, 'package.json');
     if (!seen.has(p)) {
       seen.add(p);
