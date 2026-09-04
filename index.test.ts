@@ -4793,20 +4793,22 @@ describe('isolated layout and the shared store', () => {
     const result = run('apply', TEST_DIR);
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.stdout).toContain("outside the project — that is bun's shared store");
-    expect(result.stdout).toContain('BUN_INSTALL_GLOBAL_STORE=0');
-    // Главное: в общем сторе ничего не изменилось.
+    expect(result.stdout).toContain('outside the project.');
+    expect(result.stdout).toContain('Patches are only ever written inside the project');
+    expect(result.stdout).not.toContain('BUN_INSTALL_GLOBAL_STORE=0');
+    // Главное: вынесенный каталог ничего не изменилось.
     expect(readFileSync(join(STORE(), 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 1;\n');
   });
 
   test.skipIf(isWindows)('reverse refuses too — un-applying writes to the tree just the same', () => {
-    // Дерево уже содержит изменение патча: снятие было бы записью в общий стор.
+    // Дерево уже содержит изменение патча: снятие было бы записью наружу проекта.
     packageInStore(PATCH);
     writeFileSync(join(STORE(), 'test-lib', 'index.js'), 'const a = 2;\n');
 
     const result = run('reverse', TEST_DIR);
 
-    expect(result.stdout).toContain("outside the project — that is bun's shared store");
+    expect(result.stdout).toContain('outside the project.');
+    expect(result.stdout).toContain('Patches are only ever written inside the project');
     expect(readFileSync(join(STORE(), 'test-lib', 'index.js'), 'utf-8')).toBe('const a = 2;\n');
   });
 
@@ -4816,7 +4818,35 @@ describe('isolated layout and the shared store', () => {
     const result = run('status', TEST_DIR);
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.stdout).toContain("outside the project — that is bun's shared store");
+    expect(result.stdout).toContain('outside the project.');
+  });
+
+  test.skipIf(isWindows)("apply names bun's shared store when BUN_INSTALL_CACHE_DIR points there", () => {
+    // Фейковый кеш bun: симлинк ведёт в <кеш>/links/…, BUN_INSTALL_CACHE_DIR задан.
+    // Именно этот случай заслуживает совета про BUN_INSTALL_GLOBAL_STORE=0.
+    const fakeStore = `${TEST_DIR}-bunstore`;
+    const pkgInStore = join(fakeStore, 'links', 'test-lib@1.0.0', 'node_modules', 'test-lib');
+    rmSync(fakeStore, {force: true, recursive: true});
+    mkdirSync(pkgInStore, {recursive: true});
+    writeFileSync(join(pkgInStore, 'package.json'), JSON.stringify({name: 'test-lib', version: '1.0.0'}));
+    writeFileSync(join(pkgInStore, 'index.js'), 'const a = 1;\n');
+
+    mkdirSync(join(TEST_DIR, 'node_modules'), {recursive: true});
+    symlinkSync(pkgInStore, join(TEST_DIR, 'node_modules', 'test-lib'));
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', 'test-lib+1.0.0.patch'), PATCH);
+
+    try {
+      const result = run('apply', TEST_DIR, {BUN_INSTALL_CACHE_DIR: fakeStore});
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toContain("outside the project — that is bun's shared store");
+      expect(result.stdout).toContain('BUN_INSTALL_GLOBAL_STORE=0');
+      expect(result.stdout).not.toContain('Patches are only ever written inside the project');
+      expect(readFileSync(join(pkgInStore, 'index.js'), 'utf-8')).toBe('const a = 1;\n');
+    } finally {
+      rmSync(fakeStore, {force: true, recursive: true});
+    }
   });
 
   test.skipIf(isWindows)('create warns that the package is shared', () => {
@@ -4856,10 +4886,14 @@ describe('isolated layout and the shared store', () => {
 `);
       const before = readFileSync(join(real, 'index.js'), 'utf-8');
 
-      const result = run('apply', TEST_DIR);
+      // BUN_INSTALL_CACHE_DIR передаётся apply, чтобы он знал, где кеш bun —
+      // точно так же, как это работало бы в реальном окружении пользователя,
+      // который выставил переменную в шелле.
+      const result = run('apply', TEST_DIR, {BUN_INSTALL_CACHE_DIR: cache});
 
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout).toContain("outside the project — that is bun's shared store");
+      expect(result.stdout).toContain('BUN_INSTALL_GLOBAL_STORE=0');
       expect(readFileSync(join(real, 'index.js'), 'utf-8')).toBe(before);
     } finally {
       rmSync(cache, {force: true, recursive: true});
@@ -5542,7 +5576,8 @@ describe('monorepo workspaces', () => {
       const result = run('apply', workspace('a'));
 
       expect(result.exitCode).not.toBe(0);
-      expect(result.stdout).toContain("outside the project — that is bun's shared store");
+      expect(result.stdout).toContain('outside the project.');
+      expect(result.stdout).toContain('Patches are only ever written inside the project');
       expect(readFileSync(join(outside, LIB, 'index.js'), 'utf-8')).toBe('const a = 1;\n');
     } finally {
       rmSync(outside, {force: true, recursive: true});

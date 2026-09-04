@@ -682,13 +682,16 @@ on it. All of it below was measured on bun 1.4.0, not read off documentation.
 |---|---|---|
 | default (hoisted) | a real directory in the project | works |
 | `--linker isolated` | a link to `node_modules/.bun/<pkg>@<ver>/…`, still in the project | works — the whole cycle is covered by a test |
-| `--linker isolated` **and** a global store (`BUN_INSTALL_GLOBAL_STORE=1`, or `install.globalStore` in bunfig) | a link into `<bun cache>/links/…`, **shared by every project on the machine** | refused, out loud |
+| `--linker isolated` **and** a global store (`BUN_INSTALL_GLOBAL_STORE=1`, or `install.globalStore` in bunfig) | a link into `<bun cache>/links/…`, **shared by every project on the machine** | refused, out loud — see below |
+| `node_modules` symlinked or moved outside the project (any tool, any reason) | a real directory outside the project | refused, out loud — see below |
 
-That last row is why the check exists. Writing a patch through such a link
-changes the package for every project on the machine: measured, a second project
-that knew nothing about the patch came out of a plain `bun install` already
-carrying it. bun itself refuses to patch through that link — "refusing to patch
-through it" — and so do we:
+**When `node_modules/<pkg>` resolves to bun's shared cache** (`BUN_INSTALL_CACHE_DIR`,
+default `~/.bun/install/cache`), the check exists because writing through such a
+link changes the package for every project on the machine: measured, a second
+project that knew nothing about the patch came out of a plain `bun install`
+already carrying it. bun itself refuses to patch through that link —
+"refusing to patch through it" — and so do we. The message names the store and
+tells you how to move it back inside the project:
 
 ```
 ❌ ms+2.1.2.patch
@@ -697,11 +700,23 @@ through it" — and so do we:
    Reinstall with the store inside the project: BUN_INSTALL_GLOBAL_STORE=0 bun install
 ```
 
-`apply`, `reverse`, `rebase` and `edit` refuse; `status` says the same instead of
-answering about a tree that is not the project's; `create` warns, since the
-package it is about to diff may have been changed by somebody else's project.
 The way out is in the message, and it works: with the store back inside the
 project, everything runs as usual.
+
+**When `node_modules` (or a package in it) is simply outside the project**
+— symlinked elsewhere, passed to a different tool via `--modules-folder`, mounted
+on a shared volume — the message says so without suggesting bun-specific steps,
+because `BUN_INSTALL_GLOBAL_STORE=0` won't move the directory:
+
+```
+❌ sym+1.0.0.patch
+   node_modules/sym resolves to /data/shared-modules/sym, outside the project.
+   Patches are only ever written inside the project.
+```
+
+In both cases `apply`, `reverse`, `rebase` and `edit` refuse; `status` says the same instead of
+answering about a tree that is not the project's; `create` warns, since the
+package it is about to diff may have been changed by somebody else's project.
 
 **In a monorepo** the project is the workspace root, not the directory you run in,
 so the store under `<root>/node_modules/.bun/` is not somebody else's store and
