@@ -460,6 +460,11 @@ file that used to be applied has been deleted while its changes are still in
 what is in the tree is no longer the patch on disk. The record is never taken as
 proof that a patch is applied; the files are.
 
+An entry whose patch file has been deleted stays in the record, and survives every
+later install: it is the only thing that remembers those changes are probably still
+in `node_modules`. Only `fold` drops such entries, because it is the one command
+that removes patch files itself, and the changes live on in the folded patch.
+
 `status` exits `1` when anything is missing from the tree, so it can stand in CI as
 a cheap check that `node_modules` is what the patches say it should be.
 

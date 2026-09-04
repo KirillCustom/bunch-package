@@ -147,7 +147,10 @@ export function foldPatches(packageName: string): void {
     const kept = [...recordedPatches().keys()].filter(
       file => !sequenced.includes(file) && file !== outputName,
     );
-    recordPatches([...kept, outputName]);
+    // Схлопнутые файлы удалены нами, и их изменения не потеряны — они внутри
+    // outputName. Иначе записи о них остались бы как об исчезнувших, и `status`
+    // предупреждал бы о правках, которые честно описаны новым патчем.
+    recordPatches([...kept, outputName], {forget: sequenced});
 
     console.log(`\n✅ ${outputName}`);
     console.log(`   ${sequenced.length} patches folded into one; node_modules is unchanged.`);
