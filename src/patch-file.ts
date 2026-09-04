@@ -308,7 +308,7 @@ export function patchesOfPackage(files: string[], packageDir: string): string[] 
   return files.filter(file => parsePatchName(file)?.packageDir === packageDir);
 }
 
-// Под каким именем лежат патчи этого пакета. Начиная с 1.18.0 `create` называет
+// Под каким именем лежат патчи этого пакета. Начиная с 1.17.0 `create` называет
 // файл по каталогу в node_modules — так же, как это делает patch-package
 // (проверено запуском на `mynum@npm:is-number@7.0.0`: он пишет
 // `mynum+7.0.0.patch`). Прежние версии брали имя из манифеста, и такие файлы
