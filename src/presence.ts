@@ -1,5 +1,6 @@
-import {readFileSync} from 'fs';
-import {join} from 'path';
+import {readFileSync, realpathSync} from 'fs';
+import {homedir} from 'os';
+import {join, sep} from 'path';
 import {PatchTarget, parsePatch} from './patch-file';
 import {packageDirectoryOf, patchesDirectory, realPathOutsideProject, stripPathPrefix} from './paths';
 import {PlannedOp, planTarget} from './plan';
@@ -117,10 +118,39 @@ export function packagesOutsideProject(targets: PatchTarget[]): OutsidePackage[]
 
 // Один и тот же текст у apply, rebase и status: расходиться в объяснении одного
 // и того же отказа — значит трижды объяснять его по-разному.
+//
+// Причина отказа одна: мы не пишем за пределы проекта. Но объяснение зависит
+// от того, куда ведёт путь. Когда он ведёт в кеш bun — человек пойдёт
+// переустанавливать пакет правильным способом; когда node_modules просто
+// вынесен наружу — совет про BUN_INSTALL_GLOBAL_STORE не по делу и только
+// запутает. Жалоба patch-package #377; воспроизведено 04.09.2026.
+function bunInstallCacheDir(): string {
+  // BUN_INSTALL_CACHE_DIR переопределяет умолчание — тот же приоритет, что у bun.
+  // realpathSync нужен, чтобы /tmp и /private/tmp на macOS не расходились:
+  // применение разыменовывает путь, а без этого /tmp/bun не совпадало бы с
+  // /private/tmp/bun, которое приходит из realpathSync в paths.ts.
+  const dir = process.env.BUN_INSTALL_CACHE_DIR || join(homedir(), '.bun', 'install', 'cache');
+  try {
+    return realpathSync(dir);
+  } catch {
+    return dir; // каталог ещё не создан — возвращаем как есть
+  }
+}
+
 export function outsideProjectReason({directory, real}: OutsidePackage): string {
+  const cache = bunInstallCacheDir();
+  const inBunStore = real === cache || real.startsWith(cache + sep);
+
+  if (inBunStore) {
+    return (
+      `${directory} resolves to ${real}, outside the project — that is bun's shared store.\n` +
+      `     Patching there would change the package for every project on this machine.\n` +
+      `     Reinstall with the store inside the project: BUN_INSTALL_GLOBAL_STORE=0 bun install`
+    );
+  }
+
   return (
-    `${directory} resolves to ${real}, outside the project — that is bun's shared store.\n` +
-    `     Patching there would change the package for every project on this machine.\n` +
-    `     Reinstall with the store inside the project: BUN_INSTALL_GLOBAL_STORE=0 bun install`
+    `${directory} resolves to ${real}, outside the project.\n` +
+    `     We do not write outside the project boundary.`
   );
 }
