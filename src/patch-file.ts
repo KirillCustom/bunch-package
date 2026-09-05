@@ -24,6 +24,16 @@ export interface PatchTarget {
   // это пути от корня проекта, срезать у них первый компонент не нужно.
   renameFrom: string | null;
   renameTo: string | null;
+  // Секция несёт двоичные данные: git кодирует их после `GIT binary patch`, и
+  // прочитать их мы не умеем. Без этого признака такая секция неотличима от
+  // «создать пустой файл» — apply рапортовал успех, оставив в дереве пустышку
+  // вместо картинки (TSK-48).
+  //
+  // Строка `Binary files … differ` сюда не относится: её печатает `diff` без
+  // -a, и данных за ней нет вовсе — это отметка «разница есть, показать не
+  // могу». Патчи корпуса носят её десятками рядом с обычными хунками (250 штук
+  // в одном файле), и отказ по ней сломал бы 8 рабочих патчей из 292.
+  binary: boolean;
 }
 
 export function parsePatch(patchContent: string): PatchTarget[] {
@@ -55,6 +65,7 @@ export function parsePatch(patchContent: string): PatchTarget[] {
       deletedFile: false,
       renameFrom: null,
       renameTo: null,
+      binary: false,
     };
     targets.push(fresh);
     open = true;
@@ -108,6 +119,14 @@ export function parsePatch(patchContent: string): PatchTarget[] {
       const fresh = (target = ensureTarget(null));
       fresh.oldPath = gitHeader[1];
       fresh.newPath = gitHeader[2];
+      continue;
+    }
+
+    // git пишет двоичные данные следом за этой строкой, своей кодировкой. Мы их
+    // не читаем — значит и класть нечего, и секцию надо довести до планировщика,
+    // чтобы он отказал вслух.
+    if (line === 'GIT binary patch') {
+      (target = ensureTarget(target)).binary = true;
       continue;
     }
 
@@ -166,9 +185,12 @@ export function parsePatch(patchContent: string): PatchTarget[] {
     }
   }
 
-  // Секция без хунков осмысленна, если несёт смену режима.
+  // Секция без хунков осмысленна, если несёт смену режима — или если она
+  // двоичная: такую надо донести до планировщика, чтобы он отказал вслух.
+  // Пока она отбрасывалась здесь, патч из одной строки «Binary files … differ»
+  // выглядел как пустой файл патча, и отказ говорил не о том (TSK-48).
   return targets.filter(
-    t => t.hunks.length > 0 || t.newMode !== null || t.oldMode !== null || t.renameTo !== null,
+    t => t.hunks.length > 0 || t.newMode !== null || t.oldMode !== null || t.renameTo !== null || t.binary,
   );
 }
 
@@ -193,6 +215,8 @@ export function invertTarget(target: PatchTarget): PatchTarget {
     // `new file mode` наоборот означает, что файл исчезает, и обратно.
     newFile: target.deletedFile,
     deletedFile: target.newFile,
+    // Двоичность направления не имеет: перевёрнутая секция так же нечитаема.
+    binary: target.binary,
     renameFrom: target.renameTo,
     renameTo: target.renameFrom,
   };

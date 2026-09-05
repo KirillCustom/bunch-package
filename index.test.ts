@@ -2280,6 +2280,178 @@ describe('CLI usage', () => {
 // Симлинки не переносятся патчем вовсе: формат возит содержимое файлов, а
 // ссылку в нём записать нечем. Опасность не в этом, а в тишине — правка
 // молча пропадала, а на Linux вдобавок уносила с собой весь патч.
+// Двоичные данные патч не переносит: у git они лежат своей кодировкой после
+// `GIT binary patch`, у обычного diff их нет вовсе. Пока секция читалась как
+// «создать пустой файл», apply клал пустышку вместо картинки и печатал ✅ —
+// patch-package делает ровно то же, и совпадать с ним здесь незачем (TSK-48).
+describe('binary sections', () => {
+  const PKG = 'bin-lib';
+
+  function setupPackage() {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'index.js': 'const x = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+  }
+
+  const writePatch = (body: string) => writeFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`), body);
+
+  test('refuses a git binary section instead of leaving an empty file behind', () => {
+    setupPackage();
+    writePatch(`diff --git a/node_modules/${PKG}/logo.png b/node_modules/${PKG}/logo.png
+new file mode 100644
+index 0000000..1234567
+GIT binary patch
+literal 8
+PcmZQzU|?Wm00001
+
+diff --git a/node_modules/${PKG}/index.js b/node_modules/${PKG}/index.js
+index aaa..bbb 100644
+--- a/node_modules/${PKG}/index.js
++++ b/node_modules/${PKG}/index.js
+@@ -1 +1 @@
+-const x = 1;
++const x = 2;
+`);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain(`node_modules/${PKG}/logo.png is a binary file`);
+    // Патч кладётся целиком или не кладётся вовсе: текстовая секция того же
+    // файла тоже не должна попасть в дерево.
+    expect(existsSync(join(TEST_DIR, 'node_modules', PKG, 'logo.png'))).toBe(false);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', PKG, 'index.js'), 'utf-8')).toBe('const x = 1;\n');
+  });
+
+  test('applies a patch that merely marks a binary difference alongside its hunks', () => {
+    // `Binary files … differ` печатает diff без -a: данных за ней нет, это
+    // отметка «разница есть, показать не могу». В корпусе такие строки стоят
+    // рядом с обычными хунками десятками — в одном патче их 250, — и отказ по
+    // ним отверг бы 8 рабочих патчей из 292. Текст ложится, файл остаётся.
+    setupPackage();
+    writeFileSync(join(TEST_DIR, 'node_modules', PKG, 'logo.ico'), 'old\n');
+    writePatch(`Binary files a/node_modules/${PKG}/logo.ico and b/node_modules/${PKG}/logo.ico differ
+--- a/node_modules/${PKG}/index.js
++++ b/node_modules/${PKG}/index.js
+@@ -1 +1 @@
+-const x = 1;
++const x = 2;
+`);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', PKG, 'index.js'), 'utf-8')).toBe('const x = 2;\n');
+    expect(readFileSync(join(TEST_DIR, 'node_modules', PKG, 'logo.ico'), 'utf-8')).toBe('old\n');
+  });
+
+  test('says what a patch made only of binary notices actually is', () => {
+    setupPackage();
+    writeFileSync(join(TEST_DIR, 'node_modules', PKG, 'logo.ico'), 'old\n');
+    writePatch(`Binary files a/node_modules/${PKG}/logo.ico and b/node_modules/${PKG}/logo.ico differ\n`);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    // Файл целый, а не обрезанный — прежний текст говорил именно это.
+    expect(result.stdout).toContain('only marks binary differences');
+    expect(result.stdout).not.toContain('empty or truncated');
+    expect(readFileSync(join(TEST_DIR, 'node_modules', PKG, 'logo.ico'), 'utf-8')).toBe('old\n');
+  });
+
+  test('still creates an empty file from a section without hunks', () => {
+    // `new file mode` без хунков — это законное создание пустышки, так git
+    // записывает пустые артефакты. Отказ по двоичности не должен его задеть.
+    setupPackage();
+    writePatch(`diff --git a/node_modules/${PKG}/empty.txt b/node_modules/${PKG}/empty.txt
+new file mode 100644
+index 0000000..e69de29
+`);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(join(TEST_DIR, 'node_modules', PKG, 'empty.txt'), 'utf-8')).toBe('');
+  });
+
+  test('reverse refuses git binary data too', () => {
+    setupPackage();
+    writePatch(`diff --git a/node_modules/${PKG}/logo.png b/node_modules/${PKG}/logo.png
+new file mode 100644
+index 0000000..1234567
+GIT binary patch
+literal 8
+PcmZQzU|?Wm00001
+`);
+
+    const result = run('reverse', TEST_DIR);
+
+    expect(result.stdout).toContain('is a binary file');
+    expect(existsSync(join(TEST_DIR, 'node_modules', PKG, 'logo.png'))).toBe(false);
+  });
+});
+
+// Обратная сторона той же темы: `create` не кладёт в патч файлы, отсечённые по
+// расширению (EXCLUDE_PATTERNS) — и до правки молчал об этом, отвечая «No
+// changes detected» человеку, который только что заменил в пакете картинку
+// (TSK-49).
+describe('files a patch cannot carry', () => {
+  const BINARY = Buffer.from([0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x00, 0xff, 0xfe]);
+
+  function installed(): string {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    return join(TEST_DIR, 'node_modules', 'is-number');
+  }
+
+  test('names an added binary file instead of saying nothing changed', () => {
+    const pkg = installed();
+    writeFileSync(join(pkg, 'logo.png'), BINARY);
+
+    const result = run('create is-number', TEST_DIR);
+
+    expect(result.stdout).toContain('cannot travel in a patch');
+    expect(result.stdout).toContain('logo.png');
+    expect(result.stdout).toContain('only files a patch cannot carry did');
+    // Патча нет — переносить действительно нечего, но и «изменений нет» больше
+    // не звучит: изменение есть, просто непереносимое.
+    expect(result.stdout).not.toContain('No changes detected');
+    expect(existsSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'))).toBe(false);
+  });
+
+  test('names it alongside a patch that does get written', () => {
+    const pkg = installed();
+    writeFileSync(join(pkg, 'logo.png'), BINARY);
+    overwriteFile(join(pkg, 'index.js'), `${readFileSync(join(pkg, 'index.js'), 'utf-8')}\n// text change\n`);
+
+    const result = run('create is-number', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('cannot travel in a patch');
+    expect(result.stdout).toContain('logo.png');
+    const patch = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patch).toContain('+// text change');
+    expect(patch).not.toContain('logo.png');
+  });
+
+  test('says nothing about an excluded file that did not change', () => {
+    // Ложная тревога тут стоит дороже молчания: такие файлы есть в каждом
+    // втором пакете, и упоминать их без изменений — приучить не читать вывод.
+    const pkg = installed();
+    writeFileSync(join(pkg, 'logo.png'), BINARY);
+    expect(run('create is-number', TEST_DIR).stdout).toContain('logo.png');
+
+    // Тот же файл теперь есть и в эталоне — сравнивать нечего… но эталон
+    // приходит из реестра, поэтому проверяем обратное: файл без изменений в
+    // дереве, которого нет и в патче, не упоминается.
+    rmSync(join(pkg, 'logo.png'), {force: true});
+    overwriteFile(join(pkg, 'index.js'), `${readFileSync(join(pkg, 'index.js'), 'utf-8')}\n// only text\n`);
+
+    const result = run('create is-number', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain('cannot travel in a patch');
+  });
+});
+
 describe('symbolic links', () => {
   function scanFixture(files: Record<string, string>, links: Record<string, string>) {
     const root = join(TEST_DIR, `tree-${Object.keys(files).length}-${Object.keys(links).join('-')}`);

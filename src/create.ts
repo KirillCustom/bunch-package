@@ -122,6 +122,45 @@ export interface LinkDifference {
   missingFrom: 'clean' | 'modified' | null;
 }
 
+// Файлы, которых патч не понесёт: их расширение стоит в EXCLUDE_PATTERNS, и diff
+// о них не говорит вовсе — он их не сравнивает. Решение осознанное (формат возит
+// текст, а не двоичные данные), но молчать нельзя: человек добавил в пакет
+// картинку и услышал «No changes detected», то есть неправду о собственной
+// правке (TSK-49). Обход у нас уже есть — тот же, что для симлинков и режимов.
+function isExcludedFromDiff(relativePath: string): boolean {
+  const name = relativePath.split('/').pop() ?? relativePath;
+  return EXCLUDE_PATTERNS.some(pattern => {
+    if (!pattern.startsWith('*')) return name === pattern;
+    // Шаблоны здесь двух видов: `*.png` и `*<суффикс>*` для временных файлов.
+    const rest = pattern.slice(1);
+    return rest.endsWith('*') ? name.includes(rest.slice(0, -1)) : name.endsWith(rest);
+  });
+}
+
+export function findExcludedDifferences(cleanRoot: string, modifiedRoot: string, clean: TreeScan, modified: TreeScan): string[] {
+  const paths = [...new Set([...clean.executable.keys(), ...modified.executable.keys()])]
+    .filter(isExcludedFromDiff)
+    .sort();
+
+  return paths.filter(relativePath => {
+    const before = join(cleanRoot, relativePath);
+    const after = join(modifiedRoot, relativePath);
+    const hadBefore = clean.executable.has(relativePath);
+    const hasAfter = modified.executable.has(relativePath);
+    if (hadBefore !== hasAfter) return true; // появился или исчез
+
+    try {
+      // Сперва размер: он отличается почти всегда и стоит один stat. Хеш нужен
+      // только когда размеры совпали — иначе «заменили картинку тем же весом»
+      // прошло бы незамеченным.
+      if (statSync(before).size !== statSync(after).size) return true;
+      return !readFileSync(before).equals(readFileSync(after));
+    } catch {
+      return true; // прочитать не смогли — лучше сказать, чем промолчать
+    }
+  });
+}
+
 export function findLinkDifferences(clean: TreeScan, modified: TreeScan): LinkDifference[] {
   const differences: LinkDifference[] = [];
   const paths = [...new Set([...clean.links.keys(), ...modified.links.keys()])].sort();
@@ -629,6 +668,13 @@ function reportBinaryFiles(rawPatch: string, packagePath: string): void {
   });
 }
 
+// Про эти файлы diff не сказал бы ничего: они отсечены от него по расширению.
+// Промолчать — значит ответить «изменений нет» человеку, который только что
+// заменил в пакете шрифт или картинку.
+function reportExcluded(paths: string[]): void {
+  reportList(`⚠️  ${paths.length} file(s) differ but cannot travel in a patch:`, paths, path => path);
+}
+
 // Симлинк не переносится патчем: формат возит содержимое файлов, а не ссылки.
 // Молчать об этом нельзя — правку было бы не отличить от «ничего не менялось».
 function reportLinkDifferences(differences: LinkDifference[]): void {
@@ -813,6 +859,7 @@ export interface TreeDiff {
   filtered: DiffSection[]; // отсеянные --include/--exclude
   linkDifferences: LinkDifference[];
   modeOnly: string[];
+  excluded: string[]; // различаются, но патчем не переносятся: .png, .so, шрифты…
   rawPatch: string;
 }
 
@@ -860,7 +907,9 @@ export function diffTrees(
       ? ''
       : renderPatch(packageName, kept, modeOnly, cleanTree.executable, modifiedTree.executable);
 
-  return {content, kept, skipped, filtered, linkDifferences, modeOnly, rawPatch};
+  const excluded = findExcludedDifferences(cleanRoot, modifiedRoot, cleanTree, modifiedTree);
+
+  return {content, kept, skipped, filtered, linkDifferences, modeOnly, excluded, rawPatch};
 }
 
 export function createPatch(
@@ -950,11 +999,15 @@ export function createPatch(
     const diff = diffTrees(cleanPackagePath, realPackagePath, packageName, name, version, filters);
     reportBinaryFiles(diff.rawPatch, realPackagePath);
     reportLinkDifferences(diff.linkDifferences);
+    reportExcluded(diff.excluded);
     reportSkipped(diff.skipped);
     reportFiltered(diff.filtered);
 
     if (diff.content === '') {
-      if (diff.linkDifferences.length > 0) {
+      if (diff.excluded.length > 0) {
+        console.log('⚠️  Nothing patchable changed — only files a patch cannot carry did');
+        console.log(`\n💡 They are listed above. A patch carries text, so those files stay as the package ships them.`);
+      } else if (diff.linkDifferences.length > 0) {
         console.log('⚠️  Nothing patchable changed — only symbolic links did');
         console.log(`\n💡 Symbolic links cannot travel in a patch. Everything else in ${packagePath} matches the pristine copy.`);
       } else if (diff.filtered.length > 0) {
