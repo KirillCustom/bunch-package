@@ -7,6 +7,7 @@ import {looksStructural} from './patch-file';
 export interface Options {
   packages: string[];
   append: string | null;
+  binary: boolean;
   patchDir: string | null;
   include: string | null;
   exclude: string | null;
@@ -18,12 +19,13 @@ export interface Options {
 }
 
 const WITH_VALUE = new Set(['--append', '--patch-dir', '--include', '--exclude', '--why', '--upstream']);
-const WITHOUT_VALUE = new Set(['--case-sensitive-path-filtering', '--error-on-warn', '--dev']);
+const WITHOUT_VALUE = new Set(['--case-sensitive-path-filtering', '--error-on-warn', '--dev', '--binary']);
 
 export function parseOptions(argv: string[]): Options {
   const options: Options = {
     packages: [],
     append: null,
+    binary: false,
     patchDir: null,
     include: null,
     exclude: null,
@@ -51,6 +53,7 @@ export function parseOptions(argv: string[]): Options {
       if (inline !== null) throw new Error(`${flag} takes no value`);
       if (flag === '--case-sensitive-path-filtering') options.caseSensitive = true;
       else if (flag === '--error-on-warn') options.errorOnWarn = true;
+      else if (flag === '--binary') options.binary = true;
       else options.dev = true;
       continue;
     }

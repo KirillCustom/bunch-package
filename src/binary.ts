@@ -1,4 +1,5 @@
-import {inflateSync} from 'zlib';
+import {createHash} from 'crypto';
+import {deflateSync, inflateSync} from 'zlib';
 
 // Двоичные секции git: `GIT binary patch`, а следом один или два блока вида
 // `literal <размер>` / `delta <размер>` и строки данных. Формат разобран на
@@ -125,4 +126,63 @@ function applyDelta(base: Buffer, delta: Buffer): Buffer {
 export function applyBinaryBlock(block: BinaryBlock, base: Buffer): Buffer {
   const raw = unpack(block);
   return block.kind === 'literal' ? raw : applyDelta(base, raw);
+}
+
+// Обратная сторона декодера: тот же алфавит, те же маркеры длины. Пишем только
+// `literal` — она верна всегда, тогда как `delta` лишь экономит место и стоит
+// собственного алгоритма поиска совпадений.
+function encodeLine(chunk: Buffer): string {
+  const marker = chunk.length <= 26 ? String.fromCharCode(64 + chunk.length) : String.fromCharCode(97 + chunk.length - 27);
+  let out = marker;
+
+  for (let at = 0; at < chunk.length; at += 4) {
+    // Хвост короче четырёх байт дополняется нулями — так же делает git, и
+    // декодер отбрасывает лишнее по маркеру длины.
+    let accumulator = 0;
+    for (let k = 0; k < 4; k++) accumulator = accumulator * 256 + (chunk[at + k] ?? 0);
+
+    const digits: string[] = [];
+    for (let k = 0; k < 5; k++) {
+      digits.unshift(ALPHABET[accumulator % 85]);
+      accumulator = Math.floor(accumulator / 85);
+    }
+    out += digits.join('');
+  }
+
+  return out;
+}
+
+// Git считает хеш файла как sha1 от «blob <длина>\0» и содержимого; та же
+// строка стоит в `index <old>..<new>`, и по ней применение решает, что в дереве.
+export function gitBlobSha(content: Buffer): string {
+  return createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
+}
+
+// Один блок: заголовок, строки данных, пустая строка. По 52 байта на строку —
+// столько же кладёт git, и это верхняя граница маркера длины.
+function encodeBlock(content: Buffer): string {
+  const packed = deflateSync(content);
+  const lines: string[] = [`literal ${content.length}`];
+
+  for (let at = 0; at < packed.length; at += 52) {
+    lines.push(encodeLine(packed.subarray(at, Math.min(at + 52, packed.length))));
+  }
+
+  return `${lines.join('\n')}\n\n`;
+}
+
+// Двоичная секция целиком, в том виде, в каком её пишет `git diff --binary`:
+// заголовки, `GIT binary patch`, блок вперёд и блок назад.
+export function renderBinarySection(relativePath: string, before: Buffer | null, after: Buffer | null): string {
+  const ZERO = '0'.repeat(40);
+  const oldSha = before === null ? ZERO : gitBlobSha(before);
+  const newSha = after === null ? ZERO : gitBlobSha(after);
+
+  const head = [`diff --git a/${relativePath} b/${relativePath}`];
+  if (before === null) head.push('new file mode 100644');
+  if (after === null) head.push('deleted file mode 100644');
+  head.push(`index ${oldSha}..${newSha}${before !== null && after !== null ? ' 100644' : ''}`);
+  head.push('GIT binary patch');
+
+  return `${head.join('\n')}\n${encodeBlock(after ?? Buffer.alloc(0))}${encodeBlock(before ?? Buffer.alloc(0))}`;
 }

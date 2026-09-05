@@ -6,6 +6,7 @@ import {join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
 import {PathFilters, pathAllowed} from './options';
 import {ensureDir, installedPackagePath, isExecutable, packageNotFoundError, patchesDirectory, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
+import {renderBinarySection} from './binary';
 import {isInTree, patchTargetDirectory} from './presence';
 import {PatchHeaderFields, formatPatchName, listPatchFiles, parsePatchName, patchesOfPackage, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
@@ -135,6 +136,10 @@ function isExcludedFromDiff(relativePath: string): boolean {
     const rest = pattern.slice(1);
     return rest.endsWith('*') ? name.includes(rest.slice(0, -1)) : name.endsWith(rest);
   });
+}
+
+function readIfPresent(path: string): Buffer | null {
+  return existsSync(path) ? readFileSync(path) : null;
 }
 
 export function findExcludedDifferences(cleanRoot: string, modifiedRoot: string, clean: TreeScan, modified: TreeScan): string[] {
@@ -671,8 +676,15 @@ function reportBinaryFiles(rawPatch: string, packagePath: string): void {
 // Про эти файлы diff не сказал бы ничего: они отсечены от него по расширению.
 // Промолчать — значит ответить «изменений нет» человеку, который только что
 // заменил в пакете шрифт или картинку.
-function reportExcluded(paths: string[]): void {
+function reportExcluded(paths: string[], carried: boolean): void {
+  if (carried) {
+    reportList(`📦 ${paths.length} binary file(s) carried in the patch:`, paths, path => path);
+    console.log(`   Only bunch-package and git read these; patch-package and \`bun patch\` would write empty files.`);
+    return;
+  }
+
   reportList(`⚠️  ${paths.length} file(s) differ but cannot travel in a patch:`, paths, path => path);
+  console.log(`   Add --binary to carry them, if the patch is only ever applied by bunch-package or git.`);
 }
 
 // Симлинк не переносится патчем: формат возит содержимое файлов, а не ссылки.
@@ -870,6 +882,7 @@ export function diffTrees(
   name: string,
   version: string,
   filters: PathFilters = {include: null, exclude: null},
+  carryBinary = false,
 ): TreeDiff {
   // Деревья обходим до диффа: список расхождений по симлинкам нужен разбору
   // кода возврата самого diff.
@@ -909,7 +922,23 @@ export function diffTrees(
 
   const excluded = findExcludedDifferences(cleanRoot, modifiedRoot, cleanTree, modifiedTree);
 
-  return {content, kept, skipped, filtered, linkDifferences, modeOnly, excluded, rawPatch};
+  // По флагу двоичные файлы уезжают в патч секциями git: `deflate` + base85,
+  // блок вперёд и блок назад. Не по умолчанию — такую секцию patch-package и
+  // `bun patch` прочтут как «создать пустой файл» и молча положат пустышку
+  // (NOT-39), а патчи ходят между инструментами.
+  const binarySections = carryBinary
+    ? excluded.map(relativePath =>
+        renderBinarySection(
+          `node_modules/${packageName}/${relativePath}`,
+          readIfPresent(join(cleanRoot, relativePath)),
+          readIfPresent(join(modifiedRoot, relativePath)),
+        ),
+      )
+    : [];
+
+  const withBinary = binarySections.length > 0 ? content + binarySections.join('') : content;
+
+  return {content: withBinary, kept, skipped, filtered, linkDifferences, modeOnly, excluded, rawPatch};
 }
 
 export function createPatch(
@@ -918,6 +947,7 @@ export function createPatch(
   filters: PathFilters = {include: null, exclude: null},
   dev = false,
   header: PatchHeaderFields = {},
+  carryBinary = false,
 ): void {
   validatePackageName(packageName);
   requireDiff();
@@ -996,10 +1026,10 @@ export function createPatch(
     }
 
     console.log(`🔍 Generating diff...`);
-    const diff = diffTrees(cleanPackagePath, realPackagePath, packageName, name, version, filters);
+    const diff = diffTrees(cleanPackagePath, realPackagePath, packageName, name, version, filters, carryBinary);
     reportBinaryFiles(diff.rawPatch, realPackagePath);
     reportLinkDifferences(diff.linkDifferences);
-    reportExcluded(diff.excluded);
+    reportExcluded(diff.excluded, carryBinary);
     reportSkipped(diff.skipped);
     reportFiltered(diff.filtered);
 

@@ -642,15 +642,30 @@ patch is already in, matching the old one means it applies, and anything else is
 refused before a byte is written. That is what keeps a delta from landing on a
 file it was not made against.
 
-Two things are deliberately not supported:
+`create` writes them too, but only when asked:
 
-- **`create` does not produce binary sections.** It builds patches with `diff`,
-  which does not emit binary data at all. Files whose extension marks them as
-  binary — images, fonts, `.so`, `.jar` — are left out of the diff and named in
-  the output, so you know what a patch does not carry.
-- **`Binary files … differ`** is a note, not data. `diff` prints it without `-a`
-  to say a difference exists that it cannot show; patches carry those lines next
-  to ordinary hunks, and they are passed over.
+```bash
+bunx bunch-package create some-package --binary
+```
+
+Without the flag, files whose extension marks them as binary — images, fonts,
+`.so`, `.jar` — stay out of the patch and are named in the output, so you know
+what it does not carry. With it, they go in as `literal` blocks in git's format,
+and `create` says which files went and what that costs.
+
+The flag is not the default on purpose, and the reason is not size. patch-package
+and `bun patch` read such a section as "create an empty file" and write a
+zero-byte file without a word — measured on both. Patches travel between tools,
+and a patch of ours should not turn into silent damage in somebody else's. Use
+`--binary` when the patch is only ever applied by bunch-package or by git.
+
+A patch written this way is a git patch, not an approximation of one: `git apply`
+takes it, and `git apply -R` takes it back out — that is a test in the suite, not
+a claim.
+
+**`Binary files … differ`** is a note, not data. `diff` prints it without `-a`
+to say a difference exists that it cannot show; patches carry those lines next
+to ordinary hunks, and they are passed over.
 
 For comparison: patch-package writes a zero-byte file in place of the real one
 and reports success, and so does `bun patch` — measured on both.

@@ -49,10 +49,14 @@ try {
 
       for (const name of names) {
         try {
-          createPatch(name, options.append, filters, options.dev, {
-            why: options.why ?? undefined,
-            upstream: options.upstream ?? undefined,
-          });
+          createPatch(
+            name,
+            options.append,
+            filters,
+            options.dev,
+            {why: options.why ?? undefined, upstream: options.upstream ?? undefined},
+            options.binary,
+          );
         } catch (error: any) {
           console.error(`❌ ${error?.message ?? error}`);
           failed++;
