@@ -19,10 +19,20 @@ export type Presence =
 // Разбор отдельно от чтения: `status` спрашивает у одного и того же файла и
 // секции, и заголовок, и оба хеша, — а пока разбор читал файл сам, тот же файл
 // открывался на патч четыре раза.
+// Отметка `diff` о двоичной разнице: данных за ней нет, и переносить нечего.
+// Рядом с хунками она безобидна — патч применяется, файл остаётся как в пакете.
+// А вот когда в патче нет ничего, кроме таких строк, сказать «файл пуст или
+// обрезан» было бы неправдой: он целый, просто весь про то, чего патч не возит.
+const BINARY_NOTICE = /^Binary files .* differ$/m;
+
 export function targetsOf(content: string): PatchTarget[] | {error: string} {
   const targets = parsePatch(content);
   if (targets.length === 0) {
-    return {error: 'no hunks found — the patch file is empty or truncated'};
+    return {
+      error: BINARY_NOTICE.test(content)
+        ? 'the patch only marks binary differences — patches carry text, so there is nothing to apply'
+        : 'no hunks found — the patch file is empty or truncated',
+    };
   }
   return targets;
 }

@@ -177,6 +177,16 @@ export function planTarget(
   // «как есть» подменила бы ссылку обычным файлом, внутри которого лежал бы
   // путь: apply рапортовал бы успех, а в дереве оказалось бы не то. Отказываем
   // вслух — patch-package такие патчи тоже не применяет.
+  // Двоичные данные патч до нас не доносит: у git они в своей кодировке после
+  // `GIT binary patch`, у diff их нет вовсе. Записать «как есть» тут нечего, и
+  // до этой проверки такая секция читалась как создание пустого файла — apply
+  // печатал `✅`, а в дереве оставалась пустышка вместо картинки (TSK-48).
+  // Отказываем вслух, как и с симлинками: patch-package в этом месте молча
+  // кладёт тот же пустой файл, и совпадать с ним здесь незачем.
+  if (target.binary) {
+    throw new Error(`${relativePath} is a binary file — bunch-package cannot apply that`);
+  }
+
   if (target.newMode === SYMLINK_MODE || target.oldMode === SYMLINK_MODE) {
     throw new Error(`${relativePath} is a symbolic link (mode ${SYMLINK_MODE}) — bunch-package cannot apply that`);
   }
