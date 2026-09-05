@@ -1,3 +1,4 @@
+import {BinaryBlock, BinarySection} from './binary';
 import {existsSync, readdirSync} from 'fs';
 import {patchesDirectory} from './paths';
 
@@ -24,16 +25,21 @@ export interface PatchTarget {
   // это пути от корня проекта, срезать у них первый компонент не нужно.
   renameFrom: string | null;
   renameTo: string | null;
-  // Секция несёт двоичные данные: git кодирует их после `GIT binary patch`, и
-  // прочитать их мы не умеем. Без этого признака такая секция неотличима от
-  // «создать пустой файл» — apply рапортовал успех, оставив в дереве пустышку
-  // вместо картинки (TSK-48).
+  // Двоичные данные git: блоки после `GIT binary patch`. Первый ведёт вперёд,
+  // второй — назад, для отката; второго может не быть, если патч сделан без
+  // него. Раньше такая секция была неотличима от «создать пустой файл», и apply
+  // рапортовал успех, оставив в дереве пустышку вместо картинки (TSK-48).
   //
   // Строка `Binary files … differ` сюда не относится: её печатает `diff` без
   // -a, и данных за ней нет вовсе — это отметка «разница есть, показать не
   // могу». Патчи корпуса носят её десятками рядом с обычными хунками (250 штук
   // в одном файле), и отказ по ней сломал бы 8 рабочих патчей из 292.
-  binary: boolean;
+  binary: BinarySection | null;
+  // git-хеши обеих сторон из строки `index <old>..<new>`. Для двоичной секции
+  // это единственный способ понять, что с файлом: у неё нет контекста, который
+  // можно приложить к дереву, зато хеш отвечает точно.
+  oldSha: string | null;
+  newSha: string | null;
 }
 
 export function parsePatch(patchContent: string): PatchTarget[] {
@@ -46,6 +52,10 @@ export function parsePatch(patchContent: string): PatchTarget[] {
   // Секция закрывается первым же хунком: дальше `---` или `diff --git` начинают
   // следующий файл, а не дополняют текущий.
   let open = false;
+  // Пока читаются двоичные блоки, обычный разбор строк отключён: их содержимое
+  // выглядит как что угодно.
+  let binaryOf: PatchTarget | null = null;
+  let binaryBlock: BinaryBlock | null = null;
 
   const asPath = (raw: string): string | null => (raw === '/dev/null' ? null : raw);
 
@@ -65,7 +75,9 @@ export function parsePatch(patchContent: string): PatchTarget[] {
       deletedFile: false,
       renameFrom: null,
       renameTo: null,
-      binary: false,
+      binary: null,
+      oldSha: null,
+      newSha: null,
     };
     targets.push(fresh);
     open = true;
@@ -122,12 +134,41 @@ export function parsePatch(patchContent: string): PatchTarget[] {
       continue;
     }
 
-    // git пишет двоичные данные следом за этой строкой, своей кодировкой. Мы их
-    // не читаем — значит и класть нечего, и секцию надо довести до планировщика,
-    // чтобы он отказал вслух.
+    // Дальше идут блоки двоичных данных, и читать их надо особым режимом: строки
+    // base85 начинаются с любого символа, в том числе с `-`, `+` и `@`, которые
+    // обычный разбор принял бы за хунк или заголовок.
     if (line === 'GIT binary patch') {
-      (target = ensureTarget(target)).binary = true;
+      const current = (target = ensureTarget(target));
+      current.binary = {forward: null, backward: null};
+      binaryOf = current;
+      binaryBlock = null;
       continue;
+    }
+
+    if (binaryOf !== null) {
+      const blockHead = line.match(/^(literal|delta) (\d+)$/);
+      if (blockHead) {
+        binaryBlock = {kind: blockHead[1] as 'literal' | 'delta', size: Number(blockHead[2]), lines: []};
+        const section = binaryOf.binary!;
+        if (section.forward === null) section.forward = binaryBlock;
+        else if (section.backward === null) section.backward = binaryBlock;
+        continue;
+      }
+
+      if (line === '') {
+        // Пустая строка закрывает блок; следом может идти второй, обратный.
+        binaryBlock = null;
+        continue;
+      }
+
+      if (binaryBlock !== null) {
+        binaryBlock.lines.push(line);
+        continue;
+      }
+
+      // Не заголовок блока, не данные и не пустая строка — двоичная часть
+      // кончилась, и эту строку разбирает всё остальное.
+      binaryOf = null;
     }
 
     // Режимы приходят git-заголовками. patch-package читает ровно эти строки,
@@ -137,6 +178,16 @@ export function parsePatch(patchContent: string): PatchTarget[] {
       const current = (target = ensureTarget(target));
       if (renameLine[1] === 'from') current.renameFrom = renameLine[2];
       else current.renameTo = renameLine[2];
+      continue;
+    }
+
+    // `index <old>..<new>[ <mode>]` — git пишет её и для текстовых секций; для
+    // двоичной это единственный признак, по которому видно, что в дереве.
+    const indexLine = line.match(/^index ([0-9a-f]+)\.\.([0-9a-f]+)/);
+    if (indexLine) {
+      const current = (target = ensureTarget(target));
+      current.oldSha = indexLine[1];
+      current.newSha = indexLine[2];
       continue;
     }
 
@@ -185,12 +236,14 @@ export function parsePatch(patchContent: string): PatchTarget[] {
     }
   }
 
-  // Секция без хунков осмысленна, если несёт смену режима — или если она
-  // двоичная: такую надо донести до планировщика, чтобы он отказал вслух.
-  // Пока она отбрасывалась здесь, патч из одной строки «Binary files … differ»
-  // выглядел как пустой файл патча, и отказ говорил не о том (TSK-48).
+  // Секция без хунков осмысленна, если несёт смену режима или двоичные данные.
   return targets.filter(
-    t => t.hunks.length > 0 || t.newMode !== null || t.oldMode !== null || t.renameTo !== null || t.binary,
+    t =>
+      t.hunks.length > 0 ||
+      t.newMode !== null ||
+      t.oldMode !== null ||
+      t.renameTo !== null ||
+      t.binary !== null,
   );
 }
 
@@ -215,8 +268,14 @@ export function invertTarget(target: PatchTarget): PatchTarget {
     // `new file mode` наоборот означает, что файл исчезает, и обратно.
     newFile: target.deletedFile,
     deletedFile: target.newFile,
-    // Двоичность направления не имеет: перевёрнутая секция так же нечитаема.
-    binary: target.binary,
+    // Откат двоичной секции — это её обратный блок; вперёд пойдёт то, что git
+    // записал «назад». Хеши сторон меняются местами по той же причине.
+    binary:
+      target.binary === null
+        ? null
+        : {forward: target.binary.backward, backward: target.binary.forward},
+    oldSha: target.newSha,
+    newSha: target.oldSha,
     renameFrom: target.renameTo,
     renameTo: target.renameFrom,
   };

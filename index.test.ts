@@ -2284,6 +2284,150 @@ describe('CLI usage', () => {
 // `GIT binary patch`, у обычного diff их нет вовсе. Пока секция читалась как
 // «создать пустой файл», apply клал пустышку вместо картинки и печатал ✅ —
 // patch-package делает ровно то же, и совпадать с ним здесь незачем (TSK-48).
+// Двоичные патчи от `git diff --binary`: literal — полное содержимое, delta —
+// правка к нынешнему файлу. Формат разобран на живом выводе git (NOT-39), а
+// применённость решается git-хешами из строки `index <old>..<new>` — контекста,
+// который можно приложить к дереву, у такой секции нет.
+describe('git binary patches', () => {
+  const PKG = 'pic-lib';
+
+  // Патч делается настоящим git: сочинять его руками значило бы проверять свою
+  // же фантазию о формате, а не формат.
+  function gitBinaryPatch(before: Buffer, after: Buffer, name = 'logo.png'): string {
+    const repo = join(TEST_DIR, '.gitsrc');
+    rmSync(repo, {force: true, recursive: true});
+    mkdirSync(repo, {recursive: true});
+    const git = (args: string) =>
+      execSync(`git -c user.email=a@b -c user.name=c ${args}`, {cwd: repo, stdio: 'pipe'});
+    git('init -q .');
+    writeFileSync(join(repo, name), before);
+    git('add -A');
+    git('commit -qm before');
+    writeFileSync(join(repo, name), after);
+    const raw = execSync('git diff --binary', {cwd: repo, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024});
+    return raw.split(`a/${name}`).join(`a/node_modules/${PKG}/${name}`).split(`b/${name}`).join(`b/node_modules/${PKG}/${name}`);
+  }
+
+  function setup(before: Buffer, after: Buffer, name = 'logo.png'): void {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {});
+    writeFileSync(join(TEST_DIR, 'node_modules', PKG, name), before);
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`), gitBinaryPatch(before, after, name));
+  }
+
+  const inTree = (name = 'logo.png') => readFileSync(join(TEST_DIR, 'node_modules', PKG, name));
+
+  const SMALL = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0]);
+  // Нулевой байт обязателен: без него git считает содержимое текстом и пишет
+  // обычный diff, а тест проверял бы не ту форму, которой назван.
+  const SMALL_AFTER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xdd, 0xcc]);
+
+  function big(seed: number): Buffer {
+    // Псевдослучайные байты, но воспроизводимые: git выбирает delta именно на
+    // большом файле с малой правкой, и тест должен получать ту же форму всегда.
+    const out = Buffer.alloc(60_000);
+    let state = seed;
+    for (let at = 0; at < out.length; at++) {
+      state = (state * 1103515245 + 12345) & 0x7fffffff;
+      out[at] = (state >>> 16) & 0xff;
+    }
+    return out;
+  }
+
+  test('applies a literal block and comes back byte for byte', () => {
+    setup(SMALL, SMALL_AFTER);
+    expect(readFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`), 'utf-8')).toContain('\nliteral ');
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(inTree().equals(SMALL_AFTER)).toBe(true);
+
+    // Круг: обратная операция — лучший тест для прямой (INS-8).
+    expect(run('reverse', TEST_DIR).exitCode).toBe(0);
+    expect(inTree().equals(SMALL)).toBe(true);
+  });
+
+  test('applies a delta block, which is what git writes for a small change in a big file', () => {
+    const before = big(7);
+    const after = Buffer.from(before);
+    after.write('CHANGED', 100, 'ascii');
+    setup(before, after, 'blob.bin');
+
+    // Форма именно дельтовая — иначе тест проверял бы не то, что назван.
+    expect(readFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`), 'utf-8')).toContain('\ndelta ');
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(inTree('blob.bin').equals(after)).toBe(true);
+    expect(run('reverse', TEST_DIR).exitCode).toBe(0);
+    expect(inTree('blob.bin').equals(before)).toBe(true);
+  });
+
+  test('is idempotent: the second apply changes nothing', () => {
+    setup(SMALL, SMALL_AFTER);
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+    const second = run('apply', TEST_DIR);
+
+    expect(second.exitCode).toBe(0);
+    expect(inTree().equals(SMALL_AFTER)).toBe(true);
+    expect(run('status', TEST_DIR).stdout).toContain('in the tree');
+  });
+
+  test('refuses when the file is not what the patch was made against', () => {
+    setup(SMALL, SMALL_AFTER);
+    // Чужой файл того же размера: без сверки хеша дельта легла бы на него и
+    // дала мусор, которого никто не заметит.
+    writeFileSync(join(TEST_DIR, 'node_modules', PKG, 'logo.png'), Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]));
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain('does not match the binary patch');
+    expect(inTree().equals(Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]))).toBe(true);
+  });
+
+  test('refuses a block whose declared size does not match what it carries', () => {
+    setup(SMALL, SMALL_AFTER);
+    const path = join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`);
+    // Патч настоящий, подправлено одно число: так выглядит усечённый или
+    // подделанный блок. Без сверки размера в файл легло бы не то, что обещано,
+    // и никто бы не заметил.
+    writeFileSync(path, readFileSync(path, 'utf-8').replace(/\nliteral 12\n/, '\nliteral 11\n'));
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain('says 11 bytes but carries 12');
+    expect(inTree().equals(SMALL)).toBe(true);
+  });
+
+  test('creates a binary file the patch adds', () => {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    // Пустая «до» сторона — так git записывает появление файла.
+    const repo = join(TEST_DIR, '.gitsrc');
+    rmSync(repo, {force: true, recursive: true});
+    mkdirSync(repo, {recursive: true});
+    const git = (args: string) => execSync(`git -c user.email=a@b -c user.name=c ${args}`, {cwd: repo, stdio: 'pipe'});
+    git('init -q .');
+    writeFileSync(join(repo, 'keep.txt'), 'x\n');
+    git('add -A');
+    git('commit -qm before');
+    writeFileSync(join(repo, 'icon.bin'), SMALL_AFTER);
+    git('add -A');
+    const raw = execSync('git diff --binary --cached -- icon.bin', {cwd: repo, encoding: 'utf-8'});
+    writeFileSync(
+      join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`),
+      raw.split('a/icon.bin').join(`a/node_modules/${PKG}/icon.bin`).split('b/icon.bin').join(`b/node_modules/${PKG}/icon.bin`),
+    );
+
+    // Форма именно двоичная — иначе тест проверяет обычный текстовый патч.
+    expect(readFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`), 'utf-8')).toContain('GIT binary patch');
+
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(inTree('icon.bin').equals(SMALL_AFTER)).toBe(true);
+  });
+});
+
 describe('binary sections', () => {
   const PKG = 'bin-lib';
 
@@ -2294,7 +2438,7 @@ describe('binary sections', () => {
 
   const writePatch = (body: string) => writeFileSync(join(TEST_DIR, 'patches', `${PKG}+1.0.0.patch`), body);
 
-  test('refuses a git binary section instead of leaving an empty file behind', () => {
+  test('refuses binary data it cannot decode, naming the file', () => {
     setupPackage();
     writePatch(`diff --git a/node_modules/${PKG}/logo.png b/node_modules/${PKG}/logo.png
 new file mode 100644
@@ -2314,8 +2458,11 @@ index aaa..bbb 100644
 
     const result = run('apply', TEST_DIR);
 
+    // Данные тут сочинённые: строка обещает больше байт, чем несёт. Записать
+    // «что получилось» значило бы положить в дерево мусор молча.
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain(`node_modules/${PKG}/logo.png is a binary file`);
+    expect(result.stdout).toContain(`node_modules/${PKG}/logo.png:`);
+    expect(result.stdout).toContain('promises more bytes than it carries');
     // Патч кладётся целиком или не кладётся вовсе: текстовая секция того же
     // файла тоже не должна попасть в дерево.
     expect(existsSync(join(TEST_DIR, 'node_modules', PKG, 'logo.png'))).toBe(false);
@@ -2373,7 +2520,7 @@ index 0000000..e69de29
     expect(readFileSync(join(TEST_DIR, 'node_modules', PKG, 'empty.txt'), 'utf-8')).toBe('');
   });
 
-  test('reverse refuses git binary data too', () => {
+  test('reverse refuses undecodable binary data too', () => {
     setupPackage();
     writePatch(`diff --git a/node_modules/${PKG}/logo.png b/node_modules/${PKG}/logo.png
 new file mode 100644
@@ -2385,7 +2532,7 @@ PcmZQzU|?Wm00001
 
     const result = run('reverse', TEST_DIR);
 
-    expect(result.stdout).toContain('is a binary file');
+    expect(result.stdout).toContain('promises more bytes than it carries');
     expect(existsSync(join(TEST_DIR, 'node_modules', PKG, 'logo.png'))).toBe(false);
   });
 });

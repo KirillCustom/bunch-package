@@ -309,6 +309,10 @@ function firstInexact(ops: PlannedOp[], original: PatchTarget): string | null {
 
   for (const op of ops) {
     if (op.kind !== 'write') continue;
+    // Двоичную запись этой проверкой не проверить: у секции нет хунков, чтобы
+    // приложить их обратно. Её сходимость держится на git-хешах сторон, которые
+    // planTarget сверяет до всякой записи.
+    if (typeof op.content !== 'string') continue;
 
     const there = existsSync(op.file);
     const {lines, endsWithNewline} = splitContent(op.content);
