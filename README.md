@@ -629,6 +629,32 @@ mode `120000`), and refuses to overwrite a symlink that is already in
 `node_modules`: putting a regular file where a link belongs would report success
 and leave you with the wrong tree.
 
+## Binary files
+
+A patch made by `git diff --binary` carries the file itself, and those are
+applied — `literal` blocks (the whole content) and `delta` blocks (a change
+against what is already there), both in git's own base85-over-zlib encoding. No
+new dependency: `zlib` ships with bun.
+
+Which side of the change a file is on is decided by the git hashes in the
+`index <old>..<new>` line, not by guesswork: matching the new hash means the
+patch is already in, matching the old one means it applies, and anything else is
+refused before a byte is written. That is what keeps a delta from landing on a
+file it was not made against.
+
+Two things are deliberately not supported:
+
+- **`create` does not produce binary sections.** It builds patches with `diff`,
+  which does not emit binary data at all. Files whose extension marks them as
+  binary — images, fonts, `.so`, `.jar` — are left out of the diff and named in
+  the output, so you know what a patch does not carry.
+- **`Binary files … differ`** is a note, not data. `diff` prints it without `-a`
+  to say a difference exists that it cannot show; patches carry those lines next
+  to ordinary hunks, and they are passed over.
+
+For comparison: patch-package writes a zero-byte file in place of the real one
+and reports success, and so does `bun patch` — measured on both.
+
 ## What it understands
 
 Unified diffs as `git diff` and `patch-package` write them: content hunks, file

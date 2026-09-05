@@ -1,4 +1,6 @@
+import {createHash} from 'crypto';
 import {chmodSync, existsSync, lstatSync, readFileSync, renameSync, rmSync, type Stats} from 'fs';
+import {applyBinaryBlock, BinarySection} from './binary';
 import {join} from 'path';
 import {AppliedFile, applyHunks} from './hunks';
 import {Hunk, PatchTarget, sideIsEmpty} from './patch-file';
@@ -8,7 +10,7 @@ import {MODES_SUPPORTED, atomicWrite, ensureDir, isExecutable, packageDirectoryO
 const SYMLINK_MODE = '120000';
 
 export type PlannedOp =
-  | {kind: 'write'; file: string; content: string; mode: number | null}
+  | {kind: 'write'; file: string; content: string | Buffer; mode: number | null}
   | {kind: 'remove'; file: string}
   | {kind: 'chmod'; file: string; mode: number}
   | {kind: 'rename'; from: string; to: string};
@@ -160,6 +162,84 @@ function planContentChange(
   return {kind: 'ops', ops: []};
 }
 
+// Git считает хеш файла как sha1 от «blob <длина>\0» и содержимого. Тот же
+// хеш стоит в строке `index <old>..<new>`, поэтому вопрос «что сейчас в дереве»
+// решается одним сравнением, без догадок по контексту.
+function gitBlobSha(content: Buffer): string {
+  return createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
+}
+
+// Хеши в патче бывают сокращёнными (`index a7ea39e..f8b2a71`), поэтому сравнение
+// идёт по префиксу — так же, как это делает сам git.
+function sameBlob(sha: string | null, actual: string): boolean {
+  return sha !== null && sha.length > 0 && actual.startsWith(sha);
+}
+
+// Все нули на месте хеша означают не пустой файл, а его отсутствие: так git
+// записывает появление и исчезновение. Спутать это с хешем пустого файла
+// (`e69de29…`) значит требовать, чтобы создаваемый файл уже лежал в дереве.
+function absentSide(sha: string | null): boolean {
+  return sha !== null && /^0+$/.test(sha);
+}
+
+function planBinary(
+  target: PatchTarget,
+  binary: BinarySection,
+  relativePath: string,
+  file: string,
+  before: Buffer,
+  exists: boolean,
+  currentMode: number | null,
+): PlannedOp[] {
+  const actual = gitBlobSha(before);
+
+  // Файл уже такой, каким его хочет патч. Пустой файл здесь — законный случай
+  // только когда патч его и создаёт; иначе `exists` отличит «нет файла» от
+  // «файл пуст».
+  if (exists && sameBlob(target.newSha, actual)) return [];
+  if (!exists && (target.newPath === null || absentSide(target.newSha))) return [];
+
+  if (target.newPath === null || (binary.forward === null && target.deletedFile)) {
+    return exists ? [{kind: 'remove', file}] : [];
+  }
+
+  if (binary.forward === null) {
+    throw new Error(`${relativePath}: the patch carries no binary data for this direction`);
+  }
+
+  // Дельта считается от конкретного исходника, и приложить её к чужому файлу
+  // значит получить мусор, который никто не заметит. Хеш ловит это до записи.
+  if (exists && !absentSide(target.oldSha) && !sameBlob(target.oldSha, actual)) {
+    throw new Error(`${relativePath} does not match the binary patch (its ${target.oldSha ?? 'source'} side)`);
+  }
+  if (exists && absentSide(target.oldSha)) {
+    throw new Error(`${relativePath} already exists, and the patch adds it`);
+  }
+  if (!exists && !absentSide(target.oldSha) && target.oldSha !== null) {
+    throw new Error(`${relativePath} is missing, and the binary patch expects ${target.oldSha}`);
+  }
+
+  // Ошибки декодера говорят про формат («a binary line promises more bytes than
+  // it carries»), но не про файл — а человеку нужен именно файл: патч бывает на
+  // десятки секций.
+  let content: Buffer;
+  try {
+    content = applyBinaryBlock(binary.forward, before);
+  } catch (error: any) {
+    throw new Error(`${relativePath}: ${error.message}`);
+  }
+  const wantExecutable = target.newMode === null || !MODES_SUPPORTED ? null : target.newMode === '100755';
+
+  return [
+    {
+      kind: 'write',
+      file,
+      content,
+      mode: wantExecutable === null ? currentMode : wantExecutable ? 0o755 : 0o644,
+    },
+  ];
+}
+
 // assumeNotApplied выставляет только откат: он уже убедился, что исходный патч
 // лежит в дереве, и внутренняя проверка применённости для перевёрнутого патча
 // дала бы неверный ответ — см. planContentChange().
@@ -177,16 +257,6 @@ export function planTarget(
   // «как есть» подменила бы ссылку обычным файлом, внутри которого лежал бы
   // путь: apply рапортовал бы успех, а в дереве оказалось бы не то. Отказываем
   // вслух — patch-package такие патчи тоже не применяет.
-  // Двоичные данные патч до нас не доносит: у git они в своей кодировке после
-  // `GIT binary patch`, у diff их нет вовсе. Записать «как есть» тут нечего, и
-  // до этой проверки такая секция читалась как создание пустого файла — apply
-  // печатал `✅`, а в дереве оставалась пустышка вместо картинки (TSK-48).
-  // Отказываем вслух, как и с симлинками: patch-package в этом месте молча
-  // кладёт тот же пустой файл, и совпадать с ним здесь незачем.
-  if (target.binary) {
-    throw new Error(`${relativePath} is a binary file — bunch-package cannot apply that`);
-  }
-
   if (target.newMode === SYMLINK_MODE || target.oldMode === SYMLINK_MODE) {
     throw new Error(`${relativePath} is a symbolic link (mode ${SYMLINK_MODE}) — bunch-package cannot apply that`);
   }
@@ -245,6 +315,17 @@ export function planTarget(
 
   const exists = status !== null;
   const currentMode = status?.mode ?? null;
+
+  // Двоичная секция несёт содержимое целиком (literal) или дельтой к нынешнему
+  // файлу. Контекста, который можно приложить к дереву, у неё нет, зато есть
+  // git-хеши обеих сторон — по ним и решается, что делать. Это точнее всего,
+  // что умеют текстовые хунки, и не расходится с DEC-11: спрашиваем дерево.
+  if (target.binary !== null) {
+    const before = exists ? readFileSync(source) : Buffer.alloc(0);
+    const ops = planBinary(target, target.binary, relativePath, file, before, exists, currentMode);
+    return [...renameOps, ...ops];
+  }
+
   const wantExecutable =
     target.newMode === null || !MODES_SUPPORTED ? null : target.newMode === '100755';
 
