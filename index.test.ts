@@ -1,13 +1,14 @@
 import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from 'bun:test';
 import {execSync, spawn, spawnSync} from 'child_process';
 import {createHash} from 'crypto';
-import {chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
+import {chmodSync, copyFileSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
 import {findLinkDifferences, runDiff, scanTree, withPristine} from './src/create';
 import {parseOptions} from './src/options';
 import {parseRepository} from './src/upstream';
 import {withApplyLock} from './src/lock';
 import {ensureDir} from './src/paths';
 import {invertTarget, orderPatchFiles, parsePatch} from './src/patch-file';
+import {applyBinaryBlock, renderBinarySection} from './src/binary';
 import {join} from 'path';
 
 // writeFileSync пишет в тот же inode, что ломает тесты при hardlink-кеше bun.
@@ -2288,6 +2289,96 @@ describe('CLI usage', () => {
 // правка к нынешнему файлу. Формат разобран на живом выводе git (NOT-39), а
 // применённость решается git-хешами из строки `index <old>..<new>` — контекста,
 // который можно приложить к дереву, у такой секции нет.
+// Замкнутый круг: `create --binary` выпускает секцию формата git, наш `apply`
+// её кладёт, `reverse` снимает, а сам git её понимает. Последнее и есть главное
+// доказательство — формат сверяется с тем, кто его придумал (TSK-52).
+describe('create --binary', () => {
+  const BINARY = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 3]);
+
+  function withPicture(): string {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const pkg = join(TEST_DIR, 'node_modules', 'is-number');
+    writeFileSync(join(pkg, 'logo.png'), BINARY);
+    return pkg;
+  }
+
+  const patchPath = () => join(TEST_DIR, 'patches', 'is-number+7.0.0.patch');
+
+  test('carries a binary file and takes it back out again', () => {
+    const pkg = withPicture();
+    overwriteFile(join(pkg, 'index.js'), `${readFileSync(join(pkg, 'index.js'), 'utf-8')}\n// text too\n`);
+
+    const created = run('create is-number --binary', TEST_DIR);
+
+    expect(created.exitCode).toBe(0);
+    expect(created.stdout).toContain('binary file(s) carried in the patch');
+    expect(readFileSync(patchPath(), 'utf-8')).toContain('GIT binary patch');
+
+    // Дерево возвращается к тому, что поставил установщик, и патч кладётся заново.
+    rmSync(join(TEST_DIR, 'node_modules'), {force: true, recursive: true});
+    execSync('bun install', {cwd: TEST_DIR, stdio: 'pipe'});
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+    expect(readFileSync(join(pkg, 'logo.png')).equals(BINARY)).toBe(true);
+    expect(readFileSync(join(pkg, 'index.js'), 'utf-8')).toContain('// text too');
+
+    expect(run('reverse', TEST_DIR).exitCode).toBe(0);
+    // Файла, который патч добавлял, после отката быть не должно — ни пустого,
+    // ни какого: перевёрнутая секция говорит «его тут не было».
+    expect(existsSync(join(pkg, 'logo.png'))).toBe(false);
+    expect(readFileSync(join(pkg, 'index.js'), 'utf-8')).not.toContain('// text too');
+  });
+
+  test('writes a patch that git itself applies, both ways', () => {
+    const pkg = withPicture();
+    expect(run('create is-number --binary', TEST_DIR).exitCode).toBe(0);
+
+    // Отдельное дерево под git: наш патч — это патч формата git, и проверить
+    // это может только git. Свои же тесты здесь доказывали бы лишь то, что мы
+    // читаем собственную запись.
+    const repo = join(TEST_DIR, '.gitcheck');
+    mkdirSync(join(repo, 'node_modules', 'is-number'), {recursive: true});
+    const git = (args: string) =>
+      execSync(`git -c user.email=a@b -c user.name=c ${args}`, {cwd: repo, stdio: 'pipe'});
+    git('init -q .');
+    writeFileSync(join(repo, 'node_modules', 'is-number', 'index.js'), readFileSync(join(pkg, 'index.js')));
+    git('add -A');
+    git('commit -qm base');
+    copyFileSync(patchPath(), join(repo, 'ours.patch'));
+
+    git('apply ours.patch');
+    expect(readFileSync(join(repo, 'node_modules', 'is-number', 'logo.png')).equals(BINARY)).toBe(true);
+
+    git('apply -R ours.patch');
+    expect(existsSync(join(repo, 'node_modules', 'is-number', 'logo.png'))).toBe(false);
+  });
+
+  test('the backward block restores the previous content of a changed file', () => {
+    // Через `create` этот случай не достать: эталон приезжает из реестра, а
+    // двоичного файла в is-number нет. Зато он проверяется там, где и живёт, —
+    // на самой секции: при добавлении файла откат обходится хешем «его не
+    // было», и без этой проверки отсутствие обратного блока прошло бы незаметно.
+    const before = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3, 0xff]);
+    const after = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 9, 9, 9, 0xee, 0, 0x11]);
+
+    const [section] = parsePatch(renderBinarySection('node_modules/x/logo.png', before, after));
+
+    expect(applyBinaryBlock(section.binary!.forward!, before).equals(after)).toBe(true);
+    expect(applyBinaryBlock(section.binary!.backward!, after).equals(before)).toBe(true);
+  });
+
+  test('says nothing binary went in when the flag is absent', () => {
+    withPicture();
+
+    const created = run('create is-number', TEST_DIR);
+
+    // Без флага поведение прежнее: файл не переносится, но назван — и сказано,
+    // чем его перенести.
+    expect(created.stdout).toContain('cannot travel in a patch');
+    expect(created.stdout).toContain('Add --binary');
+    expect(existsSync(patchPath())).toBe(false);
+  });
+});
+
 describe('git binary patches', () => {
   const PKG = 'pic-lib';
 

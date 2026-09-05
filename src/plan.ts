@@ -199,7 +199,10 @@ function planBinary(
   if (exists && sameBlob(target.newSha, actual)) return [];
   if (!exists && (target.newPath === null || absentSide(target.newSha))) return [];
 
-  if (target.newPath === null || (binary.forward === null && target.deletedFile)) {
+  // Нули на месте «после» означают, что файла быть не должно: так записано
+  // удаление, и так же выглядит перевёрнутая секция, добавлявшая файл. Без
+  // этого откат добавления оставлял в дереве пустой файл вместо ничего.
+  if (target.newPath === null || absentSide(target.newSha) || (binary.forward === null && target.deletedFile)) {
     return exists ? [{kind: 'remove', file}] : [];
   }
 
