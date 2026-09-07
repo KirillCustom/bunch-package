@@ -128,6 +128,21 @@ always enough — raise it with `BUNCH_FETCH_TIMEOUT`, in seconds:
 BUNCH_FETCH_TIMEOUT=300 bunx bunch-package create some-enormous-package
 ```
 
+The pristine copy comes from the registry the project configured. bun reads registry
+settings from the directory it installs into and looks no higher, and that directory
+is a temporary one inside the project — so `create` copies `.npmrc` and `bunfig.toml`
+there first, and prints which file it used. In a monorepo the nearest config wins:
+the workspace's own, otherwise the one at the workspace root. Without that copy a
+package from a private registry could not be fetched at all, and a package whose name
+also exists in the public registry would quietly arrive from there — the diff would
+be taken against the wrong pristine copy, and the patch would be wrong without
+saying so.
+
+When `bun add` fails, `create` falls back to `npm pack`. npm does not read
+`bunfig.toml`, so a project that names its registry only there gets a refusal
+instead of that fallback: going to the default registry would be the same silently
+wrong patch.
+
 Packages installed from a local path rather than the registry — `file:`, `link:`,
 `workspace:`, a git URL, or a `.tgz` file — cannot be patched this way: there is no
 pristine copy to fetch from the registry. `create` detects the specifier in

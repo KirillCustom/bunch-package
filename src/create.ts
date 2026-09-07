@@ -1,8 +1,8 @@
 import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
-import {existsSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
+import {copyFileSync, existsSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync} from 'fs';
 import {homedir} from 'os';
-import {join, resolve, sep} from 'path';
+import {dirname, join, resolve, sep} from 'path';
 import {bunAlsoPatches} from './foreign';
 import {PathFilters, pathAllowed} from './options';
 import {ensureDir, installedPackagePath, isExecutable, packageNotFoundError, patchesDirectory, realPathOutsideProject, TEMP_WRITE_SUFFIX} from './paths';
@@ -11,7 +11,7 @@ import {isInTree, patchTargetDirectory} from './presence';
 import {PatchHeaderFields, formatPatchName, listPatchFiles, parsePatchName, patchesOfPackage, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
 import {renameRecordedPatch} from './state';
-import {projectRoot} from './workspace';
+import {displayPath, isInside, projectRoot} from './workspace';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
 // что артефактно на любой глубине. Каталоги сборки сюда не входят: `build` у
@@ -466,6 +466,83 @@ export function readManifest(packagePath: string): Manifest {
   };
 }
 
+// Настройки реестра bun читает только из каталога установки и вверх не
+// поднимается — измерено на bun 1.4: та же установка из подкаталога скачала
+// пакет с публичного реестра, хотя `.npmrc` и `bunfig.toml` корня указывали на
+// другой адрес (NOT-40). Эталон мы ставим во временный подкаталог проекта,
+// значит без копии конфига настройки проекта не участвуют вовсе, и следствия
+// два. Пакет из приватного реестра не скачается — это видный отказ. А пакет,
+// чьё имя есть и в публичном реестре, приедет чужим, дифф посчитается против
+// не того эталона, и патч выйдет молча неверным — то есть худший здесь класс
+// отказа. В patch-package это жалобы #318 и #329.
+//
+// Копией, а не установкой с cwd корня: ставить эталон из каталога проекта
+// значило бы тронуть его node_modules и lockfile, а обещание у нас обратное.
+const REGISTRY_CONFIGS = ['.npmrc', 'bunfig.toml'];
+
+// Ближайший конфиг: от cwd вверх до корня проекта включительно. В монорепо это
+// и конфиг воркспейса, и корневой — ближний побеждает, ровно как у самого bun,
+// который читает один каталог и родителей не спрашивает. Выше корня не
+// смотрим: там уже не проект. Пользовательский `~/.npmrc` при этом никуда не
+// девается — его bun и npm читают сами, HOME мы не подменяем.
+function nearestRegistryConfig(file: string): string | null {
+  const root = resolve(projectRoot());
+
+  for (let at = resolve(process.cwd()); isInside(root, at); at = dirname(at)) {
+    const candidate = join(at, file);
+    if (existsSync(candidate)) return candidate;
+    if (dirname(at) === at) break;
+  }
+
+  return null;
+}
+
+function copyRegistryConfig(tempDir: string): void {
+  const root = projectRoot();
+
+  for (const file of REGISTRY_CONFIGS) {
+    const source = nearestRegistryConfig(file);
+    if (source === null) continue;
+
+    try {
+      // Права copyFileSync переносит с исходного файла — проверено на 0600:
+      // токен в копии не становится доступнее, чем был в проекте.
+      copyFileSync(source, join(tempDir, file));
+    } catch (error: any) {
+      // Промолчать здесь нельзя: без конфига эталон приедет из умолчального
+      // реестра, и это ровно тот молчаливый неверный патч, ради которого копия
+      // и заводится.
+      throw new Error(
+        `Could not copy ${displayPath(root, source)} for the pristine copy: ${error.message}\n` +
+          `   Without it the pristine copy would come from the default registry, and the patch could be wrong.`,
+      );
+    }
+
+    console.log(`   registry settings: ${displayPath(root, source)}`);
+  }
+}
+
+// npm читает `.npmrc` и не читает `bunfig.toml` — измерено вместе с самим
+// дефектом: с реестром, названным только в bunfig, `bun add` упирался в него,
+// а запасной путь спокойно приносил одноимённый пакет из публичного реестра, и
+// патч выходил успешным против чужого эталона. Такой эталон хуже отсутствия
+// эталона, поэтому запасной путь здесь не идёт вовсе.
+//
+// Признак нарочно грубый: лишний отказ от запасного пути стоит одной понятной
+// строки в отчёте, а лишний тихий патч — неверного дерева у пользователя.
+function npmWouldIgnoreRegistry(tempDir: string): boolean {
+  const bunfig = join(tempDir, 'bunfig.toml');
+  if (!existsSync(bunfig)) return false;
+
+  const namesRegistry = (text: string) => /^[^#;\n]*\bregistry\s*=/m.test(text) || /^\s*\[install\.scopes/m.test(text);
+  if (!namesRegistry(readFileSync(bunfig, 'utf-8'))) return false;
+
+  // `.npmrc` без строки про реестр npm тоже не спасает: он прочтёт его и
+  // всё равно пойдёт в умолчальный реестр.
+  const npmrc = join(tempDir, '.npmrc');
+  return !existsSync(npmrc) || !namesRegistry(readFileSync(npmrc, 'utf-8'));
+}
+
 // Эталон нельзя ставить обычным `bun add`: bun раскладывает пакеты hardlink'ами,
 // поэтому файл в node_modules и запись в глобальном кеше — один инод. Правка
 // файла меняет кеш, «чистая» установка приезжает уже изменённой, и diff
@@ -479,6 +556,7 @@ function fetchPristine(name: string, version: string, tempDir: string): string {
     join(tempDir, 'package.json'),
     JSON.stringify({name: 'temp', version: '1.0.0'}, null, 2),
   );
+  copyRegistryConfig(tempDir);
 
   const failures: string[] = [];
   const timeout = fetchTimeoutMs();
@@ -504,6 +582,15 @@ function fetchPristine(name: string, version: string, tempDir: string): string {
     return join(tempDir, 'node_modules', name);
   } catch (error: any) {
     failures.push(`bun: ${describeFetchFailure(error, timeout)}`);
+  }
+
+  if (npmWouldIgnoreRegistry(tempDir)) {
+    failures.push(
+      'npm: not tried — the project names its registry in bunfig.toml, which npm does not read.\n' +
+        '        Fetching through npm would have taken the package from the default registry instead,\n' +
+        '        and the patch would have been built against the wrong pristine copy.',
+    );
+    throw new Error(`Could not fetch a pristine ${name}@${version}:\n   ${failures.join('\n   ')}`);
   }
 
   // Запасной путь — тарбол из реестра. Он тоже мимо кеша bun, но требует npm,
@@ -568,7 +655,13 @@ export function withPristine<T>(name: string, version: string, run: (pristine: s
       throw new Error(`Pristine copy of ${name}@${version} did not land at ${pristine}`);
     }
 
-    return run(pristine, tempDir);
+    // Разыменованным — по той же причине, по которой разыменован патчимый
+    // каталог. Конфиг проекта теперь копируется во временный каталог, а в нём
+    // может стоять `linker = "isolated"`: тогда bun кладёт эталон симлинком в
+    // `node_modules/.bun/…`. GNU diff 3.12 отвечает на такой аргумент с любой
+    // стороны `diff: <путь>: No such file or directory` и кодом 2, Apple diff
+    // ссылку разыменовывает — то есть дефект был бы виден везде, кроме macOS.
+    return run(realpathSync(pristine), tempDir);
   } finally {
     // Уборка не должна перебивать причину. На Windows файлы, оставшиеся от
     // установщика, убитого по нашему таймауту, система держит ещё какое-то
