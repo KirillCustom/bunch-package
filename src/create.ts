@@ -770,6 +770,12 @@ function reportBinaryFiles(rawPatch: string, packagePath: string): void {
 // Промолчать — значит ответить «изменений нет» человеку, который только что
 // заменил в пакете шрифт или картинку.
 function reportExcluded(paths: string[], carried: boolean): void {
+  // Подсказку печатал `console.log` мимо reportList, а тот на пустом списке
+  // молчит. Выходило, что каждый успешный `create` советовал добавить
+  // `--binary`, чтобы перенести «их», — и «их» не было: ни строки выше, ни
+  // файла в пакете. Ушло в релиз 1.18.0.
+  if (paths.length === 0) return;
+
   if (carried) {
     reportList(`📦 ${paths.length} binary file(s) carried in the patch:`, paths, path => path);
     console.log(`   Only bunch-package and git read these; patch-package and \`bun patch\` would write empty files.`);
