@@ -1330,6 +1330,34 @@ describe("bun's own marker files", () => {
   });
 });
 
+// Подсказка про `--binary` печаталась мимо своего заголовка: reportList на
+// пустом списке молчит, а `console.log` под ним срабатывал всегда. Каждый
+// успешный `create` советовал перенести «их», не назвав ни одного файла, —
+// и это уехало в 1.18.0.
+describe('what create says about files it cannot carry', () => {
+  test('says nothing about binary files when there are none', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const file = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    overwriteFile(file, `${readFileSync(file, 'utf-8')}\n// changed\n`);
+
+    const result = run('create is-number', TEST_DIR, {BUNCH_PRISTINE_CACHE: join(TEST_DIR, 'pristine-cache')});
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain('--binary');
+    expect(result.stdout).not.toContain('cannot travel in a patch');
+  });
+
+  test('names the files together with the hint when there are some', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    writeFileSync(join(TEST_DIR, 'node_modules', 'is-number', 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
+
+    const result = run('create is-number', TEST_DIR, {BUNCH_PRISTINE_CACHE: join(TEST_DIR, 'pristine-cache')});
+
+    expect(result.stdout).toContain('logo.png');
+    expect(result.stdout).toContain('--binary');
+  });
+});
+
 describe('patches that belong to bun', () => {
   const BUN_PATCH = `diff --git a/index.js b/index.js
 index c4498bcc..74988d81 100644
