@@ -691,6 +691,12 @@ Unified diffs as `git diff` and `patch-package` write them: content hunks, file
 creation and deletion, renames, mode changes, and files with no trailing newline.
 Patch files in CRLF are read correctly against LF sources.
 
+An empty file that was added or deleted travels too, as the section git writes for
+it — `new file mode` with no hunks. `diff` says nothing about such a file, since
+there is no text on either side to compare, so `create` builds that section itself.
+Without it a `.keep` or a `py.typed` was left behind in silence, and next to a text
+change the patch still looked complete.
+
 Nested dependencies use `patch-package`'s naming: `outer++inner+1.0.0.patch` is a
 patch for `node_modules/outer/node_modules/inner`, the copy bun installs when two
 versions of a package are needed at once. Create one by naming the path:
