@@ -6233,3 +6233,153 @@ describe('monorepo workspaces', () => {
     expect(patch).toContain('+++ b/node_modules/is-number/index.js');
   });
 });
+
+// Настройки реестра проекта bun читает только из каталога установки (NOT-40), а
+// эталон ставится во временный подкаталог. Без копии конфига пакет из
+// приватного реестра не скачается вовсе, а одноимённый публичный приедет чужим
+// — и патч выйдет молча неверным против не того эталона.
+describe('the registry the pristine copy comes from', () => {
+  // Недоступный порт доказал бы только отказ, а нужен положительный факт:
+  // спросили именно этот адрес. Отсюда свой сервер — он записывает, о чём
+  // спросили, и отвечает 404, чтобы прогон не ходил в сеть и не ждал таймаута.
+  // Сервер живёт в том же процессе, что и тест, а execSync блокирует цикл
+  // событий: отвечать на запрос CLI оказывается некому, и обе установки просто
+  // упираются в таймаут — сначала это выглядело как «конфиг не сработал».
+  // Отсюда асинхронный запуск.
+  function runAsync(args: string[], cwd: string, env: Record<string, string>): Promise<{stdout: string; exitCode: number}> {
+    return new Promise(resolve => {
+      const child = spawn(process.execPath, [CLI, ...args], {
+        cwd,
+        env: {...process.env, ...env},
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      child.stdout.on('data', chunk => {
+        stdout += chunk;
+      });
+      child.stderr.on('data', chunk => {
+        stdout += chunk;
+      });
+      child.on('close', code => resolve({stdout, exitCode: code ?? 1}));
+    });
+  }
+
+  async function withLocalRegistry<T>(body: (url: string, asked: string[]) => Promise<T>): Promise<T> {
+    const asked: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(request) {
+        asked.push(new URL(request.url).pathname);
+        return new Response('not here', {status: 404});
+      },
+    });
+
+    try {
+      return await body(`http://127.0.0.1:${server.port}/`, asked);
+    } finally {
+      server.stop(true);
+    }
+  }
+
+  // Кеш эталона обязан быть пустым: с тёплым кешем реестр не спрашивается
+  // вовсе, и тест зеленеет по случайной причине — это дважды мешало
+  // воспроизвести сам дефект.
+  const emptyCache = () => ({BUNCH_PRISTINE_CACHE: join(TEST_DIR, 'pristine-cache'), BUNCH_FETCH_TIMEOUT: '30'});
+
+  test('asks the registry the project configured in .npmrc', async () => {
+    await withLocalRegistry(async (url, asked) => {
+      writeFileSync(join(TEST_DIR, '.npmrc'), `registry=${url}\n`);
+      setupFakePackage(TEST_DIR, 'is-number', '7.0.0', {'index.js': 'module.exports = "patched";\n'});
+
+      const result = await runAsync(['create', 'is-number'], TEST_DIR, emptyCache());
+
+      expect(asked.some(path => path.includes('is-number'))).toBe(true);
+      expect(result.stdout).toContain('registry settings: .npmrc');
+      // Реестр ответил 404 — эталона нет, и патча быть не должно.
+      expect(result.exitCode).not.toBe(0);
+      expect(existsSync(join(TEST_DIR, 'patches'))).toBe(false);
+    });
+  });
+
+  test('asks the registry the project configured in bunfig.toml', async () => {
+    await withLocalRegistry(async (url, asked) => {
+      writeFileSync(join(TEST_DIR, 'bunfig.toml'), `[install]\nregistry = "${url}"\n`);
+      setupFakePackage(TEST_DIR, 'is-number', '7.0.0', {'index.js': 'module.exports = "patched";\n'});
+
+      const result = await runAsync(['create', 'is-number'], TEST_DIR, emptyCache());
+
+      expect(asked.some(path => path.includes('is-number'))).toBe(true);
+      expect(result.stdout).toContain('registry settings: bunfig.toml');
+      // npm bunfig.toml не читает, и запасной путь принёс бы одноимённый пакет
+      // из публичного реестра — успешно, молча и против чужого эталона.
+      expect(result.stdout).toContain('which npm does not read');
+      expect(existsSync(join(TEST_DIR, 'patches'))).toBe(false);
+    });
+  });
+
+  // В монорепо `.npmrc` лежит у корня воркспейсов, а команда запускается из
+  // пакета — то есть на два каталога ниже, чем смотрит сам bun.
+  test('takes the config from the workspace root when run inside a workspace', async () => {
+    await withLocalRegistry(async (url, asked) => {
+      writeFileSync(join(TEST_DIR, 'package.json'), JSON.stringify({name: 'mono', private: true, workspaces: ['packages/*']}));
+      mkdirSync(join(TEST_DIR, 'packages', 'a'), {recursive: true});
+      writeFileSync(join(TEST_DIR, 'packages', 'a', 'package.json'), JSON.stringify({name: '@mono/a', version: '1.0.0'}));
+      writeFileSync(join(TEST_DIR, '.npmrc'), `registry=${url}\n`);
+      setupFakePackage(TEST_DIR, 'is-number', '7.0.0', {'index.js': 'module.exports = "patched";\n'});
+
+      const result = await runAsync(['create', 'is-number'], join(TEST_DIR, 'packages', 'a'), emptyCache());
+
+      expect(asked.some(path => path.includes('is-number'))).toBe(true);
+      expect(result.stdout).toContain('registry settings: .npmrc');
+      expect(existsSync(join(TEST_DIR, 'packages', 'a', 'patches'))).toBe(false);
+    });
+  });
+
+  // Ближний конфиг побеждает — так же, как у самого bun, который читает один
+  // каталог и родителей не спрашивает. Без этого воркспейс со своим реестром
+  // молча получал бы корневой.
+  test('prefers the config of the workspace over the one at the root', async () => {
+    await withLocalRegistry(async (url, asked) => {
+      writeFileSync(join(TEST_DIR, 'package.json'), JSON.stringify({name: 'mono', private: true, workspaces: ['packages/*']}));
+      mkdirSync(join(TEST_DIR, 'packages', 'a'), {recursive: true});
+      writeFileSync(join(TEST_DIR, 'packages', 'a', 'package.json'), JSON.stringify({name: '@mono/a', version: '1.0.0'}));
+      writeFileSync(join(TEST_DIR, '.npmrc'), 'registry=http://127.0.0.1:9/\n');
+      writeFileSync(join(TEST_DIR, 'packages', 'a', '.npmrc'), `registry=${url}\n`);
+      setupFakePackage(TEST_DIR, 'is-number', '7.0.0', {'index.js': 'module.exports = "patched";\n'});
+
+      const result = await runAsync(['create', 'is-number'], join(TEST_DIR, 'packages', 'a'), emptyCache());
+
+      expect(asked.some(path => path.includes('is-number'))).toBe(true);
+      expect(result.stdout).toContain('registry settings: packages/a/.npmrc');
+    });
+  });
+
+  // Копия конфига приносит во временный каталог и раскладку: с
+  // `linker = "isolated"` bun кладёт эталон симлинком в `node_modules/.bun/…`.
+  // GNU diff отвечает на такой аргумент `No such file or directory` и кодом 2,
+  // Apple diff ссылку разыменовывает — поэтому проверять надо обоими:
+  // `PATH=/opt/homebrew/opt/diffutils/bin:$PATH bun test`.
+  test('still builds a patch when the project asks for an isolated layout', () => {
+    writeFileSync(join(TEST_DIR, 'bunfig.toml'), '[install]\nlinker = "isolated"\n');
+    setupFakePackage(TEST_DIR, 'is-number', '7.0.0', {'index.js': 'module.exports = "patched";\n'});
+
+    const result = run('create is-number', TEST_DIR, {BUNCH_PRISTINE_CACHE: join(TEST_DIR, 'pristine-cache')});
+
+    expect(result.exitCode).toBe(0);
+    const patch = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
+    expect(patch).toContain('+++ b/node_modules/is-number/index.js');
+  });
+
+  // Конфиг копируется во временный каталог, а тот уносится вместе с прогоном:
+  // токен из `.npmrc` не должен остаться лежать в проекте лишней копией.
+  test('leaves no copy of the config behind', () => {
+    writeFileSync(join(TEST_DIR, '.npmrc'), 'registry=http://127.0.0.1:9/\n');
+    setupFakePackage(TEST_DIR, 'is-number', '7.0.0', {'index.js': 'module.exports = "patched";\n'});
+
+    run('create is-number', TEST_DIR, {BUNCH_PRISTINE_CACHE: join(TEST_DIR, 'pristine-cache'), BUNCH_FETCH_TIMEOUT: '5'});
+
+    expect(readdirSync(TEST_DIR).some(entry => entry.startsWith('.bunch-patch-tmp-'))).toBe(false);
+  });
+});
