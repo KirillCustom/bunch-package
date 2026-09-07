@@ -2,7 +2,7 @@ import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from '
 import {execSync, spawn, spawnSync} from 'child_process';
 import {createHash} from 'crypto';
 import {chmodSync, copyFileSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
-import {findLinkDifferences, runDiff, scanTree, withPristine} from './src/create';
+import {diffTrees, findLinkDifferences, runDiff, scanTree, withPristine} from './src/create';
 import {parseOptions} from './src/options';
 import {parseRepository} from './src/upstream';
 import {withApplyLock} from './src/lock';
@@ -1355,6 +1355,103 @@ describe('what create says about files it cannot carry', () => {
 
     expect(result.stdout).toContain('logo.png');
     expect(result.stdout).toContain('--binary');
+  });
+});
+
+// Пустой добавленный или удалённый файл `diff` не показывает вовсе: текста нет
+// ни с одной стороны. До этого `create` отвечал «No changes detected» человеку,
+// добавившему `.keep`, а рядом с текстовой правкой писал патч, выглядевший
+// полным, и молча оставлял файл позади — класс TSK-49 для пустых файлов.
+describe('empty files a patch has to carry', () => {
+  function trees(): {clean: string; modified: string} {
+    const clean = join(TEST_DIR, 'clean');
+    const modified = join(TEST_DIR, 'modified');
+    for (const root of [clean, modified]) {
+      mkdirSync(root, {recursive: true});
+      writeFileSync(join(root, 'package.json'), JSON.stringify({name: 'e', version: '1.0.0'}));
+      writeFileSync(join(root, 'index.js'), 'const a = 1;\n');
+    }
+    return {clean, modified};
+  }
+
+  test('carries an added empty file as a section git itself understands', () => {
+    const {clean, modified} = trees();
+    writeFileSync(join(modified, '.keep'), '');
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.content).toContain('diff --git a/node_modules/e/.keep b/node_modules/e/.keep');
+    expect(diff.content).toContain('new file mode 100644');
+    // Хунков у такой секции нет и быть не может: содержимого нет.
+    expect(diff.content).not.toContain('@@');
+  });
+
+  test('carries a deleted empty file the same way', () => {
+    const {clean, modified} = trees();
+    writeFileSync(join(clean, '.keep'), '');
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.content).toContain('diff --git a/node_modules/e/.keep b/node_modules/e/.keep');
+    expect(diff.content).toContain('deleted file mode 100644');
+  });
+
+  // Половина, которую легко потерять, починив первую: служебная мелочь чужих
+  // инструментов пустой бывает чаще нашего, и подбирать её из дерева нельзя.
+  test('leaves out the empty files diff itself would skip', () => {
+    const {clean, modified} = trees();
+    writeFileSync(join(modified, '.bun-tag-95134b8c7116f9cb'), '');
+    writeFileSync(join(modified, '.DS_Store'), '');
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.content).not.toContain('.bun-tag-95134b8c7116f9cb');
+    expect(diff.content).not.toContain('.DS_Store');
+  });
+
+  // Непустой добавленный файл `diff` показывает сам. Без проверки размера мы
+  // добавили бы к его секции вторую, пустую, и файл поехал бы в патче дважды.
+  // Найдено мутацией: без этой проверки все прочие тесты оставались зелёными.
+  test('does not add a second section for a file diff already carries', () => {
+    const {clean, modified} = trees();
+    writeFileSync(join(modified, 'added.js'), 'const b = 2;\n');
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+    const sections = diff.content.split('\n').filter(line => line.startsWith('diff --git'));
+
+    expect(sections.filter(line => line.includes('added.js'))).toHaveLength(1);
+    expect(diff.content).toContain('+const b = 2;');
+  });
+
+  test('an added empty file alone is a change, not "no changes detected"', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    writeFileSync(join(TEST_DIR, 'node_modules', 'is-number', '.keep'), '');
+
+    const result = run('create is-number', TEST_DIR, {BUNCH_PRISTINE_CACHE: join(TEST_DIR, 'pristine-cache')});
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain('No changes detected');
+    expect(readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8')).toContain('new file mode');
+  });
+
+  // Круг: то, что мы написали, наш же apply кладёт, а reverse снимает, и дерево
+  // возвращается побайтово (INS-8).
+  test('apply creates it and reverse takes it away again', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const keep = join(TEST_DIR, 'node_modules', 'is-number', '.keep');
+    writeFileSync(keep, '');
+    expect(run('create is-number', TEST_DIR, {BUNCH_PRISTINE_CACHE: join(TEST_DIR, 'pristine-cache')}).exitCode).toBe(0);
+
+    unlinkSync(keep);
+    const before = hashTree(join(TEST_DIR, 'node_modules', 'is-number'));
+
+    expect(run('apply', TEST_DIR).stdout).toContain('1 applied');
+    expect(existsSync(keep)).toBe(true);
+    expect(readFileSync(keep, 'utf-8')).toBe('');
+
+    expect(run('reverse', TEST_DIR).stdout).toContain('1 of 1 un-applied');
+    expect(existsSync(keep)).toBe(false);
+    expect(hashTree(join(TEST_DIR, 'node_modules', 'is-number'))).toBe(before);
   });
 });
 

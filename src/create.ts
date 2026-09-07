@@ -147,6 +147,75 @@ function isExcludedFromDiff(relativePath: string): boolean {
   });
 }
 
+// Тот же список, что уходит в `--exclude`, но прочитанный по правилам самого
+// diff: он матчит имя файла, и шаблоны бывают трёх видов — точное имя, `*.png`
+// и `.bun-tag-*`. `isExcludedFromDiff` выше отвечает на другой вопрос — какие
+// расхождения назвать человеку, — и намеренно молчит про чужую служебную
+// мелочь; здесь же нужен ровно тот набор, который diff не смотрит.
+function skippedByDiff(relativePath: string): boolean {
+  const name = relativePath.split('/').pop() ?? relativePath;
+
+  return EXCLUDE_PATTERNS.some(pattern => {
+    const starts = pattern.startsWith('*');
+    const ends = pattern.endsWith('*');
+    if (!starts && !ends) return name === pattern;
+    if (starts && ends) return name.includes(pattern.slice(1, -1));
+    return starts ? name.endsWith(pattern.slice(1)) : name.startsWith(pattern.slice(0, -1));
+  });
+}
+
+// Пустой файл, который появился или исчез, `diff` не показывает вовсе: текста
+// нет ни с одной стороны, а разницу он ищет в тексте. Без этих секций `create`
+// отвечал «No changes detected» человеку, добавившему в пакет `.keep` или
+// `py.typed`, — а рядом с текстовой правкой патч писался и выглядел полным,
+// молча оставив файл позади. Тот же класс, что TSK-49 для двоичных.
+//
+// Секцию строим сами: формат её несёт (`new file mode` / `deleted file mode`
+// без хунков), наш `apply` обе стороны уже читает, patch-package 8.0.1
+// применяет верно — проверено запуском, — и git пишет ровно так же.
+function emptyFileSections(
+  cleanRoot: string,
+  modifiedRoot: string,
+  clean: TreeScan,
+  modified: TreeScan,
+): DiffSection[] {
+  const sections: DiffSection[] = [];
+  const paths = [...new Set([...clean.executable.keys(), ...modified.executable.keys()])].sort();
+
+  for (const relativePath of paths) {
+    const before = clean.executable.has(relativePath);
+    const after = modified.executable.has(relativePath);
+    if (before === after) continue; // файл не появлялся и не исчезал
+    if (skippedByDiff(relativePath)) continue;
+
+    // Непустые diff показывает сам; здесь только те, о которых он промолчал.
+    try {
+      if (statSync(join(before ? cleanRoot : modifiedRoot, relativePath)).size !== 0) continue;
+    } catch {
+      continue; // прочитать не смогли — пусть об этом говорит тот, кто читает
+    }
+
+    sections.push({relativePath, body: []});
+  }
+
+  return sections;
+}
+
+// Свои секции встают между чужими по пути, а не в конец: порядок в патче
+// остаётся тем же, каким его выдаёт diff, и существующие секции с места не
+// сходят.
+function mergeByPath(fromDiff: DiffSection[], ours: DiffSection[]): DiffSection[] {
+  if (ours.length === 0) return fromDiff;
+
+  const merged = [...fromDiff];
+  for (const section of ours) {
+    const at = merged.findIndex(existing => section.relativePath < existing.relativePath);
+    if (at === -1) merged.push(section);
+    else merged.splice(at, 0, section);
+  }
+  return merged;
+}
+
 function readIfPresent(path: string): Buffer | null {
   return existsSync(path) ? readFileSync(path) : null;
 }
@@ -1006,7 +1075,10 @@ export function diffTrees(
   );
 
   const rawPatch = runDiff(cleanRoot, modifiedRoot, name, version, missingLinkPaths);
-  const sections = splitDiffSections(rawPatch, cleanRoot, modifiedRoot);
+  const sections = mergeByPath(
+    splitDiffSections(rawPatch, cleanRoot, modifiedRoot),
+    emptyFileSections(cleanRoot, modifiedRoot, cleanTree, modifiedTree),
+  );
   const kept: DiffSection[] = [];
   const skipped: DiffSection[] = [];
   const filtered: DiffSection[] = [];
