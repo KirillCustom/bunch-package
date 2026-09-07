@@ -2272,6 +2272,18 @@ describe('CLI usage', () => {
     expect(result.stdout).toContain('apply');
   });
 
+  // `--binary` уехал в 1.18.0, документированный в README и невидимый в справке:
+  // README читают, когда уже знают, что искать, а справку — когда не знают.
+  // Поэтому проверяются все флаги `create`, а не один новый: пропуск виден
+  // только у того флага, который забыли, и общего теста на это не было.
+  test('names every flag of create that the README documents', () => {
+    const help = run('', TEST_DIR).stdout;
+
+    for (const flag of ['--append', '--dev', '--why', '--binary']) {
+      expect(help).toContain(flag);
+    }
+  });
+
   test('shows error when create without package name', () => {
     const result = run('create', TEST_DIR);
     expect(result.exitCode).not.toBe(0);

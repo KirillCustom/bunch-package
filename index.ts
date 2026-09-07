@@ -143,6 +143,7 @@ Commands:
   bunch-package create <package> --append <name>  Add another patch to the package
   bunch-package create <package> --dev             Mark it as needed only in development
   bunch-package create <package> --why <text>     Record why the patch exists, in the patch file
+  bunch-package create <package> --binary         Carry binary files, in the format git writes
   bunch-package apply                             Apply all patches
   bunch-package reverse                           Un-apply all of them
   bunch-package status                            Show which patches are in the tree
