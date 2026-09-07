@@ -6374,12 +6374,20 @@ describe('the registry the pristine copy comes from', () => {
 
   // Конфиг копируется во временный каталог, а тот уносится вместе с прогоном:
   // токен из `.npmrc` не должен остаться лежать в проекте лишней копией.
-  test('leaves no copy of the config behind', () => {
-    writeFileSync(join(TEST_DIR, '.npmrc'), 'registry=http://127.0.0.1:9/\n');
-    setupFakePackage(TEST_DIR, 'is-number', '7.0.0', {'index.js': 'module.exports = "patched";\n'});
+  //
+  // Отказ здесь строится ответом 404, а не таймаутом: убитый по таймауту
+  // установщик Windows держит ещё какое-то время, и `withPristine` тогда
+  // намеренно оставляет каталог — объяснение дороже уборки. Первая версия
+  // теста упиралась ровно в это и краснела на Windows, требуя обещания,
+  // которого проект не давал.
+  test('leaves no copy of the config behind', async () => {
+    await withLocalRegistry(async url => {
+      writeFileSync(join(TEST_DIR, '.npmrc'), `registry=${url}\n`);
+      setupFakePackage(TEST_DIR, 'is-number', '7.0.0', {'index.js': 'module.exports = "patched";\n'});
 
-    run('create is-number', TEST_DIR, {BUNCH_PRISTINE_CACHE: join(TEST_DIR, 'pristine-cache'), BUNCH_FETCH_TIMEOUT: '5'});
+      await runAsync(['create', 'is-number'], TEST_DIR, emptyCache());
 
-    expect(readdirSync(TEST_DIR).some(entry => entry.startsWith('.bunch-patch-tmp-'))).toBe(false);
+      expect(readdirSync(TEST_DIR).some(entry => entry.startsWith('.bunch-patch-tmp-'))).toBe(false);
+    });
   });
 });
