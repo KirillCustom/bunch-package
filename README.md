@@ -313,7 +313,7 @@ when a hunk has no context at all. Applying is deliberately left alone: it puts 
 patch's line through as written, which is what `patch-package` does and what makes
 the two produce identical trees.
 
-Measured on 290 real patches from public repositories: 289 restore the package byte
+Measured on 368 real patches from public repositories: 365 restore the package byte
 for byte. The one that does not is irreducible — its hunk replaces the only line of
 a one-line file, so neither the file nor the patch holds any evidence of what the
 line ending used to be.
@@ -453,10 +453,10 @@ Three things it will tell you rather than paper over:
   would give two files the same name. The files written for a version you no longer
   have are listed, so you can decide which changes stay.
 
-How often this works is measured, not promised. Of 289 patches taken from public
-repositories, applied to the next published version of their package: 64% still fit
-and were moved, 5% had already been fixed upstream, and 30% no longer fit. Jumping
-straight to the latest version instead — often many releases later — only 22% fit.
+How often this works is measured, not promised. Of 285 patches taken from public
+repositories that had a newer version to move to: 62% still fit and were moved, 4%
+had already been fixed upstream, and 34% no longer fit. Jumping straight to the
+latest version instead — often many releases later — only 22% fit.
 A patch is written against one version, and the further the package moves, the less
 of it survives.
 
@@ -534,8 +534,8 @@ it.
 ### Filing a patch upstream
 
 A patch is a temporary fork, and the goal is for it to go away. It does happen:
-of a corpus of 292 real patches, 220 had a newer version of their package to move
-to, and **11 of those 220 (5%) were no longer needed** — the fix had gone upstream
+of a corpus of 376 real patches, 285 had a newer version of their package to move
+to, and **11 of those 285 (4%) were no longer needed** — the fix had gone upstream
 between the two versions. The faster it is reported, the sooner the patch is gone.
 
 `upstream` builds a GitHub new-issue URL with the patch diff in the body, so you
@@ -875,9 +875,11 @@ unchanged afterwards.
 
 ## Platforms
 
-Checked against 290 patches taken from public repositories, applied with both this
-tool and `patch-package` and compared byte for byte: all 290 trees are identical,
-and the two tools agree on the exit code every time.
+Checked against 368 patches taken from public repositories, applied with both this
+tool and `patch-package` and compared byte for byte: 367 of them install and all 367
+trees are identical, and the two tools agree on the exit code every time. Seventy of
+those patches are for nested dependencies (`outer++inner`) and eight change the
+executable bit — classes the set did not hold at all until they were sought out.
 
 Tested on Linux, macOS and Windows. `apply` is plain JavaScript and needs nothing
 from the system; `create` shells out to `diff`, which is present on all three
@@ -957,11 +959,13 @@ the same. Everything below was measured by running both, not assumed:
 
 | | bunch-package | patch-package 8.0.1 |
 |---|---|---|
-| Result on 290 real patches | identical trees, identical exit codes | identical trees, identical exit codes |
+| Result on 368 real patches | identical trees, identical exit codes | identical trees, identical exit codes |
 | `apply` on a 3-section patch | 15 ms | 71 ms |
 | `apply` on a 35-section patch | 22 ms | 76 ms |
 | Applying a patch that only appends lines, three times | applied once, then recognised | 1, then 2, then 3 copies of the added lines |
 | Patch section describing a symlink (`mode 120000`) | refused, and named as a symlink | refused as "could not be parsed" |
+| Patch section carrying binary data (`GIT binary patch`) | applied, and written too with `--binary` | an empty file in its place, reported as success |
+| Creating a patch when the project uses its own registry | `.npmrc` and `bunfig.toml` are copied to the install, refusal names what the registry said | ran for over two minutes on `Installing …@… with npm`, then neither error nor patch |
 | Record of what was applied | `node_modules/.bunch-package-state.json` | `.patch-package.json`, written inside the patched package |
 | Bun's shared install cache | handled | not addressed — its README does not mention bun |
 | Taking the package off that cache before you edit it | `edit` | — |
