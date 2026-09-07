@@ -1302,6 +1302,34 @@ rename to node_modules/test-lib/new.txt
 // patches/ и записывает его в `patchedDependencies`. Пути в таком патче — от
 // корня пакета, а не от корня проекта, и раньше мы срезали `a/` и били по
 // файлам самого проекта: `apply` переписывал ./index.js и печатал `✅ 1 applied`.
+// `bun install`, применяя патч, кладёт в пакет пустой маркер `.bun-tag-<хеш>` —
+// измерено на пустом кеше и на нашем же патче, который маркеров не несёт. Из
+// него растёт жалоба bun #19327: следующий `bun patch --commit` видит маркер
+// новым файлом и записывает в патч. К нам это приходит с двух сторон: `import`
+// такие секции выбрасывает, а `create` не должен их подбирать из дерева.
+describe("bun's own marker files", () => {
+  test('create leaves a .bun-tag file out of the patch', () => {
+    setupFakePackage(TEST_DIR, 'tagged-lib', '1.0.0', {'index.js': 'const a = 1;\n'});
+    const pkg = join(TEST_DIR, 'node_modules', 'tagged-lib');
+    // Непустым нарочно: пустой файл `diff` не показывает вовсе, и тест был бы
+    // зелёным без всякого исключения — по случайной причине, а не по правилу.
+    writeFileSync(join(pkg, '.bun-tag-95134b8c7116f9cb'), 'bun bookkeeping\n');
+
+    const pristine = join(TEST_DIR, 'pristine');
+    mkdirSync(pristine, {recursive: true});
+    writeFileSync(join(pristine, 'package.json'), JSON.stringify({name: 'tagged-lib', version: '1.0.0'}));
+    writeFileSync(join(pristine, 'index.js'), 'const a = 2;\n');
+
+    const patch = runDiff(pristine, pkg, 'tagged-lib', '1.0.0');
+
+    expect(patch).toContain('index.js');
+    // По имени файла, а не по подстроке `.bun-tag`: сам `diff` печатает свою
+    // командную строку, и в ней стоит `--exclude=.bun-tag-*`. Первая версия
+    // проверки ловила именно её и краснела при работающем исключении.
+    expect(patch).not.toContain('.bun-tag-95134b8c7116f9cb');
+  });
+});
+
 describe('patches that belong to bun', () => {
   const BUN_PATCH = `diff --git a/index.js b/index.js
 index c4498bcc..74988d81 100644
