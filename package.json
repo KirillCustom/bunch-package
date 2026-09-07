@@ -1,6 +1,6 @@
 {
   "name": "bunch-package",
-  "version": "1.18.0",
+  "version": "1.19.0",
   "description": "Patch management tool for Bun - alternative to patch-package",
   "type": "module",
   "main": "./dist/index.js",
