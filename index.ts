@@ -13,6 +13,7 @@ import {rebasePatches, reverseAll} from './src/rebase';
 import {retargetPatches} from './src/retarget';
 import {showStatus} from './src/status';
 import {upstreamIssue} from './src/upstream';
+import {version} from './package.json';
 
 // Main
 const command = process.argv[2];
@@ -133,6 +134,14 @@ try {
       break;
     }
 
+    // Без этой ветки `--version` падал в справку, и узнать, что установлено,
+    // было нечем: вопрос «какая у вас версия» первый в любом разборе отказа.
+    // Версия вшивается в dist/index.js при сборке, а не читается с диска.
+    case '--version':
+    case '-v':
+      console.log(version);
+      break;
+
     default:
       console.log(`
 🎯 bunch-package - Patch management for Bun
@@ -161,6 +170,7 @@ Options:
   --case-sensitive-path-filtering                 Match those two case-sensitively
   --error-on-warn                                 Make \`apply\` exit 1 after a warning too
   --why <text>, --upstream <url>                  What a new patch is for, kept in the patch file
+  --version, -v                                   Print the installed version
     `);
   }
 } catch (error: any) {

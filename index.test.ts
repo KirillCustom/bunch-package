@@ -2596,6 +2596,18 @@ describe('CLI usage', () => {
     }
   });
 
+  // `--version` падал в справку: установленную версию узнать было нечем, а
+  // это первый вопрос в любом разборе отказа.
+  test('prints the version, not the help, for --version and -v', () => {
+    const {version} = JSON.parse(readFileSync(join(import.meta.dir, 'package.json'), 'utf-8'));
+
+    for (const flag of ['--version', '-v']) {
+      const result = run(flag, TEST_DIR);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe(version);
+    }
+  });
+
   test('shows error when create without package name', () => {
     const result = run('create', TEST_DIR);
     expect(result.exitCode).not.toBe(0);

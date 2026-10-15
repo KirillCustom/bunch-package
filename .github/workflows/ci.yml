@@ -73,6 +73,9 @@ jobs:
           printf 'line one\nline two\n' > node_modules/fakepkg/index.js
           printf -- '--- a/node_modules/fakepkg/index.js\n+++ b/node_modules/fakepkg/index.js\n@@ -1,2 +1,2 @@\n-line one\n+PATCHED\n line two\n' > patches/fakepkg+1.0.0.patch
 
+          # Версия читается импортом package.json — на старых bun тоже.
+          test "$(bun ../index.ts --version)" = "$(bun -e 'console.log(require("../package.json").version)')"
+
           bun ../index.ts apply
           grep -q '^PATCHED$' node_modules/fakepkg/index.js
 
