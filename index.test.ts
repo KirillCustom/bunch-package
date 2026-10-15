@@ -7,7 +7,7 @@ import {parseOptions} from './src/options';
 import {parseRepository} from './src/upstream';
 import {withApplyLock} from './src/lock';
 import {ensureDir} from './src/paths';
-import {invertTarget, orderPatchFiles, parsePatch} from './src/patch-file';
+import {invertTarget, looksStructural, orderPatchFiles, parsePatch, splitPatchHeader} from './src/patch-file';
 import {applyBinaryBlock, renderBinarySection} from './src/binary';
 import {join} from 'path';
 
@@ -3945,6 +3945,48 @@ describe('state file and status', () => {
     const patch = readFileSync(join(TEST_DIR, 'patches', 'is-number+7.0.0.patch'), 'utf-8');
     expect(patch).toContain('+module.exports = "patched";');
     expect(patch).not.toContain('patch-package.json');
+  });
+});
+
+// `diff -r` печатает перед каждой секцией строку-команду `diff -Naur … a b`, и
+// старый `create` её сохранял. Структурной её не считали, поэтому у такого
+// патча она оказывалась заголовком — «зачем этот патч существует», — и
+// `status` показывал её как описание (TSK-64, сообщено из vgl-mobile-rn).
+describe('the diff command line an old create kept', () => {
+  const PKG = 'oldfmt-lib';
+  const NAME = `${PKG}+1.0.0.patch`;
+  const BODY = `--- a/node_modules/${PKG}/index.js
++++ b/node_modules/${PKG}/index.js
+@@ -1 +1 @@
+-const a = 1;
++const a = 2;
+`;
+  const COMMAND = `diff -Naur --exclude=node_modules --exclude=.git a/node_modules/${PKG}/index.js b/node_modules/${PKG}/index.js`;
+
+  test('is part of the patch, not its header', () => {
+    expect(splitPatchHeader(`${COMMAND}\n${BODY}`).header).toBe('');
+    // Настоящий заголовок над ней остаётся заголовком.
+    expect(splitPatchHeader(`Why: SSR breaks\n\n${COMMAND}\n${BODY}`).header).toBe('Why: SSR breaks\n\n');
+  });
+
+  test('status does not show it as the description', () => {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writeFileSync(join(TEST_DIR, 'patches', NAME), `${COMMAND}\n${BODY}`);
+    expect(run('apply', TEST_DIR).exitCode).toBe(0);
+
+    const result = run('status', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain('diff -Naur');
+  });
+
+  // Разбор аргументов отвергает `--why`, похожий на начало секции. Строка-
+  // команда теперь из таких, и текст «diff -…» в `--why` пришлось бы читать как
+  // патч. Обычное слово «diff» в причине при этом законно.
+  test('a reason that merely mentions diff is still accepted', () => {
+    expect(looksStructural('diff -Naur a b')).toBe(true);
+    expect(looksStructural('diff of the SSR fix')).toBe(false);
   });
 });
 

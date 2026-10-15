@@ -455,8 +455,13 @@ export function orderPatchFiles(files: string[]): string[] {
 // применяется patch-package 8.0.1 и нами в побайтово одинаковые деревья.
 // Разборщик заголовок и так не замечает — здесь он нужен затем, чтобы `create`
 // и `retarget` не выбрасывали его при перезаписи файла.
+//
+// `diff -<флаги> …` — строка-команда, которую `diff -r` печатает перед каждой
+// секцией; старый `create` её сохранял. Пока её тут не было, у такого патча она
+// становилась заголовком, и `status` показывал её как описание (TSK-64). Только
+// с флагом: «diff of the SSR fix» в заголовке — законный текст.
 const STRUCTURAL =
-  /^(diff --git |--- |\+\+\+ |@@ |Index: |index |old mode |new mode |new file mode |deleted file mode |rename from |rename to |similarity index |Binary files )/;
+  /^(diff --git |diff -[A-Za-z]|--- |\+\+\+ |@@ |Index: |index |old mode |new mode |new file mode |deleted file mode |rename from |rename to |similarity index |Binary files )/;
 
 // Строка заголовка, начинающаяся так, была бы прочитана как начало секции.
 // Спрашивает разбор аргументов: `--why "--- сломано"` иначе превратил бы патч
