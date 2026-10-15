@@ -10,7 +10,7 @@ import {renderBinarySection} from './binary';
 import {isInTree, patchTargetDirectory} from './presence';
 import {PatchHeaderFields, formatPatchName, listPatchFiles, parsePatchName, patchesOfPackage, splitPatchHeader, updatePatchHeader} from './patch-file';
 import {planSequence, replayPatches, SequencePlan} from './sequence';
-import {renameRecordedPatch} from './state';
+import {recordPatch, renameRecordedPatch} from './state';
 import {displayPath, isInside, projectRoot} from './workspace';
 
 // diff матчит --exclude по имени файла, а не по пути, поэтому здесь только то,
@@ -1389,6 +1389,7 @@ export function createPatch(
     }
 
     writePatch(plan, diff.content, header);
+    recordPatch(plan.outputName);
     reportOtherVersions(plan.outputName, patchDir, version);
   });
 }

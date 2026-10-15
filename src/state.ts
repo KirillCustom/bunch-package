@@ -154,7 +154,8 @@ export function recordedPatches(state: State | null = readState()): Map<string, 
   return new Map((state?.patches ?? []).map(patch => [patch.file, patch]));
 }
 
-// Пишут запись двое: apply, когда патчи легли, и rebase, когда часть их снял.
+// Пишут запись целиком apply, когда патчи легли, и rebase, когда часть их снял;
+// `create` дописывает в неё один свой патч — recordPatch() ниже.
 // Время первого попадания в дерево сохраняется, пока файл патча не изменился, —
 // иначе `appliedAt` означал бы «когда последний раз запускали».
 //
@@ -181,35 +182,13 @@ export function recordPatches(inTree: string[], {keepAsRecorded = [], forget = [
 
   for (const file of inTree) {
     const before = previous.get(file);
-
-    let raw: Buffer;
-    try {
-      raw = readFileSync(join(patchesDirectory(), file));
-    } catch {
-      // Файла патча больше нет. Пересчитать запись не из чего, но и уронить
-      // прогон нельзя: `rebase` и `reverse` зовут запись **после** того, как
-      // дерево уже изменено, и падение здесь означало бы «работа сделана, а
-      // команда отчиталась отказом» — стек вместо отчёта (TSK-45).
-      if (before !== undefined) patches.push(before);
-      continue;
-    }
-
-    const parsed = parsePatchName(file);
-    const content = raw.toString('utf-8');
-    const sha256 = hashPatchFile(raw);
-    const bodySha256 = hashPatchBody(content);
-
-    patches.push({
-      file,
-      packageDir: parsed?.packageDir ?? '',
-      version: parsed?.version ?? '',
-      sha256,
-      bodySha256,
-      files: filesLeftBy(content),
-      // Время первого попадания в дерево переживает правку заголовка: дерево от
-      // неё не изменилось, значит и «применён тогда-то» остаётся верным.
-      appliedAt: before !== undefined && sameChange(before, sha256, bodySha256) ? before.appliedAt : now,
-    });
+    const record = recordOf(file, before, now);
+    // Файла патча больше нет. Пересчитать запись не из чего, но и уронить
+    // прогон нельзя: `rebase` и `reverse` зовут запись **после** того, как
+    // дерево уже изменено, и падение здесь означало бы «работа сделана, а
+    // команда отчиталась отказом» — стек вместо отчёта (TSK-45).
+    if (record !== null) patches.push(record);
+    else if (before !== undefined) patches.push(before);
   }
 
   // Пересчитывать их нельзя: файл патча уже другой, и пересчёт записал бы его
@@ -236,6 +215,51 @@ export function recordPatches(inTree: string[], {keepAsRecorded = [], forget = [
   } catch (error: any) {
     // Запись — удобство, а не условие работы. Если node_modules только для
     // чтения, патчи всё равно на месте, и врать про сбой не надо.
+    console.log(`  ⚠️  could not write ${STATE_FILE}: ${error.message}`);
+  }
+}
+
+function recordOf(file: string, before: RecordedPatch | undefined, now: string): RecordedPatch | null {
+  let raw: Buffer;
+  try {
+    raw = readFileSync(join(patchesDirectory(), file));
+  } catch {
+    return null;
+  }
+
+  const parsed = parsePatchName(file);
+  const content = raw.toString('utf-8');
+  const sha256 = hashPatchFile(raw);
+  const bodySha256 = hashPatchBody(content);
+
+  return {
+    file,
+    packageDir: parsed?.packageDir ?? '',
+    version: parsed?.version ?? '',
+    sha256,
+    bodySha256,
+    files: filesLeftBy(content),
+    // Время первого попадания в дерево переживает правку заголовка: дерево от
+    // неё не изменилось, значит и «применён тогда-то» остаётся верным.
+    appliedAt: before !== undefined && sameChange(before, sha256, bodySha256) ? before.appliedAt : now,
+  };
+}
+
+// Записать один патч, не трогая остальных: так пишет `create`. Дерево после
+// него — ровно эталон плюс патч, то есть патч лёг, и без записи DEC-14 было
+// нечем доказать, что в дереве именно эта версия: правка файла патча до
+// первого `apply` молча клала вторую версию поверх (TSK-59). Пересчитывать
+// чужие записи здесь нельзя — среди них может быть улика отказа, которую
+// бережёт `keepAsRecorded`, а пересчёт по нынешнему файлу патча её стёр бы.
+export function recordPatch(file: string): void {
+  const previous = readState()?.patches ?? [];
+  const record = recordOf(file, previous.find(patch => patch.file === file), new Date().toISOString());
+  if (record === null) return;
+
+  try {
+    writeState([...previous.filter(patch => patch.file !== file), record]);
+  } catch (error: any) {
+    // Как и в recordPatches: запись — удобство, а не условие работы.
     console.log(`  ⚠️  could not write ${STATE_FILE}: ${error.message}`);
   }
 }

@@ -4109,6 +4109,47 @@ rename to node_modules/${PKG}/renamed.js
     expect(result.stdout).not.toContain('changed since it was applied');
     expect(result.stdout).not.toContain('⚠️');
   });
+
+  // Тот же класс, что выше, но без `apply` между созданием и правкой: записи
+  // не было вовсе, и DEC-14 доказывать было нечем. `bun install` клал вторую
+  // версию поверх первой с `✅ 1 applied`, `reverse` снимал только вторую
+  // (TSK-59). Дерево после `create` — ровно эталон плюс патч, и записать это
+  // `create` вправе так же, как `apply`.
+  test('refuses to stack an edited patch on the tree create left behind', () => {
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '// ONE\n');
+    expect(run('create is-number', TEST_DIR).exitCode).toBe(0);
+    const before = readFileSync(indexPath, 'utf-8');
+
+    const patchPath = join(TEST_DIR, 'patches', 'is-number+7.0.0.patch');
+    writeFileSync(patchPath, readFileSync(patchPath, 'utf-8').replace('+// ONE', '+// TWO'));
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain('changed since it was applied');
+    expect(readFileSync(indexPath, 'utf-8')).toBe(before);
+  });
+
+  // Записывая свой патч, `create` не пересчитывает чужие записи: среди них
+  // может быть улика отказа (`keepAsRecorded`) — пересчёт по текущему файлу
+  // патча стёр бы её, и следующий `apply` положил бы вторую версию поверх.
+  test('keeps the evidence of another refused patch while recording its own', () => {
+    setupApplied();
+    writePatch(patchAdding('FIX VERSION ONE'));
+    expect(run('apply', TEST_DIR).exitCode).toBe(1);
+
+    execSync('bun add is-number@7.0.0', {cwd: TEST_DIR, stdio: 'pipe'});
+    const indexPath = join(TEST_DIR, 'node_modules', 'is-number', 'index.js');
+    overwriteFile(indexPath, readFileSync(indexPath, 'utf-8') + '// other\n');
+    expect(run('create is-number', TEST_DIR).exitCode).toBe(0);
+
+    const result = run('apply', TEST_DIR);
+
+    expect(result.stdout).toContain(`node_modules/${PKG}/index.js is still the file that version left`);
+    expect(indexJs()).toBe('const a = 1;\n// FIX VERSION TWO\n');
+  });
 });
 
 // Пакет обновили, `create` назвал новый патч новой версией, а файл прежней
@@ -5930,8 +5971,10 @@ describe('renaming a patch into a sequence', () => {
   test('the record follows the file, so status does not call the patch missing', () => {
     singleThenAppend();
 
+    // `002+two` записал сам `create`: он лёг вместе с созданием (TSK-59).
     expect(state().patches.map((patch: {file: string}) => patch.file)).toEqual([
       'is-number+7.0.0+001+initial.patch',
+      'is-number+7.0.0+002+two.patch',
     ]);
 
     const shown = run('status', TEST_DIR);
@@ -5960,8 +6003,10 @@ describe('renaming a patch into a sequence', () => {
     overwriteFile(file(), `${readFileSync(file(), 'utf-8')}// TWO\n`);
     run('create is-number --append two', TEST_DIR);
 
+    // `002+two` записал сам `create`: он лёг вместе с созданием (TSK-59).
     expect(state().patches.map((patch: {file: string}) => patch.file)).toEqual([
       'is-number+7.0.0+001+initial.patch',
+      'is-number+7.0.0+002+two.patch',
     ]);
   });
 
