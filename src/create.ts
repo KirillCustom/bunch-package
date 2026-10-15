@@ -281,6 +281,7 @@ export function findLinkDifferences(clean: TreeScan, modified: TreeScan): LinkDi
 export interface DiffSection {
   relativePath: string;
   body: string[];
+  undecodable?: boolean; // в теле есть байты не в UTF-8 — переносить нельзя
 }
 
 // Путь из заголовка `---`/`+++` — то, что после префикса. GNU diff (3.10+)
@@ -339,7 +340,12 @@ export function parseDiagnosticPath(text: string): string {
 // Тело хунка мы переносим дословно, а заголовки собираем заново из путей. Это
 // принципиально: прежняя нормализация была заменой подстроки по всему тексту,
 // поэтому путь проекта, встретившийся внутри файла, молча портился.
-function splitDiffSections(diffOutput: string, cleanRoot: string, modifiedRoot: string): DiffSection[] {
+function splitDiffSections(
+  diffOutput: string,
+  cleanRoot: string,
+  modifiedRoot: string,
+  undecodable: Set<number> = new Set(),
+): DiffSection[] {
   const sections: DiffSection[] = [];
   let current: DiffSection | null = null;
   let oldLeft = 0;
@@ -352,17 +358,25 @@ function splitDiffSections(diffOutput: string, cleanRoot: string, modifiedRoot: 
     return null;
   };
 
-  for (const line of diffOutput.split('\n')) {
+  // Помечаем только строки тела и заголовков: строка `diff -Naur <путь>`
+  // стоит перед заголовками следующей секции, и её байты — не забота текущей.
+  const mark = (index: number): void => {
+    if (current !== null && undecodable.has(index)) current.undecodable = true;
+  };
+
+  for (const [index, line] of diffOutput.split('\n').entries()) {
     // `\ No newline at end of file` идёт после последней строки хунка, когда
     // счётчики уже исчерпаны, поэтому ловим его раньше проверки на тело.
     // Строка кода так начинаться не может: в теле у неё всегда есть префикс.
     if (line.startsWith('\\') && current !== null && current.body.length > 0) {
       current.body.push(line);
+      mark(index);
       continue;
     }
 
     if (oldLeft > 0 || newLeft > 0) {
       current?.body.push(line);
+      mark(index);
       if (line.startsWith('-')) oldLeft--;
       else if (line.startsWith('+')) newLeft--;
       else {
@@ -377,6 +391,7 @@ function splitDiffSections(diffOutput: string, cleanRoot: string, modifiedRoot: 
       oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
       newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
       current?.body.push(line);
+      mark(index);
       continue;
     }
 
@@ -387,6 +402,9 @@ function splitDiffSections(diffOutput: string, cleanRoot: string, modifiedRoot: 
         current = {relativePath, body: []};
         sections.push(current);
       }
+      // Второй замок: имя не в UTF-8 у переносимого файла сейчас роняет ещё
+      // scanTree (`ENOENT` на испорченном имени, Linux), до диффа не доходит.
+      mark(index);
     }
   }
 
@@ -816,6 +834,31 @@ export function runDiff(
   toleratedMissing: Set<string> = new Set(),
   maxBuffer: number = DIFF_MAX_BUFFER,
 ): string {
+  const rawBuffer = runDiffRaw(cleanPackagePath, packagePath, name, version, toleratedMissing, maxBuffer);
+
+  // Читать вывод как utf-8 без проверки нельзя: каждый неверный байт
+  // превращался в U+FFFD, патч уезжал испорченным, а apply молча записывал не
+  // те байты. Лучше отказаться вслух, чем тихо испортить файл. Декодер с
+  // fatal: true отвечает на этот вопрос тем же проходом, которым и декодирует,
+  // — без второй копии диффа размером до DIFF_MAX_BUFFER.
+  try {
+    return new TextDecoder('utf-8', {fatal: true}).decode(rawBuffer);
+  } catch {
+    throw new Error(
+      `The diff for ${name}@${version} is not valid UTF-8 — some changed file is binary ` +
+        `or in another encoding. Writing this patch would corrupt it.`,
+    );
+  }
+}
+
+function runDiffRaw(
+  cleanPackagePath: string,
+  packagePath: string,
+  name: string,
+  version: string,
+  toleratedMissing: Set<string>,
+  maxBuffer: number,
+): Buffer {
   // Без шелла: раньше это была строка, в которую подставлялся process.cwd(),
   // и `|| true` превращал любой сбой diff в успокаивающее «нет изменений».
   const diffArgs = [
@@ -854,19 +897,49 @@ export function runDiff(
     rawBuffer = error.stdout ?? Buffer.alloc(0);
   }
 
-  // Читать вывод как utf-8 без проверки нельзя: каждый неверный байт
-  // превращался в U+FFFD, патч уезжал испорченным, а apply молча записывал не
-  // те байты. Лучше отказаться вслух, чем тихо испортить файл. Декодер с
-  // fatal: true отвечает на этот вопрос тем же проходом, которым и декодирует,
-  // — без второй копии диффа размером до DIFF_MAX_BUFFER.
+  return rawBuffer;
+}
+
+// Вывод diff, прочитанный построчно. Проверять кодировку всего вывода разом
+// нельзя: в нём лежат и секции, которые патч не понесёт, — артефакты сборки,
+// отсеянное --include/--exclude. Gradle оставляет в android/build файлы без
+// нулевых байтов и не в UTF-8, diff печатает их как текст, и `create` отказывал
+// человеку, правившему два файла в ios/. Резать по 0x0A безопасно: в
+// многобайтовой последовательности UTF-8 этот байт не встречается.
+interface DecodedDiff {
+  text: string;
+  undecodable: Set<number>; // номера строк, где байты не UTF-8
+}
+
+function decodeDiffLines(raw: Buffer): DecodedDiff {
+  const strict = new TextDecoder('utf-8', {fatal: true});
+  const lenient = new TextDecoder('utf-8');
+
+  // Обычный случай — весь вывод в UTF-8: один проход, без копии по строкам.
   try {
-    return new TextDecoder('utf-8', {fatal: true}).decode(rawBuffer);
+    return {text: strict.decode(raw), undecodable: new Set()};
   } catch {
-    throw new Error(
-      `The diff for ${name}@${version} is not valid UTF-8 — some changed file is binary ` +
-        `or in another encoding. Writing this patch would corrupt it.`,
-    );
+    // Ищем, какие именно строки виноваты.
   }
+
+  const lines: string[] = [];
+  const undecodable = new Set<number>();
+  let start = 0;
+  while (true) {
+    const end = raw.indexOf(0x0a, start);
+    const bytes = raw.subarray(start, end === -1 ? raw.length : end);
+    try {
+      lines.push(strict.decode(bytes));
+    } catch {
+      // Замена на U+FFFD безопасна только потому, что секция с такой строкой
+      // в патч не попадёт: на переносимой diffTrees откажет.
+      undecodable.add(lines.length);
+      lines.push(lenient.decode(bytes));
+    }
+    if (end === -1) break;
+    start = end + 1;
+  }
+  return {text: lines.join('\n'), undecodable};
 }
 
 // Все три отчёта ниже устроены одинаково: заголовок, первые пять строк и
@@ -1124,9 +1197,12 @@ export function diffTrees(
       ),
   );
 
-  const rawPatch = runDiff(cleanRoot, modifiedRoot, name, version, missingLinkPaths);
+  const decoded = decodeDiffLines(
+    runDiffRaw(cleanRoot, modifiedRoot, name, version, missingLinkPaths, DIFF_MAX_BUFFER),
+  );
+  const rawPatch = decoded.text;
   const sections = mergeByPath(
-    splitDiffSections(rawPatch, cleanRoot, modifiedRoot),
+    splitDiffSections(rawPatch, cleanRoot, modifiedRoot, decoded.undecodable),
     emptyFileSections(cleanRoot, modifiedRoot, cleanTree, modifiedTree),
   );
   const kept: DiffSection[] = [];
@@ -1137,6 +1213,14 @@ export function diffTrees(
     if (isBuildArtifact(section.relativePath)) skipped.push(section);
     else if (!pathAllowed(section.relativePath, filters)) filtered.push(section);
     else kept.push(section);
+  }
+
+  const corrupt = kept.filter(section => section.undecodable).map(section => section.relativePath);
+  if (corrupt.length > 0) {
+    throw new Error(
+      `The diff for ${name}@${version} is not valid UTF-8 in ${corrupt.join(', ')} — binary ` +
+        `or in another encoding. Writing this patch would corrupt it; leave the file out with --exclude.`,
+    );
   }
 
   const modeOnly = findModeOnlyChanges(
