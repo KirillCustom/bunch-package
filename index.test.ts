@@ -1453,6 +1453,18 @@ describe('empty files a patch has to carry', () => {
     expect(diff.skipped.map(section => section.relativePath)).toEqual(['android/build/state.bin']);
   });
 
+  // Файл `x<0xE9><ext>` — имя с байтом не в UTF-8. Создан, только если ФС
+  // сохранила сам байт: APFS такое имя отвергает, а Windows (UTF-16) кладёт на
+  // его место настоящий U+FFFD — это законное имя, и сценария там нет.
+  function writeByteName(dir: string, ext: string, content: string): boolean {
+    try {
+      writeFileSync(Buffer.concat([Buffer.from(`${dir}/x`), Buffer.from([0xe9]), Buffer.from(ext)]), content);
+    } catch {
+      return false;
+    }
+    return !existsSync(join(dir, `x\uFFFD${ext}`)) && readdirSync(dir).some(entry => entry.startsWith('x'));
+  }
+
   // Имя файла не в UTF-8 стоит ещё и в строке `diff -Naur <путь>`, а она идёт
   // перед заголовками своей секции — то есть после тела предыдущей. Помечай мы
   // любую строку, отказ достался бы правке в index.js. APFS таких имён не
@@ -1461,13 +1473,7 @@ describe('empty files a patch has to carry', () => {
     const {clean, modified} = trees();
     const dir = join(modified, 'android', 'build');
     mkdirSync(dir, {recursive: true});
-    const name = Buffer.concat([Buffer.from(`${dir}/x`), Buffer.from([0xe9]), Buffer.from('.bin')]);
-    try {
-      writeFileSync(name, 'artifact\n');
-    } catch {
-      return; // ФС требует имён в UTF-8 — сценарий здесь невозможен
-    }
-    if (readdirSync(dir).length === 0) return;
+    if (!writeByteName(dir, '.bin', 'artifact\n')) return;
     writeFileSync(join(modified, 'a.js'), 'const b = 1;\n');
 
     const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
@@ -1481,12 +1487,7 @@ describe('empty files a patch has to carry', () => {
   // падал `ENOENT` — стек вместо причины (TSK-61).
   test('refuses a carried file whose name is not UTF-8, naming why', () => {
     const {clean, modified} = trees();
-    const name = Buffer.concat([Buffer.from(`${modified}/x`), Buffer.from([0xe9]), Buffer.from('.js')]);
-    try {
-      writeFileSync(name, 'const c = 1;\n');
-    } catch {
-      return; // ФС требует имён в UTF-8 — сценарий здесь невозможен
-    }
+    if (!writeByteName(modified, '.js', 'const c = 1;\n')) return;
 
     expect(() => diffTrees(clean, modified, 'e', 'e', '1.0.0')).toThrow('not valid UTF-8');
   });
@@ -1496,12 +1497,7 @@ describe('empty files a patch has to carry', () => {
   test('ignores an unchanged file whose name is not UTF-8', () => {
     const {clean, modified} = trees();
     for (const root of [clean, modified]) {
-      const name = Buffer.concat([Buffer.from(`${root}/x`), Buffer.from([0xe9]), Buffer.from('.js')]);
-      try {
-        writeFileSync(name, 'const c = 1;\n');
-      } catch {
-        return; // ФС требует имён в UTF-8 — сценарий здесь невозможен
-      }
+      if (!writeByteName(root, '.js', 'const c = 1;\n')) return;
     }
     writeFileSync(join(modified, 'index.js'), 'const a = 2;\n');
 
@@ -1509,6 +1505,22 @@ describe('empty files a patch has to carry', () => {
 
     expect(diff.content).toContain('+const a = 2;');
     expect(diff.kept.map(section => section.relativePath)).toEqual(['index.js']);
+  });
+
+  // Настоящий U+FFFD в имени — законное имя, и файл с ним переносится. Его
+  // scanTree отличает от испорченного тем, что файл по такому пути есть;
+  // Windows кладёт такое имя на место байта не в UTF-8, отсюда и проверка.
+  test('carries a file whose name really contains U+FFFD', () => {
+    const {clean, modified} = trees();
+    writeFileSync(join(modified, 'x\uFFFD.js'), 'const c = 1;\n');
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.kept.map(section => section.relativePath)).toEqual(['x\uFFFD.js']);
+    // Режим нового файла берётся из обхода деревьев, не из diff: пропусти
+    // scanTree законное имя — секция осталась бы без `new file mode`.
+    expect(diff.content).toContain('new file mode 100644');
+    expect(diff.content).toContain('+const c = 1;');
   });
 
   // Отказ на файле, который патч понёс бы, остаётся — но называет файл: без
