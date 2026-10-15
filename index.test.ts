@@ -3945,6 +3945,62 @@ describe('a patch file that changed after it was applied', () => {
     expect(indexJs()).toBe('const a = 1;\n// FIX VERSION TWO\n');
   });
 
+  // `reverse` видел, что нынешнего патча в дереве нет, печатал «was not in the
+  // tree» и `1 of 1 un-applied` — и стирал запись вместе с уликой. Следующий
+  // `apply` уже ничего не знал и клал новую версию поверх прежней (TSK-60).
+  test('reverse names the previous version and keeps the evidence for apply', () => {
+    setupApplied();
+    writePatch(patchAdding('FIX VERSION ONE'));
+
+    const reversed = run('reverse', TEST_DIR);
+
+    expect(reversed.exitCode).toBe(1);
+    expect(reversed.stdout).toContain(`node_modules/${PKG}/index.js is still the file that version left`);
+    expect(reversed.stdout).not.toContain('was not in the tree');
+
+    const applied = run('apply', TEST_DIR);
+
+    expect(applied.exitCode).toBe(1);
+    expect(indexJs()).toBe('const a = 1;\n// FIX VERSION TWO\n');
+  });
+
+  // Патч, которого нет в дереве, — не «снят». `1 of 1 un-applied` читался как
+  // «дерево чистое», когда reverse не сделал ничего.
+  test('reverse does not count a patch that was not in the tree as un-applied', () => {
+    setupFakePackage(TEST_DIR, PKG, '1.0.0', {'index.js': 'const a = 1;\n'});
+    mkdirSync(join(TEST_DIR, 'patches'), {recursive: true});
+    writePatch(patchAdding('NEVER APPLIED'));
+
+    const result = run('reverse', TEST_DIR);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('0 of 1 un-applied, 1 not in the tree');
+  });
+
+  // Сводка уходит последней строкой, и при выводе, обрезанном `tail`, отказ
+  // оставался без имени — на него подумали про соседний патч с `⚠️`.
+  test('apply names the failed patches in its summary', () => {
+    setupApplied();
+    writePatch(patchAdding('FIX VERSION ONE'));
+
+    const result = run('apply', TEST_DIR);
+
+    const summary = result.stdout.slice(result.stdout.indexOf('📊 Summary'));
+    expect(summary).toContain(`❌ ${NAME}`);
+  });
+
+  test('rebase stops at the previous version as well', () => {
+    setupApplied();
+    writePatch(patchAdding('FIX VERSION ONE'));
+
+    const result = run(`rebase ${PKG} 0`, TEST_DIR);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain(`node_modules/${PKG}/index.js is still the file that version left`);
+    expect(run('apply', TEST_DIR).exitCode).toBe(1);
+    expect(indexJs()).toBe('const a = 1;\n// FIX VERSION TWO\n');
+  });
+
   test('refuses on every run, not only the first', () => {
     setupApplied();
     writePatch(patchAdding('FIX VERSION ONE'));

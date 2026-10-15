@@ -8,6 +8,7 @@ import {installedPackagePath, patchesDirectory} from './paths';
 import {PlannedOp, executeOps, planTarget, splitContent} from './plan';
 import {outsideProjectReason, packagesOutsideProject, patchTargetDirectory, presenceOf, readTargets} from './presence';
 import {recordPatches, recordedPatches} from './state';
+import {packageDirsOf, staleNote, staleRecord} from './apply';
 import {readManifest, validatePackageName} from './create';
 
 // Патчи одного пакета — как коммиты: чтобы переделать не последний, надо сперва
@@ -94,7 +95,7 @@ export function rebasePatches(packageName: string, target: string): void {
 
   console.log(`🔧 Rebasing ${dirName} onto ${keep === 0 ? 'nothing' : mine[keep - 1]}...`);
 
-  const removed = withApplyLock(lockFile(), () => unApply(undo));
+  const {passed: removed} = withApplyLock(lockFile(), () => unApply(undo));
 
   if (removed < undo.length) {
     // Часть патчей снять не удалось. Те, что выше сорвавшегося, уже сняты, сам
@@ -164,12 +165,21 @@ export function reverseAll(): void {
 
   // Сверху вниз: патчи последовательности лежат друг на друге.
   const undo = [...all].reverse();
-  const removed = withApplyLock(lockFile(), () => unApply(undo));
+  const {passed: removed, absent} = withApplyLock(lockFile(), () => unApply(undo));
 
-  recordPatches([...recordedPatches().keys()].filter(file => !undo.slice(0, removed).includes(file)));
+  // Не дошедшие патчи — среди них и тот, на котором остановились, — пишутся
+  // дословно, а не пересчитываются: остановка бывает из-за прежней версии
+  // патча в дереве, и пересчёт по нынешнему файлу стёр бы улику DEC-14. Тогда
+  // следующий `apply` молча клал новую версию поверх прежней (TSK-60).
+  recordPatches(
+    [...recordedPatches().keys()].filter(file => !undo.includes(file)),
+    {keepAsRecorded: undo.slice(removed)},
+  );
 
+  // Патч, которого и так не было в дереве, — не «снят»: при `1 of 1
+  // un-applied` человек считал дерево чистым, а в нём лежала прежняя версия.
   console.log('');
-  console.log(`📊 ${removed} of ${undo.length} un-applied`);
+  console.log(`📊 ${removed - absent} of ${undo.length} un-applied${absent > 0 ? `, ${absent} not in the tree` : ''}`);
 
   if (removed < undo.length) {
     console.log(`⚠️  Stopped at ${undo[removed]}; it and everything under it are untouched.`);
@@ -206,8 +216,12 @@ function resolveTarget(mine: string[], target: string, packageName: string): num
   return index + 1; // сколько патчей остаётся лежать
 }
 
-function unApply(files: string[]): number {
+// `passed` — сколько патчей пройдено сверху, это и граница остановки; `absent`
+// — сколько из них и так не лежало в дереве.
+function unApply(files: string[]): {passed: number; absent: number} {
   let removed = 0;
+  let absent = 0;
+  const recorded = recordedPatches();
 
   for (const file of files) {
     const targets = readTargets(file);
@@ -254,8 +268,21 @@ function unApply(files: string[]): number {
     }
 
     if (presence.kind === 'not-in-tree') {
+      // Не лежит именно этот файл патча, а прежняя его версия — может лежать:
+      // запись это знает, и `apply` по ней отказывает. Промолчи `reverse` —
+      // человек сочтёт дерево чистым, а пройти дальше вниз нельзя: под
+      // прежней версией патчи последовательности лежат не так, как описаны.
+      const stale = staleRecord(recorded.get(file), file);
+      if (stale !== null && stale.witness !== null) {
+        console.log(`  ❌ ${file}`);
+        console.log(`     ${staleNote(stale, packageDirsOf(targets), false)}`);
+        break;
+      }
+
       console.log(`  ➖ ${file} (was not in the tree)`);
+      if (stale !== null) console.log(`     ${staleNote(stale, packageDirsOf(targets), false)}`);
       removed++;
+      absent++;
       continue;
     }
 
@@ -290,7 +317,7 @@ function unApply(files: string[]): number {
     removed++;
   }
 
-  return removed;
+  return {passed: removed, absent};
 }
 
 // Проверка себя: применив исходный патч к тому, что мы собираемся записать,
