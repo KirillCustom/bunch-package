@@ -2,7 +2,7 @@ import {describe, test, expect, beforeEach, afterEach, setDefaultTimeout} from '
 import {execSync, spawn, spawnSync} from 'child_process';
 import {createHash} from 'crypto';
 import {chmodSync, copyFileSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync, rmSync, unlinkSync} from 'fs';
-import {diffTrees, findLinkDifferences, runDiff, scanTree, withPristine} from './src/create';
+import {diffTrees, findLinkDifferences, parseDiagnosticPath, parseHeaderPath, runDiff, scanTree, withPristine} from './src/create';
 import {parseOptions} from './src/options';
 import {parseRepository} from './src/upstream';
 import {withApplyLock} from './src/lock';
@@ -1355,6 +1355,68 @@ describe('what create says about files it cannot carry', () => {
 
     expect(result.stdout).toContain('logo.png');
     expect(result.stdout).toContain('--binary');
+  });
+});
+
+// GNU diff 3.10+ кавычит имена с пробелом, `"`, табуляцией (а при LC_ALL=C — и
+// не-ASCII), Apple — нет. Не узнав путь в кавычках, разбор клеил хунк нового
+// файла к предыдущей секции, а при пробеле в пути проекта терял всё (TSK-62).
+// Сценарии ниже красные только с GNU diff — на macOS их гонять с diffutils.
+describe('file names diff puts in quotes', () => {
+  function trees(root: string): {clean: string; modified: string} {
+    const clean = join(root, 'clean');
+    const modified = join(root, 'modified');
+    for (const dir of [clean, modified]) {
+      mkdirSync(dir, {recursive: true});
+      writeFileSync(join(dir, 'f.js'), 'const a = 1;\n');
+    }
+    writeFileSync(join(modified, 'f.js'), 'const a = 2;\n');
+    return {clean, modified};
+  }
+
+  test('reads C-quoted, octal and Apple-style header paths', () => {
+    expect(parseHeaderPath('"b/sp ace.js"\t2026-10-15 14:24:11 +0300')).toBe('b/sp ace.js');
+    expect(parseHeaderPath('"b/\\321\\204.js"\t2026-10-15')).toBe('b/ф.js');
+    expect(parseHeaderPath('"b/q\\"u\\\\o.js"\t2026-10-15')).toBe('b/q"u\\o.js');
+    // Apple кладёт табуляцию из имени как есть: время — после последней.
+    expect(parseHeaderPath('b/t\tab.js\t2026-10-15 14:24:11')).toBe('b/t\tab.js');
+    expect(parseHeaderPath('b/f.js\t2026-10-15 14:24:11')).toBe('b/f.js');
+  });
+
+  test('reads shell-quoted paths in diagnostics', () => {
+    expect(parseDiagnosticPath("'/x y/link'")).toBe('/x y/link');
+    expect(parseDiagnosticPath("'/x y/it'\\''s'")).toBe("/x y/it's");
+    expect(parseDiagnosticPath('/plain/link')).toBe('/plain/link');
+  });
+
+  test('keeps a new file with a space in its name in its own section', () => {
+    const {clean, modified} = trees(TEST_DIR);
+    writeFileSync(join(modified, 'sp ace.js'), 'const z = 1;\n');
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.kept.map(section => section.relativePath)).toEqual(['f.js', 'sp ace.js']);
+    const own = diff.content.split('diff --git ').find(section => section.startsWith('a/node_modules/e/f.js'));
+    expect(own).not.toContain('const z');
+  });
+
+  test('sees changes when the project path has a space in it', () => {
+    const {clean, modified} = trees(join(TEST_DIR, 'my project'));
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.content).toContain('+const a = 2;');
+  });
+
+  // Добавленный симлинк GNU диагностирует кодом 2 и путём в одинарных
+  // кавычках, если в нём пробел, — терпимость к такому отказу не узнавала путь.
+  test.skipIf(isWindows)('tolerates an added link when the project path has a space in it', () => {
+    const {clean, modified} = trees(join(TEST_DIR, 'my project'));
+    symlinkSync('nowhere', join(modified, 'link'));
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.content).toContain('+const a = 2;');
   });
 });
 
