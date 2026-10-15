@@ -292,23 +292,36 @@ export interface DiffSection {
 // нового файла молча дописывался в секцию предыдущего, а при пробеле в пути
 // проекта `create` отвечал «No changes detected» (TSK-62).
 export function parseHeaderPath(rest: string): string {
+  return readHeaderPath(rest).path;
+}
+
+// `utf8: false` — имя в кавычках раскодировалось в байты не UTF-8. Строка
+// заголовка при этом чистый ASCII (`"x\351.bin"`), и построчная проверка
+// вывода такого имени не видит: её надо задать здесь.
+function readHeaderPath(rest: string): {path: string; utf8: boolean} {
   if (rest.startsWith('"')) {
-    const unquoted = unquoteC(rest);
-    if (unquoted !== null) return unquoted;
+    const bytes = unquoteC(rest);
+    if (bytes !== null) {
+      try {
+        return {path: new TextDecoder('utf-8', {fatal: true}).decode(bytes), utf8: true};
+      } catch {
+        return {path: bytes.toString('utf-8'), utf8: false};
+      }
+    }
   }
   const tab = rest.lastIndexOf('\t');
-  return tab === -1 ? rest : rest.slice(0, tab);
+  return {path: tab === -1 ? rest : rest.slice(0, tab), utf8: true};
 }
 
 const C_ESCAPES: Record<string, number> = {a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '"': 34, '\\': 92};
 
 // Строка в C-кавычках от начала до закрывающей кавычки. Восьмеричные коды —
 // это байты имени, а не символы, поэтому собираем байты и декодируем разом.
-function unquoteC(text: string): string | null {
+function unquoteC(text: string): Buffer | null {
   const bytes: number[] = [];
   for (let i = 1; i < text.length; i++) {
     const char = text[i];
-    if (char === '"') return Buffer.from(bytes).toString('utf-8');
+    if (char === '"') return Buffer.from(bytes);
     if (char !== '\\') {
       bytes.push(...Buffer.from(char, 'utf-8'));
       continue;
@@ -397,14 +410,18 @@ function splitDiffSections(
 
     const header = line.match(/^(?:---|\+\+\+) (.+)$/);
     if (header) {
-      const relativePath = relativize(parseHeaderPath(header[1]));
+      const headerPath = readHeaderPath(header[1]);
+      const relativePath = relativize(headerPath.path);
       if (relativePath !== null && (current === null || current.relativePath !== relativePath)) {
         current = {relativePath, body: []};
         sections.push(current);
       }
       // Второй замок: имя не в UTF-8 у переносимого файла сейчас роняет ещё
-      // scanTree (`ENOENT` на испорченном имени, Linux), до диффа не доходит.
+      // scanTree (`ENOENT` на испорченном имени, Linux), до диффа не доходит
+      // (TSK-61). Apple и GNU до 3.10 кладут байты имени как есть, GNU 3.10+ —
+      // восьмеричными кодами в кавычках, отсюда две проверки.
       mark(index);
+      if (!headerPath.utf8 && current !== null) current.undecodable = true;
     }
   }
 
