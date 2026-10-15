@@ -1358,8 +1358,8 @@ describe('what create says about files it cannot carry', () => {
   });
 });
 
-// GNU diff 3.10+ кавычит имена с пробелом, `"`, табуляцией (а при LC_ALL=C — и
-// не-ASCII), Apple — нет. Не узнав путь в кавычках, разбор клеил хунк нового
+// GNU diff кавычит имена с пробелом, `"`, табуляцией, а не-ASCII — в
+// зависимости от версии и локали; Apple не кавычит вовсе. Не узнав путь в кавычках, разбор клеил хунк нового
 // файла к предыдущей секции, а при пробеле в пути проекта терял всё (TSK-62).
 // Сценарии ниже красные только с GNU diff — на macOS их гонять с diffutils.
 describe('file names diff puts in quotes', () => {
@@ -1474,6 +1474,41 @@ describe('empty files a patch has to carry', () => {
 
     expect(diff.content).toContain('+const b = 1;');
     expect(diff.skipped).toHaveLength(1);
+  });
+
+  // Имя не в UTF-8 у файла, который патч понёс бы. Раньше до диффа не
+  // доходило: scanTree читал имя строкой, байт становился U+FFFD, и statSync
+  // падал `ENOENT` — стек вместо причины (TSK-61).
+  test('refuses a carried file whose name is not UTF-8, naming why', () => {
+    const {clean, modified} = trees();
+    const name = Buffer.concat([Buffer.from(`${modified}/x`), Buffer.from([0xe9]), Buffer.from('.js')]);
+    try {
+      writeFileSync(name, 'const c = 1;\n');
+    } catch {
+      return; // ФС требует имён в UTF-8 — сценарий здесь невозможен
+    }
+
+    expect(() => diffTrees(clean, modified, 'e', 'e', '1.0.0')).toThrow('not valid UTF-8');
+  });
+
+  // Такой файл, лежащий в пакете одинаково с обеих сторон, патчу не мешает:
+  // отказ — за перенос, а не за само присутствие.
+  test('ignores an unchanged file whose name is not UTF-8', () => {
+    const {clean, modified} = trees();
+    for (const root of [clean, modified]) {
+      const name = Buffer.concat([Buffer.from(`${root}/x`), Buffer.from([0xe9]), Buffer.from('.js')]);
+      try {
+        writeFileSync(name, 'const c = 1;\n');
+      } catch {
+        return; // ФС требует имён в UTF-8 — сценарий здесь невозможен
+      }
+    }
+    writeFileSync(join(modified, 'index.js'), 'const a = 2;\n');
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.content).toContain('+const a = 2;');
+    expect(diff.kept.map(section => section.relativePath)).toEqual(['index.js']);
   });
 
   // Отказ на файле, который патч понёс бы, остаётся — но называет файл: без
