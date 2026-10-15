@@ -41,7 +41,7 @@ export function applyPatches(errorOnWarn = false): void {
 // Каталоги пакетов, которых касается патч. Спрашивают двое: сверка версии — у
 // всех сразу, отказ по устаревшей записи — у первого, чтобы назвать в совете
 // то, что переустанавливать.
-function packageDirsOf(targets: PatchTarget[]): string[] {
+export function packageDirsOf(targets: PatchTarget[]): string[] {
   return [
     ...new Set(
       targets
@@ -131,9 +131,9 @@ function absolutePathIn(targets: PatchTarget[]): string | undefined {
 // это уже утверждение о дереве, а не о записи ([[DEC-11]]). Его нет — значит
 // дерево трогали или пакет переустановили: тогда говорим вслух, но не отказываем,
 // потому что отказ здесь встал бы поперёк обычной работы.
-type StaleRecord = {appliedAt: string; witness: string | null};
+export type StaleRecord = {appliedAt: string; witness: string | null};
 
-function staleRecord(record: RecordedPatch | undefined, patchFile: string): StaleRecord | null {
+export function staleRecord(record: RecordedPatch | undefined, patchFile: string): StaleRecord | null {
   if (record === undefined) return null;
 
   let raw: Buffer;
@@ -154,7 +154,7 @@ function staleRecord(record: RecordedPatch | undefined, patchFile: string): Stal
 // `mixes` отличает отказ «класть поверх прежнего не будем» от объяснения, зачем
 // это сказано при патче, который и так не лёг: во втором случае ничего не
 // смешалось бы, и обещать это было бы неправдой.
-function staleNote(stale: StaleRecord, packageDirs: string[], mixes: boolean): string {
+export function staleNote(stale: StaleRecord, packageDirs: string[], mixes: boolean): string {
   const changed = `the patch file changed since it was applied on ${stale.appliedAt}`;
 
   if (stale.witness === null) {
@@ -177,6 +177,10 @@ function staleNote(stale: StaleRecord, packageDirs: string[], mixes: boolean): s
 
 function applyAll(patchFiles: string[]): {failed: number; warned: number} {
   let failed = 0;
+  // Имена — для сводки: строка `1 failed` уходит последней, и при выводе,
+  // обрезанном `tail`, отказ остаётся без имени. Так человек принял за
+  // провалившийся соседний патч с предупреждением о версии.
+  const failedFiles: string[] = [];
   let warned = 0;
 
   // Патчи, оказавшиеся в дереве по итогам прогона: и легшие сейчас, и уже
@@ -194,6 +198,7 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
   for (const patchFile of patchFiles) {
     const fail = (reason: string) => {
       failed++;
+      failedFiles.push(patchFile);
       console.log(`  ❌ ${patchFile}`);
       console.log(`     ${reason}`);
     };
@@ -321,6 +326,7 @@ function applyAll(patchFiles: string[]): {failed: number; warned: number} {
   recordPatches(inTree, {keepAsRecorded: keepRecord});
 
   console.log(`\n📊 Summary: ${inTree.length} applied, ${failed} failed`);
+  for (const file of failedFiles) console.log(`   ❌ ${file}`);
 
   return {failed, warned};
 }
