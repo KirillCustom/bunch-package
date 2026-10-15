@@ -585,6 +585,7 @@ dependency: the project has no runtime dependencies beyond `diff` on PATH for
 --dev                              Mark a new patch as needed only in development
 --why <text>                       Why the patch exists, kept in the patch file
 --upstream <url>                   Where it was reported upstream, kept with it
+--version, -v                      Print the installed version
 ```
 
 `--patch-dir` applies to every command, and the directory has to be inside the
