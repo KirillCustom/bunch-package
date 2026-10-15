@@ -283,6 +283,56 @@ export interface DiffSection {
   body: string[];
 }
 
+// Путь из заголовка `---`/`+++` — то, что после префикса. GNU diff (3.10+)
+// берёт в C-кавычки имя с пробелом, `"`, табуляцией, а при LC_ALL=C — и всё
+// не-ASCII восьмеричными кодами: `"b/sp ace.js"`, `"b/\321\204.js"`. Apple не
+// кавычит вовсе и кладёт табуляцию из имени как есть, поэтому время отделяем
+// по последней табуляции. Не разбирай мы кавычки, путь не узнавался: хунк
+// нового файла молча дописывался в секцию предыдущего, а при пробеле в пути
+// проекта `create` отвечал «No changes detected» (TSK-62).
+export function parseHeaderPath(rest: string): string {
+  if (rest.startsWith('"')) {
+    const unquoted = unquoteC(rest);
+    if (unquoted !== null) return unquoted;
+  }
+  const tab = rest.lastIndexOf('\t');
+  return tab === -1 ? rest : rest.slice(0, tab);
+}
+
+const C_ESCAPES: Record<string, number> = {a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '"': 34, '\\': 92};
+
+// Строка в C-кавычках от начала до закрывающей кавычки. Восьмеричные коды —
+// это байты имени, а не символы, поэтому собираем байты и декодируем разом.
+function unquoteC(text: string): string | null {
+  const bytes: number[] = [];
+  for (let i = 1; i < text.length; i++) {
+    const char = text[i];
+    if (char === '"') return Buffer.from(bytes).toString('utf-8');
+    if (char !== '\\') {
+      bytes.push(...Buffer.from(char, 'utf-8'));
+      continue;
+    }
+    const next = text[++i];
+    const octal = text.slice(i).match(/^[0-7]{1,3}/);
+    if (octal) {
+      bytes.push(parseInt(octal[0], 8));
+      i += octal[0].length - 1;
+    } else if (next !== undefined && next in C_ESCAPES) {
+      bytes.push(C_ESCAPES[next]);
+    } else {
+      return null;
+    }
+  }
+  return null;
+}
+
+// В диагностике GNU кавычит иначе — по-шелльному: `diff: '/x y/ln': No such
+// file or directory`, а одиночную кавычку в имени пишет как `'\''`.
+export function parseDiagnosticPath(text: string): string {
+  if (!text.startsWith("'") || !text.endsWith("'") || text.length < 2) return text;
+  return text.slice(1, -1).split("'\\''").join("'");
+}
+
 // Секции режем по заголовкам, а не по строке с командой diff, и идём с учётом
 // границ хунков — строка кода `--- /foo` внутри тела не должна сойти за заголовок.
 //
@@ -330,9 +380,9 @@ function splitDiffSections(diffOutput: string, cleanRoot: string, modifiedRoot: 
       continue;
     }
 
-    const header = line.match(/^(?:---|\+\+\+) ([^\t]+)/);
+    const header = line.match(/^(?:---|\+\+\+) (.+)$/);
     if (header) {
-      const relativePath = relativize(header[1]);
+      const relativePath = relativize(parseHeaderPath(header[1]));
       if (relativePath !== null && (current === null || current.relativePath !== relativePath)) {
         current = {relativePath, body: []};
         sections.push(current);
@@ -709,7 +759,7 @@ function onlyMissingLinks(stderr: string, tolerated: Set<string>): boolean {
 
   return lines.every(line => {
     const match = line.match(/^diff: (.+): No such file or directory$/);
-    return match !== null && tolerated.has(match[1]);
+    return match !== null && tolerated.has(parseDiagnosticPath(match[1]));
   });
 }
 
