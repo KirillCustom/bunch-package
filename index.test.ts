@@ -1436,6 +1436,56 @@ describe('empty files a patch has to carry', () => {
     return {clean, modified};
   }
 
+  // Gradle оставляет в android/build файлы без нулевых байтов и не в UTF-8:
+  // diff печатает их как текст. Проверка кодировки шла по всему выводу раньше,
+  // чем отсеивались артефакты, и `create` отказывал человеку, правившему два
+  // файла в ios/ (@nfsmonstr/react-native-splash-screen@4.1.1).
+  test('does not refuse over undecodable bytes in a build artifact it skips anyway', () => {
+    const {clean, modified} = trees();
+    mkdirSync(join(modified, 'android', 'build'), {recursive: true});
+    writeFileSync(join(modified, 'android', 'build', 'state.bin'), Buffer.from([0x41, 0xe9, 0xff, 0x0a]));
+    writeFileSync(join(modified, 'index.js'), 'const a = 2;\n');
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.content).toContain('+const a = 2;');
+    expect(diff.content).not.toContain('state.bin');
+    expect(diff.skipped.map(section => section.relativePath)).toEqual(['android/build/state.bin']);
+  });
+
+  // Имя файла не в UTF-8 стоит ещё и в строке `diff -Naur <путь>`, а она идёт
+  // перед заголовками своей секции — то есть после тела предыдущей. Помечай мы
+  // любую строку, отказ достался бы правке в index.js. APFS таких имён не
+  // принимает, поэтому только там, где ФС их хранит.
+  test('blames the artifact, not the section before it, for an undecodable file name', () => {
+    const {clean, modified} = trees();
+    const dir = join(modified, 'android', 'build');
+    mkdirSync(dir, {recursive: true});
+    const name = Buffer.concat([Buffer.from(`${dir}/x`), Buffer.from([0xe9]), Buffer.from('.bin')]);
+    try {
+      writeFileSync(name, 'artifact\n');
+    } catch {
+      return; // ФС требует имён в UTF-8 — сценарий здесь невозможен
+    }
+    if (readdirSync(dir).length === 0) return;
+    writeFileSync(join(modified, 'a.js'), 'const b = 1;\n');
+
+    const diff = diffTrees(clean, modified, 'e', 'e', '1.0.0');
+
+    expect(diff.content).toContain('+const b = 1;');
+    expect(diff.skipped).toHaveLength(1);
+  });
+
+  // Отказ на файле, который патч понёс бы, остаётся — но называет файл: без
+  // имени человек ищет причину в своих правках.
+  test('names the file whose bytes are not UTF-8', () => {
+    const {clean, modified} = trees();
+    writeFileSync(join(modified, 'latin.js'), Buffer.from([0x2f, 0x2f, 0x20, 0xe9, 0x0a]));
+    writeFileSync(join(modified, 'index.js'), 'const a = 2;\n');
+
+    expect(() => diffTrees(clean, modified, 'e', 'e', '1.0.0')).toThrow(/not valid UTF-8.*latin\.js/);
+  });
+
   test('carries an added empty file as a section git itself understands', () => {
     const {clean, modified} = trees();
     writeFileSync(join(modified, '.keep'), '');
